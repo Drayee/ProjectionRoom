@@ -18,11 +18,13 @@ npm-debug.log*
 pnpm-debug.log*
 
 # ---- 媒体与分片产物（体积大，不入库）----
+# 注意：这里绝不能写裸的 *.ts —— 那是 MPEG-TS 视频的扩展名，
+# 但也会把整个 TypeScript 源码层一起忽略掉（曾经真的漏提交过）。
 /room-media/
 *.m4s
 *_frag.mp4
 *.mpd
-*.ts
+/room-media/**/*.ts
 
 # ---- 编辑器 / IDE ----
 .idea/
@@ -33,3 +35,4 @@ pnpm-debug.log*
 # ---- 本地配置与日志 ----
 *.local.toml
 *.log
+
