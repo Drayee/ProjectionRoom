@@ -60,6 +60,7 @@
 | C10 | 纯树中慢父节点**必然**拖死整棵子树 | 声称树状分发即可 | 多父条带化 + 分片级转投（§6.4）——直接回应你的拓扑要求 |
 | C11 | 浏览器**读不到**自己的上行带宽，自报值不可信 | 用理论值/自报值做容量计算 | 只用可测量值：`getStats().availableOutgoingBitrate` + 子节点上报的实测交付吞吐，取较小值（§6.2、§6.3） |
 | C12 | 单链模式下分发节点是**单点故障**，它掉线即全房间断流 | 未提及 | 实测选举 + 平滑换防 + 失效接任（§6.3） |
+| C13 | 主播重新加载页面后 `performance.now()` 归零，观众侧的时钟偏移滤波会整体失效 | 未提及 | 消息携带 `clockEpoch`，纪元变化即重置滤波（§7.1） |
 
 ---
 
@@ -207,6 +208,7 @@ ffmpeg -i input.mp4 -c:v libx264 -preset veryfast -b:v 1200k \
 | `signal` | `to, payload` | SDP / ICE 透传（`payload` 原样转发，服务端不解析） |
 | `chunks-report` | `have`(Base64 bitset), `complete`(bool) | 分片拥有情况增量上报 |
 | `metrics` | `rttMs, throughputBps, uploadCapacityBps, depth` | 供拓扑计分与选举；`uploadCapacityBps` 取自 `getStats().availableOutgoingBitrate`（C11） |
+| `media-index` | `mediaIndex` | 主播发布分片索引（开播动作）。服务端用 `media.Index.Validate` 校验后广播给全房，并以其 `bitrateBps` 作为容量模型的码率输入（§6.1） |
 | `topology-request` | `have, parents[]` | 请求父节点分配 / 重平衡 |
 | `room-control` | `action(play\|pause\|seek\|rate), currentTime, hostClockMs, seq` | 仅 host，服务端校验权限 |
 | `chat` | `text` | 房间文字消息 |
@@ -218,6 +220,8 @@ ffmpeg -i input.mp4 -c:v libx264 -preset veryfast -b:v 1200k \
 | :--- | :--- | :--- |
 | `joined` | `selfId, hostId, mode, distributorId, members[], mediaIndex, topology` | 入房快照 |
 | `member-joined` / `member-left` / `member-list` | `members[]` | 成员变化 |
+| `media-index` | `mediaIndex` | 主播开播时发布 / 后进房者据此补齐分片索引 |
+| `capacity` | `capacity`（含 `mode`/`hostChildSlots`/`streamBps`/`maxMembers`） | 容量随实测上行变化时广播（§6.2）；`mode=pending` 表示尚未拿到实测值 |
 | `signal` | `from, payload` | 定向信令 |
 | `parent-assignment` | `primaryId, backupIds[], reason, mode, maxDepth` | 拓扑分配结果（`reason` 含 `fanout` / `chain-distributor` / `rebalance` / `failover`） |
 | `distributor-change` | `fromId, toId, reason, members[]` | 分发节点换防 / 接任广播（§6.3） |
@@ -246,7 +250,7 @@ ffmpeg -i input.mp4 -c:v libx264 -preset veryfast -b:v 1200k \
 | `have` | `chunks`(Base64 bitset), `complete` | 双向 | 我有哪些分片（变化时增量、每 3s 全量一次） |
 | `req` | `rid, idx` | 子→父 | 请求分片（`rid` 为 UUID，用于并发区分） |
 | `err` | `rid, idx, code` | 父→子 | 我不持有 / 读取失败 |
-| `progress` | `currentTime, hostClockMs, seq, paused, rate` | 主播→下游逐跳转发 | 播放权威信息 |
+| `progress` | `currentTime, hostClockMs, clockEpoch, seq, paused, rate` | 主播→下游逐跳转发 | 播放权威信息 |
 | `time-sync` | `hostClockMs, seq` | 主播→下游逐跳转发，每 5s | 时钟锚点 |
 
 **关键原则**：`progress` 与 `time-sync` 中的 `hostClockMs` 是**主播的时钟读数，逐跳原样转发、任何中继都不得改写**（改写会让下游无法估算到主播的偏移）。中继只是转发者。
@@ -454,6 +458,7 @@ func CalculateScore(s PeerScore) float64 {
 - 主播是**唯一时间权威**。`progress` 与 `time-sync` 携带主播单调时钟 `hostClockMs`（`performance.now()` + 基准偏移），不带各跳本地时间。
 - 观众目标播放位置：`expectedHostTime = lastProgress.currentTime + (estHostNow() - lastProgress.hostClockMs)/1000`。
 - 关键点：观众需要估的是**自己与主播时钟的偏移**，而不是"网络延迟"。两者在数学上等价，但偏移可以用滤波稳定估计，单次延迟测量不能（C4）。
+- `clockEpoch`（C13）：主播页面每次加载生成一个随机纪元串，随 `progress`/`time-sync`/入房快照下发。观众一旦发现纪元变化，必须**丢弃并重新初始化**最小滤波 —— 否则主播刷新页面后，`performance.now()` 归零而滤波仍保留旧偏移，全房间会一起跳到错误位置。
 
 ### 7.2 时钟偏移估计（NTP 最小滤波）
 
@@ -623,7 +628,7 @@ client/
 | 项 | 内容 |
 | :--- | :--- |
 | 交付 | `cmd/segmenter`；`useMediaIndex` / `useChunkRequester` / `useChunkPlayer` / `useSyncClock`；观众直连主播（星形，不含树、不含选举） |
-| 验收 | 主播播放预处理目录 → 观众 **1–3s 内起播**；**进度偏差 < 500ms**（连续观察 5 分钟，记录 max/p95）；房主暂停/跳转全员跟随；`isTypeSupported` 不通过时给出明确错误；开播前的容量提示与实测 `K0` 一致 |
+| 验收 | 主播播放预处理目录 → 观众 **1–3s 内起播**；**进度偏差 < 500ms**（连续观察 5 分钟，记录 max/p95）；房主暂停/跳转全员跟随；`isTypeSupported` 不通过时给出明确错误；**容量闸门生效**：主播上报实测上行后，服务端算出的 `K0` 与前端显示一致，且超出 `1+K0` 的观众加入时被拒（`ROOM_FULL`） |
 
 ### M3 多层树 + 单链模式 + 多父条带化
 
@@ -690,4 +695,5 @@ client/
 | D8 | 声称可撑 20000 并发 | 容量模型按上行实算，示例约 12 人 | C8：星形/树的瓶颈在上行，不在服务器 |
 | D9 | 未定义低上行场景 | **单链分发模式**：`U < 2×B` 时主播只服务 1 个分发节点，按实测上行选举、支持平滑换防与失效接任（§6.1、§6.3） | 你确认的策略；且容量模型在该区间本就给出 `K0 = 1` |
 | D10 | 容量与选举依赖客户端自报 | 只用 `getStats().availableOutgoingBitrate` + 子节点实测吞吐交叉验证，取小值（C11、§6.3） | 自报值不可信，会把房间交给最弱的节点 |
+
 

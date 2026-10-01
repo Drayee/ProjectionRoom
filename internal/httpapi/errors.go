@@ -17,7 +17,7 @@ func roomErrorResponse(err error) (status int, code string, message string) {
 	case errors.Is(err, room.ErrBadPassword):
 		return http.StatusForbidden, protocol.CodeBadPassword, "房间密码错误"
 	case errors.Is(err, room.ErrFull):
-		return http.StatusConflict, protocol.CodeRoomFull, "房间已满"
+		return http.StatusConflict, protocol.CodeRoomFull, "房间已满（受主播上行限制）"
 	case errors.Is(err, room.ErrHostTaken):
 		return http.StatusConflict, protocol.CodeHostTaken, "房间已有主播"
 	case errors.Is(err, room.ErrNotReady):
@@ -28,6 +28,10 @@ func roomErrorResponse(err error) (status int, code string, message string) {
 		return http.StatusBadRequest, protocol.CodeNotJoined, "尚未加入房间"
 	case errors.Is(err, room.ErrNotHost):
 		return http.StatusForbidden, protocol.CodeNotHost, "只有主播可以执行该操作"
+	case errors.Is(err, room.ErrBadMediaIndex):
+		return http.StatusBadRequest, protocol.CodeBadMediaIndex, "分片索引不合法"
+	case errors.Is(err, room.ErrMediaLocked):
+		return http.StatusConflict, protocol.CodeMediaLocked, "分片索引已锁定，换片需重开房间"
 	case errors.Is(err, room.ErrBadName):
 		return http.StatusBadRequest, protocol.CodeBadRequest, err.Error()
 	case errors.Is(err, room.ErrBadInput):

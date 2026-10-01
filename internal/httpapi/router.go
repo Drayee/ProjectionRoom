@@ -78,11 +78,12 @@ func roomInfoHandler(cfg *config.Config, rooms *room.Manager) gin.HandlerFunc {
 			return
 		}
 
-		hostID, members, _, capacity := r.Snapshot(cfg.Room.MaxMembers)
+		hostID, members, _, capacity, mediaIndex := r.Snapshot(cfg.Room.MaxMembers)
 		c.JSON(http.StatusOK, gin.H{
 			"exists":      true,
 			"roomId":      r.ID,
 			"hasHost":     hostID != "",
+			"hasMedia":    len(mediaIndex) > 0,
 			"memberCount": len(members),
 			"capacity":    capacity,
 		})

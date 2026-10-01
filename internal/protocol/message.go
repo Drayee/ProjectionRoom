@@ -5,7 +5,7 @@
 // 它走 WebRTC DataChannel（SPEC §5.2），服务端不经手。
 //
 // 方向约定：
-//   - 客户端上行（join / room-control）使用 Envelope 的扁平字段；
+//   - 客户端上行（join / room-control / metrics）使用 Envelope 的扁平字段；
 //   - 服务端下行的播放权威信息统一放在 Playback 里，
 //     避免"上行扁平、下行嵌套"两套字段名并存。
 package protocol
@@ -16,6 +16,7 @@ import "encoding/json"
 const (
 	TypeJoin            = "join"
 	TypeSignal          = "signal"
+	TypeMediaIndex      = "media-index"
 	TypeChunksReport    = "chunks-report"
 	TypeMetrics         = "metrics"
 	TypeTopologyRequest = "topology-request"
@@ -30,6 +31,7 @@ const (
 	TypeMemberJoined      = "member-joined"
 	TypeMemberLeft        = "member-left"
 	TypeMemberList        = "member-list"
+	TypeCapacity          = "capacity"
 	TypeParentAssignment  = "parent-assignment"
 	TypeDistributorChange = "distributor-change"
 	TypeRoomClosed        = "room-closed"
@@ -49,6 +51,8 @@ const (
 	CodeRoomNotReady  = "ROOM_NOT_READY"
 	CodeRoomClosed    = "ROOM_CLOSED"
 	CodeCrossRoom     = "CROSS_ROOM_SIGNAL"
+	CodeBadMediaIndex = "BAD_MEDIA_INDEX"
+	CodeMediaLocked   = "MEDIA_LOCKED"
 	CodeInternalError = "INTERNAL"
 )
 
@@ -66,9 +70,8 @@ const (
 	ActionRate  = "rate"
 )
 
-// ModePending 表示尚未拿到实测上行、容量未定。
-// M1/M2 阶段房间容量只受 config.Room.MaxMembers 约束；
-// 实测容量与 fanout/chain 模式判定在 M3 接入（SPEC §6.1、§6.2）。
+// ModePending 表示尚未拿到实测上行、容量未定（SPEC §6.1、§6.2）。
+// M3 之后由 internal/topology 给出 fanout / chain。
 const ModePending = "pending"
 
 // Envelope 是所有 WebSocket 文本消息的统一封装。
@@ -98,12 +101,16 @@ type Envelope struct {
 	Action      string  `json:"action,omitempty"`
 	CurrentTime float64 `json:"currentTime,omitempty"`
 	HostClockMs int64   `json:"hostClockMs,omitempty"`
+	ClockEpoch  string  `json:"clockEpoch,omitempty"`
 	Paused      bool    `json:"paused,omitempty"`
 	Rate        float64 `json:"rate,omitempty"`
 
 	// 服务端下行：播放权威信息与单调序号（SPEC §5.3、§7.1）
 	Playback *PlaybackState `json:"playback,omitempty"`
 	Seq      int64          `json:"seq,omitempty"`
+
+	// 实测度量（SPEC §6.2、§6.3）
+	Metrics *Metrics `json:"metrics,omitempty"`
 
 	// 入房快照 / 成员变化
 	SelfID  string       `json:"selfId,omitempty"`
@@ -127,6 +134,22 @@ type PlaybackState struct {
 	HostClockMs int64   `json:"hostClockMs"`
 	Rate        float64 `json:"rate"`
 	Seq         int64   `json:"seq"`
+	// ClockEpoch 是主播页面的时钟纪元。主播重新加载页面后 performance.now() 归零，
+	// 观众侧的时钟偏移滤波必须整体重置，否则全房间会一起跳到错误位置（C13）。
+	ClockEpoch string `json:"clockEpoch,omitempty"`
+}
+
+// Metrics 是成员上报的实测度量。
+// M2 只用到主播的 UploadCapacityBps（容量闸门）；M3 的评分与选举会用到全部字段。
+type Metrics struct {
+	// RTTMs 是 DataChannel ping/pong 实测往返延迟。
+	RTTMs float64 `json:"rttMs,omitempty"`
+	// ThroughputBps 是实测交付速率。
+	ThroughputBps float64 `json:"throughputBps,omitempty"`
+	// UploadCapacityBps 取自 getStats().availableOutgoingBitrate，是容量计算的唯一可信来源（C11）。
+	UploadCapacityBps int64 `json:"uploadCapacityBps,omitempty"`
+	// Depth 是该节点在拓扑中的深度。
+	Depth int `json:"depth,omitempty"`
 }
 
 // MemberInfo 是成员列表中的一个条目。
@@ -141,8 +164,7 @@ type MemberInfo struct {
 }
 
 // Capacity 描述房间当前的容量判断（SPEC §6.2）。
-// Mode 为 pending 时 HostChildSlots 无意义（固定 0），
-// 真实取值在 M3 由 internal/topology 依据实测上行计算。
+// Mode 为 pending 时 HostChildSlots 无意义（固定 0）：还没有实测上行，不能假装容量已知。
 type Capacity struct {
 	Mode           string `json:"mode"`
 	MaxMembers     int    `json:"maxMembers"`

@@ -99,9 +99,25 @@ func handleMessage(hub *signal.Hub, rooms *room.Manager, client *signal.Client, 
 	case protocol.TypeSignal:
 		forwardSignal(hub, rooms, client, roomID, clientID, env)
 
-	case protocol.TypeChunksReport, protocol.TypeMetrics, protocol.TypeTopologyRequest:
-		// M2/M3 接入：分片拥有情况 bitset、实测度量、拓扑分配请求（SPEC §5.1、§6.3）。
-		// M1 阶段静默忽略，避免把连接打挂。
+	case protocol.TypeMediaIndex:
+		if err := rooms.SetMediaIndex(roomID, clientID, env.MediaIndex); err != nil {
+			_, code, message := roomErrorResponse(err)
+			_ = client.Send(protocol.ErrorEnvelope(code, message))
+		}
+
+	case protocol.TypeMetrics:
+		if env.Metrics == nil {
+			_ = client.Send(protocol.ErrorEnvelope(protocol.CodeBadRequest, "metrics 缺少 metrics 字段"))
+			break
+		}
+		if err := rooms.UpdateMetrics(roomID, clientID, *env.Metrics); err != nil {
+			_, code, message := roomErrorResponse(err)
+			_ = client.Send(protocol.ErrorEnvelope(code, message))
+		}
+
+	case protocol.TypeChunksReport, protocol.TypeTopologyRequest:
+		// M3 接入：分片拥有情况 bitset 与拓扑分配请求（SPEC §5.1、§6.3）。
+		// 当前阶段静默忽略，避免把连接打挂。
 
 	case protocol.TypeLeave:
 		rooms.Leave(roomID, clientID)

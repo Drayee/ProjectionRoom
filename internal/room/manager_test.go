@@ -7,8 +7,27 @@ import (
 	"testing"
 
 	"ProjectionRoom/internal/config"
+	"ProjectionRoom/internal/media"
 	"ProjectionRoom/internal/protocol"
+	"ProjectionRoom/internal/topology"
 )
+
+// sampleMediaIndex 构造一个自洽的索引，供容量与索引相关用例复用。
+func sampleMediaIndex(bitrateBps int64) media.Index {
+	return media.Index{
+		Version:       1,
+		InitFile:      "init.mp4",
+		MimeType:      `video/mp4; codecs="avc1.64001f"`,
+		TotalDuration: 4,
+		SegmentSec:    2,
+		BitrateBps:    bitrateBps,
+		TotalBytes:    bitrateBps / 2,
+		Segments: []media.Segment{
+			{Index: 1, File: "c00001.m4s", Size: 1000, Duration: 2, StartPTS: 0, Keyframe: true},
+			{Index: 2, File: "c00002.m4s", Size: 1000, Duration: 2, StartPTS: 2, Keyframe: true},
+		},
+	}
+}
 
 // fakeBus 记录所有投递，用于断言"谁收到了什么"。
 // room 包只依赖 Broadcaster 接口，因此可以完全脱离网络测试。
@@ -344,5 +363,180 @@ func TestCreateRejectsDuplicateRoomID(t *testing.T) {
 	}
 	if _, err := m.Create("ROOM01", "", 0); !errors.Is(err, ErrRoomExists) {
 		t.Fatalf("重复房间码应返回 ErrRoomExists，实际 %v", err)
+	}
+}
+
+// lastBroadcastOfType 返回房间内最后一条指定类型的广播。
+func (f *fakeBus) lastBroadcastOfType(t *testing.T, roomID, msgType string) protocol.Envelope {
+	t.Helper()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := len(f.roomWide[roomID]) - 1; i >= 0; i-- {
+		var env protocol.Envelope
+		if json.Unmarshal(f.roomWide[roomID][i], &env) == nil && env.Type == msgType {
+			return env
+		}
+	}
+	t.Fatalf("房间 %s 没有类型为 %s 的广播", roomID, msgType)
+
+	return protocol.Envelope{}
+}
+
+// lastExceptFor 返回房间内最后一条指定类型广播的 except 参数。
+// 广播与 except 两个切片同序追加，因此可以按下标对应。
+func (f *fakeBus) lastExceptFor(t *testing.T, roomID, msgType string) string {
+	t.Helper()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := len(f.roomWide[roomID]) - 1; i >= 0; i-- {
+		var env protocol.Envelope
+		if json.Unmarshal(f.roomWide[roomID][i], &env) == nil && env.Type == msgType {
+			return f.excepts[roomID][i]
+		}
+	}
+	t.Fatalf("房间 %s 没有类型为 %s 的广播", roomID, msgType)
+
+	return ""
+}
+
+func TestSetMediaIndexRequiresHostAndLocks(t *testing.T) {
+	m, bus := newTestManager(t, 8)
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	if err := m.Join(r.ID, "v1", "观众", protocol.RoleViewer, ""); err != nil {
+		t.Fatalf("观众进房失败: %v", err)
+	}
+
+	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
+	if err != nil {
+		t.Fatalf("序列化索引失败: %v", err)
+	}
+
+	if err := m.SetMediaIndex(r.ID, "v1", raw); !errors.Is(err, ErrNotHost) {
+		t.Fatalf("观众发布索引应返回 ErrNotHost，实际 %v", err)
+	}
+	if err := m.SetMediaIndex(r.ID, "ghost", raw); !errors.Is(err, ErrNotJoined) {
+		t.Fatalf("未加入的连接应返回 ErrNotJoined，实际 %v", err)
+	}
+	if err := m.SetMediaIndex(r.ID, "host", json.RawMessage(`不是 JSON`)); !errors.Is(err, ErrBadMediaIndex) {
+		t.Fatalf("非 JSON 索引应返回 ErrBadMediaIndex，实际 %v", err)
+	}
+	if err := m.SetMediaIndex(r.ID, "host", json.RawMessage(`{"version":1,"segments":[]}`)); !errors.Is(err, ErrBadMediaIndex) {
+		t.Fatalf("不自洽的索引应返回 ErrBadMediaIndex，实际 %v", err)
+	}
+
+	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+		t.Fatalf("主播发布索引失败: %v", err)
+	}
+
+	forwarded := bus.lastBroadcastOfType(t, r.ID, protocol.TypeMediaIndex)
+	if len(forwarded.MediaIndex) == 0 || !json.Valid(forwarded.MediaIndex) {
+		t.Fatalf("应把索引广播给其他人: %+v", forwarded)
+	}
+	if except := bus.lastExceptFor(t, r.ID, protocol.TypeMediaIndex); except != "host" {
+		t.Fatalf("索引广播应排除发布者本人，实际 except=%q", except)
+	}
+
+	capacity := bus.lastBroadcastOfType(t, r.ID, protocol.TypeCapacity)
+	if capacity.Capacity == nil || capacity.Capacity.StreamBps != 2_000_000 {
+		t.Fatalf("发布索引后应用索引里的码率重算容量: %+v", capacity.Capacity)
+	}
+
+	// 同一份索引重发应当幂等；换一份则被锁定。
+	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+		t.Fatalf("重复发布同一索引应幂等，实际 %v", err)
+	}
+	other, err := json.Marshal(sampleMediaIndex(1_000_000))
+	if err != nil {
+		t.Fatalf("序列化索引失败: %v", err)
+	}
+	if err := m.SetMediaIndex(r.ID, "host", other); !errors.Is(err, ErrMediaLocked) {
+		t.Fatalf("换片应返回 ErrMediaLocked，实际 %v", err)
+	}
+
+	// 后进房的人必须直接拿到索引，否则无从请求分片。
+	if err := m.Join(r.ID, "v2", "迟到观众", protocol.RoleViewer, ""); err != nil {
+		t.Fatalf("迟到观众进房失败: %v", err)
+	}
+	late := bus.lastDirect(t, "v2")
+	if len(late.MediaIndex) == 0 {
+		t.Fatal("入房快照必须携带分片索引")
+	}
+}
+
+func TestCapacityGateFollowsMeasuredUplink(t *testing.T) {
+	m, bus := newTestManager(t, 16)
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	if err := m.Join(r.ID, "v1", "观众1", protocol.RoleViewer, ""); err != nil {
+		t.Fatalf("观众1 进房失败: %v", err)
+	}
+
+	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
+	if err != nil {
+		t.Fatalf("序列化索引失败: %v", err)
+	}
+	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+		t.Fatalf("主播发布索引失败: %v", err)
+	}
+
+	// 还没有实测上行：容量必须是 pending，而不是假装知道。
+	before := r.Capacity(16)
+	if before.Mode != protocol.ModePending || before.HostChildSlots != 0 || before.MaxMembers != 16 {
+		t.Fatalf("未实测时容量应为 pending/16：%+v", before)
+	}
+
+	// 主播上报 4 Mbps 上行、码率 2 Mbps：K0 = floor(4*0.8/2) = 1 → 单链模式，上限 2 人。
+	if err := m.UpdateMetrics(r.ID, "host", protocol.Metrics{UploadCapacityBps: 4_000_000, RTTMs: 20}); err != nil {
+		t.Fatalf("上报度量失败: %v", err)
+	}
+	broadcast := bus.lastBroadcastOfType(t, r.ID, protocol.TypeCapacity)
+	if broadcast.Capacity == nil {
+		t.Fatal("实测上行变化后必须广播容量")
+	}
+	if broadcast.Capacity.HostChildSlots != 1 || broadcast.Capacity.Mode != string(topology.ModeChain) || broadcast.Capacity.MaxMembers != 2 {
+		t.Fatalf("容量广播不正确: %+v", broadcast.Capacity)
+	}
+
+	// 房间已经满员（主播 + 1 个观众），再来人必须被拒，而不是一起卡。
+	if err := m.Join(r.ID, "v2", "观众2", protocol.RoleViewer, ""); !errors.Is(err, ErrFull) {
+		t.Fatalf("超出 1+K0 应返回 ErrFull，实际 %v", err)
+	}
+
+	// 观众的度量不应影响房间容量。
+	if err := m.UpdateMetrics(r.ID, "v1", protocol.Metrics{UploadCapacityBps: 100_000_000}); err != nil {
+		t.Fatalf("观众上报度量失败: %v", err)
+	}
+	after := r.Capacity(16)
+	if after.HostChildSlots != 1 || after.MaxMembers != 2 {
+		t.Fatalf("观众的上行不应改变容量: %+v", after)
+	}
+}
+
+func TestUpdateMetricsRejectsNonMember(t *testing.T) {
+	m, _ := newTestManager(t, 8)
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.UpdateMetrics(r.ID, "ghost", protocol.Metrics{UploadCapacityBps: 1}); !errors.Is(err, ErrNotJoined) {
+		t.Fatalf("非成员上报度量应返回 ErrNotJoined，实际 %v", err)
+	}
+	if err := m.UpdateMetrics("NOSUCH", "ghost", protocol.Metrics{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("不存在的房间应返回 ErrNotFound，实际 %v", err)
 	}
 }

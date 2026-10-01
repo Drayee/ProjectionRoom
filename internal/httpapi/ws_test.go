@@ -14,10 +14,28 @@ import (
 	"github.com/coder/websocket"
 
 	"ProjectionRoom/internal/config"
+	"ProjectionRoom/internal/media"
 	"ProjectionRoom/internal/protocol"
 	"ProjectionRoom/internal/room"
 	"ProjectionRoom/internal/signal"
 )
+
+// sampleIndex 是 M2 用的自洽索引，覆盖索引发布与容量计算两条链路。
+func sampleIndex(bitrateBps int64) media.Index {
+	return media.Index{
+		Version:       1,
+		InitFile:      "init.mp4",
+		MimeType:      `video/mp4; codecs="avc1.64001f,mp4a.40.2"`,
+		TotalDuration: 4,
+		SegmentSec:    2,
+		BitrateBps:    bitrateBps,
+		TotalBytes:    bitrateBps / 2,
+		Segments: []media.Segment{
+			{Index: 1, File: "c00001.m4s", Size: 1000, Duration: 2, StartPTS: 0, Keyframe: true},
+			{Index: 2, File: "c00002.m4s", Size: 1000, Duration: 2, StartPTS: 2, Keyframe: true},
+		},
+	}
+}
 
 const testTimeout = 5 * time.Second
 
@@ -383,5 +401,91 @@ func TestHealthz(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("健康检查应返回 200，实际 %d", resp.StatusCode)
+	}
+}
+
+// TestMediaIndexAndCapacityFlow 覆盖 M2 的服务端链路：
+// 主播发布索引 → 全房可见；主播上报实测上行 → 容量重算并广播；超出 1+K0 的人被拒。
+func TestMediaIndexAndCapacityFlow(t *testing.T) {
+	srv, _ := newTestServer(t)
+	roomID := createRoom(t, srv.URL, "")
+
+	host := dial(t, srv, roomID, "host-1")
+	host.join("主播", protocol.RoleHost, "")
+	host.readUntil(protocol.TypeJoined)
+
+	viewer := dial(t, srv, roomID, "viewer-1")
+	viewer.join("观众", protocol.RoleViewer, "")
+	viewer.readUntil(protocol.TypeJoined)
+
+	raw, err := json.Marshal(sampleIndex(2_000_000))
+	if err != nil {
+		t.Fatalf("序列化索引失败: %v", err)
+	}
+
+	host.send(protocol.Envelope{Type: protocol.TypeMediaIndex, MediaIndex: raw})
+
+	forwarded := viewer.readUntil(protocol.TypeMediaIndex)
+	if !bytes.Contains(forwarded.MediaIndex, []byte("c00002.m4s")) {
+		t.Fatalf("观众必须拿到完整分片索引，实际 %s", forwarded.MediaIndex)
+	}
+
+	// 索引发布时还没有实测上行：容量必须报 pending，而不是编一个数字。
+	pending := viewer.readUntil(protocol.TypeCapacity)
+	if pending.Capacity == nil || pending.Capacity.Mode != protocol.ModePending {
+		t.Fatalf("未实测上行的容量应为 pending: %+v", pending.Capacity)
+	}
+	if pending.Capacity.StreamBps != 2_000_000 {
+		t.Fatalf("容量应使用索引里的码率，实际 %d", pending.Capacity.StreamBps)
+	}
+
+	// 观众无权发布索引。
+	viewer.send(protocol.Envelope{Type: protocol.TypeMediaIndex, MediaIndex: raw})
+	if errEnv := viewer.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeNotHost {
+		t.Fatalf("观众发布索引应返回 NOT_HOST，实际 %q", errEnv.Code)
+	}
+
+	// metrics 缺字段要明确报错，而不是静默忽略。
+	viewer.send(protocol.Envelope{Type: protocol.TypeMetrics})
+	if errEnv := viewer.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeBadRequest {
+		t.Fatalf("缺少 metrics 字段应返回 BAD_REQUEST，实际 %q", errEnv.Code)
+	}
+
+	// 主播上报 12 Mbps 上行、码率 2 Mbps → K0 = 4 → 扇出模式。
+	host.send(protocol.Envelope{
+		Type:    protocol.TypeMetrics,
+		Metrics: &protocol.Metrics{UploadCapacityBps: 12_000_000, RTTMs: 15},
+	})
+	measured := viewer.readUntil(protocol.TypeCapacity)
+	if measured.Capacity == nil {
+		t.Fatal("实测上行变化后必须广播容量")
+	}
+	if measured.Capacity.HostChildSlots != 4 || measured.Capacity.Mode != "fanout" {
+		t.Fatalf("容量应为 fanout/K0=4，实际 %+v", measured.Capacity)
+	}
+	if measured.Capacity.MaxMembers != 5 {
+		t.Fatalf("容量里的成员上限应为 1+K0=5，实际 %d", measured.Capacity.MaxMembers)
+	}
+
+	// 上行降到 4 Mbps → K0 = 1 → 上限 2 人；房间已有 2 人，新观众必须被拒。
+	host.send(protocol.Envelope{
+		Type:    protocol.TypeMetrics,
+		Metrics: &protocol.Metrics{UploadCapacityBps: 4_000_000, RTTMs: 18},
+	})
+	degraded := viewer.readUntil(protocol.TypeCapacity)
+	if degraded.Capacity == nil || degraded.Capacity.HostChildSlots != 1 || degraded.Capacity.Mode != "chain" {
+		t.Fatalf("容量应降为 chain/K0=1，实际 %+v", degraded.Capacity)
+	}
+
+	extra := dial(t, srv, roomID, "viewer-2")
+	extra.join("挤不进来的人", protocol.RoleViewer, "")
+	if errEnv := extra.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeRoomFull {
+		t.Fatalf("超出 1+K0 应返回 ROOM_FULL，实际 %q", errEnv.Code)
+	}
+
+	// 已经在房里的人不受影响：容量收缩只拦新加入，不踢人（用一次聊天往返证明连接还活着）。
+	viewer.send(protocol.Envelope{Type: protocol.TypeChat, Text: "我还在"})
+	if chat := viewer.readUntil(protocol.TypeChat); chat.Text != "我还在" {
+		t.Fatalf("容量收缩不应影响既有成员: %+v", chat)
 	}
 }

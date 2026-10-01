@@ -1,13 +1,16 @@
 package room
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"ProjectionRoom/internal/config"
+	"ProjectionRoom/internal/media"
 	"ProjectionRoom/internal/protocol"
 )
 
@@ -85,7 +88,7 @@ func (m *Manager) Get(roomID string) (*Room, bool) {
 	return r, ok
 }
 
-// Join 把连接加入房间：校验密码/上限，然后向本人发 joined、向其他人发 member-joined。
+// Join 把连接加入房间：校验密码/容量，然后向本人发 joined、向其他人发 member-joined。
 func (m *Manager) Join(roomID, clientID, displayName, role, password string) error {
 	displayName = strings.TrimSpace(displayName)
 	if !validDisplayName(displayName) {
@@ -117,13 +120,15 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 			r.mu.Unlock()
 			return ErrNotReady
 		}
-		if len(r.members) >= m.cfg.Room.MaxMembers {
+		// 容量闸门：拿到实测上行后，超过 1+K0 的人会被直接拒绝，
+		// 而不是全部挂上去一起卡（SPEC §6.2）。
+		if len(r.members) >= r.joinLimitLocked(m.cfg.Room.MaxMembers) {
 			r.mu.Unlock()
 			return ErrFull
 		}
 	}
 
-	// M1 是星形占位拓扑：主播深度 0，观众深度 1 暂挂主播。
+	// M2 是星形占位拓扑：主播深度 0，观众深度 1 直连主播。
 	// 多父/多层树的真实分配由 M3 的 internal/topology 接管（SPEC §6.1、§6.4）。
 	member := &Member{
 		ID:          clientID,
@@ -145,19 +150,21 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 	infos := r.memberInfosLocked()
 	playback := r.lastPlayback
 	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
+	mediaIndex := r.MediaIndex
 	info := member.info()
 	r.mu.Unlock()
 
-	// joined 只发给本人：带完整成员表、容量判断与当前播放状态。
+	// joined 只发给本人：带完整成员表、容量判断、当前播放状态与分片索引。
 	_ = m.bus.SendTo(clientID, protocol.MustEnvelope(protocol.Envelope{
-		Type:     protocol.TypeJoined,
-		RoomID:   roomID,
-		SelfID:   clientID,
-		HostID:   hostID,
-		Member:   &info,
-		Members:  infos,
-		Playback: &playback,
-		Capacity: &capacity,
+		Type:       protocol.TypeJoined,
+		RoomID:     roomID,
+		SelfID:     clientID,
+		HostID:     hostID,
+		Member:     &info,
+		Members:    infos,
+		Playback:   &playback,
+		Capacity:   &capacity,
+		MediaIndex: mediaIndex,
 	}))
 
 	// member-joined 广播给其他人，让他们的成员列表刷新。
@@ -249,6 +256,98 @@ func (m *Manager) HandleChat(roomID, clientID, text string) error {
 	return nil
 }
 
+// SetMediaIndex 由主播发布分片索引：校验、锁定、广播（SPEC §4.3、§5.1）。
+//
+// 服务端必须校验：一个畸形索引会让整个房间算错容量，或者让播放器拿到 appendBuffer 一定失败的 mimeType。
+func (m *Manager) SetMediaIndex(roomID, clientID string, raw json.RawMessage) error {
+	r, ok := m.Get(roomID)
+	if !ok {
+		return ErrNotFound
+	}
+	if len(raw) == 0 {
+		return ErrBadMediaIndex
+	}
+
+	var index media.Index
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return ErrBadMediaIndex
+	}
+	if err := index.Validate(); err != nil {
+		log.Printf("room %s: 主播发布的分片索引被拒绝: %v", roomID, err)
+		return ErrBadMediaIndex
+	}
+
+	r.mu.Lock()
+	member, exists := r.members[clientID]
+	if !exists {
+		r.mu.Unlock()
+		return ErrNotJoined
+	}
+	if member.Role != protocol.RoleHost {
+		r.mu.Unlock()
+		return ErrNotHost
+	}
+	if len(r.MediaIndex) > 0 && !bytes.Equal(r.MediaIndex, raw) {
+		r.mu.Unlock()
+		return ErrMediaLocked
+	}
+
+	r.MediaIndex = append(json.RawMessage(nil), raw...)
+	// 用索引里的实测码率替换配置估计值，容量模型从此有真实输入。
+	r.StreamBps = index.BitrateBps
+	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
+	r.mu.Unlock()
+
+	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
+		Type:       protocol.TypeMediaIndex,
+		RoomID:     roomID,
+		From:       clientID,
+		MediaIndex: raw,
+	}), clientID)
+	m.broadcastCapacity(roomID, capacity)
+
+	log.Printf("room %s: 主播发布分片索引（%d 段，%.2f Mbps，mime=%s）",
+		roomID, len(index.Segments), float64(index.BitrateBps)/1_000_000, index.MimeType)
+
+	return nil
+}
+
+// UpdateMetrics 记录成员上报的实测度量。
+// 主播的上行会直接改变房间容量，所以这里要立刻重算并广播（SPEC §6.2）。
+func (m *Manager) UpdateMetrics(roomID, clientID string, metrics protocol.Metrics) error {
+	r, ok := m.Get(roomID)
+	if !ok {
+		return ErrNotFound
+	}
+
+	r.mu.Lock()
+	member, exists := r.members[clientID]
+	if !exists {
+		r.mu.Unlock()
+		return ErrNotJoined
+	}
+	member.RTTMs = metrics.RTTMs
+	member.ThroughputBps = metrics.ThroughputBps
+	member.UploadCapacityBps = metrics.UploadCapacityBps
+
+	changed := false
+	if member.Role == protocol.RoleHost && metrics.UploadCapacityBps > 0 && metrics.UploadCapacityBps != r.hostUploadBps {
+		r.hostUploadBps = metrics.UploadCapacityBps
+		changed = true
+	}
+	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
+	r.mu.Unlock()
+
+	if changed {
+		m.broadcastCapacity(roomID, capacity)
+		log.Printf("room %s: 主播实测上行 %.2f Mbps → K0=%d（模式 %s，成员上限 %d）",
+			roomID, float64(metrics.UploadCapacityBps)/1_000_000, capacity.HostChildSlots, capacity.Mode,
+			1+capacity.HostChildSlots)
+	}
+
+	return nil
+}
+
 // HandleControl 处理房主控制。
 // 只有主播可以下发；服务端负责分配单调递增的 seq 并记录最新播放状态，
 // 供后进房的人立即对齐（SPEC §5.3、§7.1）。
@@ -299,6 +398,7 @@ func (m *Manager) HandleControl(roomID, clientID string, in protocol.Envelope) e
 		HostClockMs: in.HostClockMs,
 		Rate:        rate,
 		Seq:         r.Seq,
+		ClockEpoch:  in.ClockEpoch,
 	}
 	playback := r.lastPlayback
 	r.mu.Unlock()
@@ -333,6 +433,14 @@ func (m *Manager) CloseRoomIfEmpty(roomID string) {
 		delete(m.rooms, roomID)
 		m.mu.Unlock()
 	}
+}
+
+func (m *Manager) broadcastCapacity(roomID string, capacity protocol.Capacity) {
+	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
+		Type:     protocol.TypeCapacity,
+		RoomID:   roomID,
+		Capacity: &capacity,
+	}), "")
 }
 
 // closeRoom 销毁房间：先广播原因，再关闭连接（关闭留出投递时间，见 signal.closeGrace）。
