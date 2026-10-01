@@ -1,0 +1,16 @@
+# 统一行尾为 LF：否则 Windows 上 git 检出成 CRLF，gofmt -l 会一直报警。
+* text=auto eol=lf
+
+# Windows 脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.m4s binary
+*.mp4 binary

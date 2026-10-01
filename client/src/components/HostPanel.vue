@@ -1,0 +1,133 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+import { useRoomStore } from '../stores/room'
+
+const store = useRoomStore()
+const seekTarget = ref('')
+
+const rate = computed(() => store.playback.rate)
+const canControl = computed(() => store.isHost && store.joined)
+
+// 容量判断来自服务端（M1 只有硬上限；实测上行与 fanout/chain 判定在 M3 接入，SPEC §6.2）。
+const capacityText = computed(() => {
+  const cap = store.capacity
+  if (!cap) return '容量未知'
+  const mbps = (cap.streamBps / 1_000_000).toFixed(1)
+  return `码率估计 ${mbps} Mbps · 成员上限 ${cap.maxMembers} 人 · 模式 ${cap.mode}`
+})
+
+function seek() {
+  const seconds = Number(seekTarget.value)
+  if (!Number.isFinite(seconds) || seconds < 0) return
+  store.seekTo(seconds)
+  seekTarget.value = ''
+}
+
+function changeRate(event: Event) {
+  const value = Number((event.target as HTMLSelectElement).value)
+  if (Number.isFinite(value) && value > 0) store.setRate(value)
+}
+</script>
+
+<template>
+  <div class="host card">
+    <header>
+      <h2>主播控制台</h2>
+      <span class="muted">{{ capacityText }}</span>
+    </header>
+
+    <div class="controls">
+      <button v-if="store.playback.paused" class="primary" :disabled="!canControl" @click="store.play()">
+        播放
+      </button>
+      <button v-else :disabled="!canControl" @click="store.pause()">暂停</button>
+
+      <div class="seek">
+        <input v-model="seekTarget" type="number" min="0" step="1" placeholder="秒" :disabled="!canControl" />
+        <button :disabled="!canControl || seekTarget === ''" @click="seek">跳转</button>
+      </div>
+
+      <label class="rate">
+        速率
+        <select :value="rate" :disabled="!canControl" @change="changeRate">
+          <option :value="0.5">0.5x</option>
+          <option :value="1">1.0x</option>
+          <option :value="1.25">1.25x</option>
+          <option :value="1.5">1.5x</option>
+          <option :value="2">2.0x</option>
+        </select>
+      </label>
+
+      <span class="badge mono">seq {{ store.playback.seq }}</span>
+    </div>
+
+    <p class="muted note">
+      控制指令会经服务端校验权限后广播给房间内所有人；视频分片链路在 M2 接入，
+      届时这里会新增"选择本地 fMP4 分片目录"与开播前的容量预判。
+    </p>
+  </div>
+</template>
+
+<style scoped>
+.host {
+  padding: 12px;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+header .muted {
+  font-size: 12px;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.seek {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.seek input {
+  width: 92px;
+}
+
+.rate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-dim);
+}
+
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+</style>

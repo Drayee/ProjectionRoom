@@ -1,0 +1,35 @@
+﻿# ---- Go ----
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# ---- Node / Vue ----
+client/node_modules/
+client/dist/
+client/.vite/
+npm-debug.log*
+pnpm-debug.log*
+
+# ---- 媒体与分片产物（体积大，不入库）----
+/room-media/
+*.m4s
+*_frag.mp4
+*.mpd
+*.ts
+
+# ---- 编辑器 / IDE ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ---- 本地配置与日志 ----
+*.local.toml
+*.log
