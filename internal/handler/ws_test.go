@@ -49,7 +49,8 @@ func newTestServer(t *testing.T) (*httptest.Server, *config.Config) {
 	}
 	rooms := usecase.NewManager(cfg, hub)
 
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms))
+	// 信令用例不涉及切片端点，这里传 nil 跳过 /api/v1/segment/* 的注册。
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil))
 	t.Cleanup(func() {
 		srv.Close()
 		cleanup()

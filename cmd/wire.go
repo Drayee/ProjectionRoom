@@ -9,6 +9,7 @@ import (
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/handler"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/segment"
 	"ProjectionRoom/internal/usecase"
 )
 
@@ -21,6 +22,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		service.NewHub,         // 信令连接池（自带清理函数）
 		service.NewBroadcaster, // Hub → usecase.Broadcaster
 		usecase.NewManager,     // 房间、成员与拓扑用例
+		segment.NewQueue,       // 一次性的视频切片作业队列（自带清理函数）
 		handler.NewRouter,      // gin 路由与 /ws
 		service.NewServer,      // 可运行的服务（自带信号处理与优雅关闭）
 	)

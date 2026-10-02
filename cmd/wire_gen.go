@@ -10,6 +10,7 @@ import (
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/handler"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/segment"
 	"ProjectionRoom/internal/usecase"
 )
 
@@ -26,13 +27,20 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	}
 	broadcaster := service.NewBroadcaster(hub)
 	manager := usecase.NewManager(cfg, broadcaster)
-	engine := handler.NewRouter(cfg, hub, manager)
-	server, err := service.NewServer(cfg, engine)
+	queue, cleanup2, err := segment.NewQueue(cfg)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
+	engine := handler.NewRouter(cfg, hub, manager, queue)
+	server, err := service.NewServer(cfg, engine)
+	if err != nil {
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
 	return server, func() {
+		cleanup2()
 		cleanup()
 	}, nil
 }

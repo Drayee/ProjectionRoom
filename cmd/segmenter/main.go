@@ -8,16 +8,20 @@
 //
 // 为什么必须切在 moof 边界上：SourceBuffer.appendBuffer() 只接受完整的 fMP4 片段，
 // 按固定字节数切割会产出"半个 moof"，浏览器直接抛错（SPEC §4.2）。
+//
+// 流水线本体（必要时 ffmpeg 重新封装/转码 → 按 moof 边界切分 → 写 index.json）在
+// internal/service/segment，与服务端一次性切片共用同一份实现，
+// 因此"本地切片"与"服务端切片"的产物格式不可能漂移（前端零改动）。
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
-	"ProjectionRoom/internal/service/mp4"
+	"ProjectionRoom/internal/service/segment"
 	"ProjectionRoom/internal/usecase"
 )
 
@@ -28,16 +32,18 @@ func main() {
 	fragment := flag.Bool("fragment", false, "输入是普通 MP4 时，先无损重新封装成 fragmented MP4")
 	fragSec := flag.Float64("frag-sec", 2, "分片目标时长（秒）")
 	uplinkMbps := flag.Float64("uplink-mbps", 12, "主播上行估计（Mbps），仅用于打印容量提示")
+	ffmpegPath := flag.String("ffmpeg", "",
+		"ffmpeg 路径（可为目录或可执行文件）；默认按 PR_FFMPEG → PATH → 常见安装目录 查找")
 
 	flag.Parse()
 
-	if err := run(*in, *out, *transcode, *fragment, *fragSec, *uplinkMbps); err != nil {
+	if err := run(*in, *out, *transcode, *fragment, *fragSec, *uplinkMbps, *ffmpegPath); err != nil {
 		fmt.Fprintf(os.Stderr, "segmenter 失败: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(in, out, transcode string, fragment bool, fragSec, uplinkMbps float64) error {
+func run(in, out, transcode string, fragment bool, fragSec, uplinkMbps float64, ffmpegPath string) error {
 	if strings.TrimSpace(in) == "" {
 		return fmt.Errorf("必须指定 -in")
 	}
@@ -48,64 +54,33 @@ func run(in, out, transcode string, fragment bool, fragSec, uplinkMbps float64) 
 		return fmt.Errorf("-frag-sec 必须为正")
 	}
 
-	source := in
-	var cleanup func()
-
-	if transcode != "" {
-		tmp, err := os.CreateTemp("", "pr-transcode-*.mp4")
-		if err != nil {
-			return fmt.Errorf("创建临时文件失败: %w", err)
-		}
-		tmpPath := tmp.Name()
-		tmp.Close()
-
-		args := []string{
-			"-y", "-hide_banner", "-loglevel", "error",
-			"-i", in,
-			"-c:v", "libx264", "-preset", "veryfast", "-b:v", transcode,
-			"-c:a", "aac", "-b:a", "96k",
-			"-movflags", "+frag_keyframe+empty_moov+default_base_moof",
-			"-frag_duration", fmt.Sprintf("%d", int64(fragSec*1_000_000)),
-			tmpPath,
-		}
-		fmt.Printf("低码率预设：转码到 %s（这一步可能耗时数分钟）…\n", transcode)
-		if err := runFFmpeg(args); err != nil {
-			os.Remove(tmpPath)
-			return err
-		}
-		source, cleanup = tmpPath, func() { os.Remove(tmpPath) }
-	} else if fragment {
-		tmp, err := os.CreateTemp("", "pr-fragment-*.mp4")
-		if err != nil {
-			return fmt.Errorf("创建临时文件失败: %w", err)
-		}
-		tmpPath := tmp.Name()
-		tmp.Close()
-
-		args := []string{
-			"-y", "-hide_banner", "-loglevel", "error",
-			"-i", in,
-			"-c", "copy",
-			"-movflags", "+frag_keyframe+empty_moov+default_base_moof",
-			"-frag_duration", fmt.Sprintf("%d", int64(fragSec*1_000_000)),
-			tmpPath,
-		}
-		fmt.Println("无损重新封装为 fragmented MP4…")
-		if err := runFFmpeg(args); err != nil {
-			os.Remove(tmpPath)
-			return err
-		}
-		source, cleanup = tmpPath, func() { os.Remove(tmpPath) }
+	explicit := strings.TrimSpace(ffmpegPath)
+	if explicit == "" {
+		explicit = os.Getenv("PR_FFMPEG")
 	}
-	if cleanup != nil {
-		defer cleanup()
+	tools := segment.DiscoverTools(explicit)
+
+	// 只有需要重新封装/转码时才要求 ffmpeg；直接切已经 fragmented 的 MP4 不需要它。
+	if (transcode != "" || fragment) && tools.FFmpeg == "" {
+		return fmt.Errorf("未找到 ffmpeg，请先安装并加入 PATH（或用 -in 直接传 fragmented MP4）")
 	}
 
-	index, err := mp4.SplitFile(source, mp4.SplitOptions{OutDir: out})
+	logf := func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+
+	artifacts, err := segment.Process(context.Background(), in, out, segment.ProcessOptions{
+		Tools:          tools,
+		SegmentSeconds: fragSec,
+		Transcode:      transcode,
+		ForceFragment:  fragment,
+		Logf:           logf,
+	})
 	if err != nil {
 		return err
 	}
 
+	index := artifacts.Index
 	fmt.Printf("\n输出目录: %s\n", out)
 	fmt.Printf("  编码格式: %s\n", index.MimeType)
 	fmt.Printf("  时长:     %.2f 秒\n", index.TotalDuration)
@@ -136,17 +111,4 @@ func printCapacityHint(streamBps int64, uplinkMbps float64) {
 	default:
 		fmt.Printf("  K0 = %d → 扇出模式：主播可直接服务 %d 个一级节点，其余成员挂到它们下面。\n", slots, slots)
 	}
-}
-
-func runFFmpeg(args []string) error {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return fmt.Errorf("未找到 ffmpeg，请先安装并加入 PATH（或用 -in 直接传 fragmented MP4）")
-	}
-
-	cmd := exec.Command("ffmpeg", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ffmpeg 执行失败: %w\n%s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
 }

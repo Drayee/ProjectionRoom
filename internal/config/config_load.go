@@ -16,6 +16,20 @@ const (
 	envTURNURLs         = "PR_TURN_URLS"
 	envTURNUser         = "PR_TURN_USER"
 	envTURNPass         = "PR_TURN_PASS"
+
+	// 服务端切片服务的环境变量（前缀 PR_SEGMENT_，ffmpeg 路径单独用 PR_FFMPEG）。
+	envSegmentConcurrency   = "PR_SEGMENT_CONCURRENCY"
+	envSegmentQueueLength   = "PR_SEGMENT_QUEUE_LENGTH"
+	envSegmentRatePerMinute = "PR_SEGMENT_RATE_PER_MINUTE"
+	envSegmentBurst         = "PR_SEGMENT_BURST"
+	envSegmentTTL           = "PR_SEGMENT_TTL"
+	envSegmentCleanup       = "PR_SEGMENT_CLEANUP_INTERVAL"
+	envSegmentSingleMax     = "PR_SEGMENT_SINGLE_MAX_BYTES"
+	envSegmentMaxDuration   = "PR_SEGMENT_MAX_DURATION"
+	envSegmentMaxSource     = "PR_SEGMENT_MAX_SOURCE_BYTES"
+	envSegmentSeconds       = "PR_SEGMENT_SECONDS"
+	envSegmentTempDir       = "PR_SEGMENT_TEMP_DIR"
+	envFFmpeg               = "PR_FFMPEG"
 )
 
 // Default 返回面向本机开发的默认配置。
@@ -37,6 +51,18 @@ func Default() *Config {
 		},
 		ICE: ICEConfig{
 			STUNURLs: []string{"stun:stun.l.google.com:19302"},
+		},
+		Segment: SegmentConfig{
+			Concurrency:            2,
+			QueueLength:            8,
+			RatePerMinute:          3,
+			Burst:                  3,
+			TTL:                    30 * time.Minute,
+			CleanupInterval:        time.Minute,
+			SingleResponseMaxBytes: 1 << 30, // 1 GiB
+			MaxDuration:            60 * time.Minute,
+			MaxSourceBytes:         16 << 30, // 16 GiB
+			SegmentSeconds:         2,
 		},
 		LogLevel: "info",
 	}
@@ -77,7 +103,117 @@ func Load() (*Config, error) {
 		cfg.ICE.TURNPass = v
 	}
 
+	if err := applySegmentEnv(&cfg.Segment); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// applySegmentEnv 应用 PR_SEGMENT_* / PR_FFMPEG 覆盖。
+// 与其它配置一致：非法取值直接报错，不做静默回退。
+func applySegmentEnv(sc *SegmentConfig) error {
+	if v := os.Getenv(envSegmentConcurrency); v != "" {
+		n, err := positiveInt(envSegmentConcurrency, v)
+		if err != nil {
+			return err
+		}
+		sc.Concurrency = n
+	}
+	if v := os.Getenv(envSegmentQueueLength); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return fmt.Errorf("config: %s 必须是 >=0 的整数, got %q", envSegmentQueueLength, v)
+		}
+		sc.QueueLength = n
+	}
+	if v := os.Getenv(envSegmentRatePerMinute); v != "" {
+		n, err := positiveInt(envSegmentRatePerMinute, v)
+		if err != nil {
+			return err
+		}
+		sc.RatePerMinute = n
+	}
+	if v := os.Getenv(envSegmentBurst); v != "" {
+		n, err := positiveInt(envSegmentBurst, v)
+		if err != nil {
+			return err
+		}
+		sc.Burst = n
+	}
+	if v := os.Getenv(envSegmentTTL); v != "" {
+		d, err := positiveDuration(envSegmentTTL, v)
+		if err != nil {
+			return err
+		}
+		sc.TTL = d
+	}
+	if v := os.Getenv(envSegmentCleanup); v != "" {
+		d, err := positiveDuration(envSegmentCleanup, v)
+		if err != nil {
+			return err
+		}
+		sc.CleanupInterval = d
+	}
+	if v := os.Getenv(envSegmentSingleMax); v != "" {
+		n, err := positiveInt64(envSegmentSingleMax, v)
+		if err != nil {
+			return err
+		}
+		sc.SingleResponseMaxBytes = n
+	}
+	if v := os.Getenv(envSegmentMaxDuration); v != "" {
+		d, err := positiveDuration(envSegmentMaxDuration, v)
+		if err != nil {
+			return err
+		}
+		sc.MaxDuration = d
+	}
+	if v := os.Getenv(envSegmentMaxSource); v != "" {
+		n, err := positiveInt64(envSegmentMaxSource, v)
+		if err != nil {
+			return err
+		}
+		sc.MaxSourceBytes = n
+	}
+	if v := os.Getenv(envSegmentSeconds); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 {
+			return fmt.Errorf("config: %s 必须是正数, got %q", envSegmentSeconds, v)
+		}
+		sc.SegmentSeconds = f
+	}
+	if v := os.Getenv(envSegmentTempDir); v != "" {
+		sc.TempDir = v
+	}
+	if v := os.Getenv(envFFmpeg); v != "" {
+		sc.FFmpegPath = v
+	}
+	return nil
+}
+
+func positiveInt(name, v string) (int, error) {
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("config: %s 必须是正整数, got %q", name, v)
+	}
+	return n, nil
+}
+
+func positiveInt64(name, v string) (int64, error) {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("config: %s 必须是正整数, got %q", name, v)
+	}
+	return n, nil
+}
+
+func positiveDuration(name, v string) (time.Duration, error) {
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("config: %s 必须是正的时长（如 30m）, got %q", name, v)
+	}
+	return d, nil
 }
 
 // ICEServers 把配置转换成 WebRTC 的 iceServers 结构（供前端直接使用）。

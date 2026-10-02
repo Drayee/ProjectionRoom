@@ -9,12 +9,16 @@ import (
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/segment"
 	"ProjectionRoom/internal/usecase"
 )
 
 // NewRouter 组装 HTTP 路由。
 // 返回 *gin.Engine 让 wire 能直接把它注入 main 的 http.Server。
-func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager) *gin.Engine {
+//
+// seg 是服务端切片队列；为 nil 时跳过 /api/v1/segment/* 的注册（单测可以只关心信令链路）。
+// 正常装配必须传真实实例，见 cmd/wire.go。
+func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, seg *segment.Queue) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
@@ -31,6 +35,9 @@ func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager) *gi
 	api.GET("/ice", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"iceServers": cfg.ICEServers()})
 	})
+
+	// 服务端切片端点（一次性预处理，不参与直播链路，因此不违反不变量 I1）。
+	registerSegmentRoutes(api, seg)
 
 	r.GET("/ws", wsHandler(cfg, hub, rooms))
 
