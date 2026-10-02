@@ -240,7 +240,8 @@ async function main() {
       const childLabels = victims.flatMap((v) => v.children)
       const startedAt = Date.now()
       const observations = []
-      while (Date.now() - startedAt < 15000) {
+      const throttleWindowMs = Number(argOf(argv, 'throttle-window', '30')) * 1000
+      while (Date.now() - startedAt < throttleWindowMs) {
         await sleep(500)
         const states = []
         for (const node of nodes) {
@@ -251,6 +252,11 @@ async function main() {
             driftMs: snapshot.sync.driftMs,
             primary: snapshot.topology.primaryId,
             paused: snapshot.video.paused,
+            // 滞后策略的证据：落后多少秒、是否已提示、门控在攒第几片。
+            lagSec: snapshot.sync.lagSec,
+            lagNotice: snapshot.sync.lagNotice,
+            gated: snapshot.gate.gated,
+            segs: snapshot.gate.bufferedSegments,
           })
         }
         observations.push({ at: Number(((Date.now() - startedAt) / 1000).toFixed(1)), states })
@@ -265,7 +271,10 @@ async function main() {
     const depths = perNode.map((n) => n.topology.depth)
     const hasMultiHop = depths.some((d) => d >= 2)
     const relays = perNode.filter((n) => (n.topology.children ?? []).length > 0 && !n.isHost)
-    const chainExpected = HOST_UPLINK > 0
+    // 链式还是扇出由**实测 K0** 决定，而不是"有没有注入上行"：
+    // 注入 5 Mbps 时 K0=8 是扇出，硬按链式断言会把一个正确的结果判成失败。
+    const hostSlots = perNode[0].hostChildSlots ?? 0
+    const chainExpected = hostSlots <= 1
     const hostChildren = perNode[0].topology.children ?? []
 
     const topologyOk = chainExpected
@@ -366,7 +375,14 @@ async function main() {
         console.log(
           `  t=${step.at}s ` +
             step.states
-              .map((s) => `${s.label}:${s.ct}s/${s.driftMs}ms${s.primary ? '' : '(无父)'}`)
+              .map(
+                (s) =>
+                  `${s.label}:${s.ct}s/${s.driftMs}ms` +
+                  `/${s.primary ? s.primary.slice(0, 8) : '无父'}` +
+                  `${s.gated ? `/门控${s.segs}` : ''}` +
+                  `${s.lagSec > 1 ? `/滞后${s.lagSec}s` : ''}` +
+                  `${s.lagNotice ? '/已提示' : ''}`,
+              )
               .join('  '),
         )
       }
