@@ -33,6 +33,13 @@ export interface DebugSnapshot {
     driftMs: number
     mode: string
     offsetMs: number
+    /** 逐跳中继：只含"我到父节点"这一跳的滤波结果。 */
+    hopOffsetMs: number
+    /** 逐跳中继：父节点上报的"它到主播"的偏移。 */
+    parentOffsetMs: number
+    /** 落后主播的秒数（正数 = 落后）。 */
+    lagSec: number
+    lagNotice: string
     bufferedAhead: number
     p95DeliveryMs: number
     syncResets: number
@@ -67,7 +74,10 @@ export interface DebugSnapshot {
     gated: boolean
     reason: string
     bufferedSec: number
-    thresholdSec: number
+    /** 门控要求：从主播时间戳所在分片起需要连续多少片。 */
+    thresholdSegments: number
+    /** 当前从锚点分片起连续完整的缓冲分片数。 */
+    bufferedSegments: number
     waitedSec: number
   }
   lifecycle: string[]
@@ -125,6 +135,10 @@ export function installDebugHook(): void {
           driftMs: Math.round(store.drift * 1000),
           mode: store.syncMode,
           offsetMs: Math.round(store.offsetMs),
+          hopOffsetMs: Math.round(store.hopOffsetMs),
+          parentOffsetMs: Math.round(store.parentOffsetMs),
+          lagSec: Number(store.lagSec.toFixed(2)),
+          lagNotice: store.lagNotice,
           bufferedAhead: Number(store.bufferedAhead.toFixed(2)),
           p95DeliveryMs: store.p95DeliveryMs(),
           syncResets: store.syncResets,
@@ -149,7 +163,8 @@ export function installDebugHook(): void {
           gated: store.gated,
           reason: store.gateReason,
           bufferedSec: Number(store.gateBufferedSec.toFixed(2)),
-          thresholdSec: store.gateThresholdSec,
+          thresholdSegments: store.gateThresholdSegments,
+          bufferedSegments: store.gateBufferedSegments,
           waitedSec: Number(store.gateWaitedSec.toFixed(1)),
         },
         lifecycle: store.lifecycle,

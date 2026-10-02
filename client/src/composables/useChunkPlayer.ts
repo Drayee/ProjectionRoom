@@ -1,4 +1,5 @@
 import { ref, shallowRef } from 'vue'
+import { segmentRange, type MediaIndex } from '../types/media'
 
 /**
  * MediaSource 播放器（SPEC §4.2）。
@@ -150,6 +151,45 @@ export function useChunkPlayer() {
     return 0
   }
 
+  /** 某个时间区间是否已被完整缓冲（末端给 50ms 容差：append 的边界不总是严丝合缝）。 */
+  function rangeBuffered(start: number, end: number): boolean {
+    const ranges = sourceBuffer?.buffered
+    if (!ranges) {
+      return false
+    }
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (start >= ranges.start(i) - 0.05 && end <= ranges.end(i) + 0.05) {
+        return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * 从 fromSeg 起、连续被完整缓冲的分片数。
+   *
+   * 这是"主播时间戳所在分片 + 连续 n 片"门控的判据。为什么要数完整分片而不是看追加游标：
+   * 游标只能说明"曾经 append 过"，中间缺一片时游标照样往前走，而播放到缺口就会卡住 ——
+   * 门控的意义正是避免这种薄缓冲/断档起播。
+   */
+  function bufferedSegmentsFrom(index: MediaIndex, fromSeg: number): number {
+    if (!sourceBuffer) {
+      return 0
+    }
+    let count = 0
+    for (let seg = fromSeg; seg <= index.segments.length; seg += 1) {
+      const range = segmentRange(index, seg)
+      if (!range) {
+        break
+      }
+      if (!rangeBuffered(range.start, range.end)) {
+        break
+      }
+      count += 1
+    }
+    return count
+  }
+
   function removeRange(start: number, end: number): Promise<void> {
     return new Promise((resolve) => {
       if (!sourceBuffer || sourceBuffer.updating || end <= start) {
@@ -274,6 +314,7 @@ export function useChunkPlayer() {
     append,
     bufferedEnd,
     bufferedAhead,
+    bufferedSegmentsFrom,
     clearBuffered,
     seekTo,
     jumpWithinBuffer,

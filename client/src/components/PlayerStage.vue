@@ -48,10 +48,13 @@ const statusText = computed(() => {
       </p>
     </div>
 
-    <!-- 启动门控：缓冲不到量就一直是"加载中"，且不设超时上限 -->
+    <!-- 启动门控：从主播时间戳所在分片起攒够连续 n 片才起播，且不设超时上限 -->
     <div class="overlay gate" v-else-if="store.gated">
-      <p class="big">缓冲中 {{ store.gateBufferedSec.toFixed(1) }}s / {{ store.gateThresholdSec }}s</p>
-      <p class="muted">{{ store.gateReason }} · 已等待 {{ store.gateWaitedSec.toFixed(0) }}s（加载不设超时）</p>
+      <p class="big">缓冲中 {{ store.gateBufferedSegments }}/{{ store.gateThresholdSegments }} 片</p>
+      <p class="muted">
+        {{ store.gateReason }} · 已缓冲 {{ store.gateBufferedSec.toFixed(1) }}s · 已等待
+        {{ store.gateWaitedSec.toFixed(0) }}s（加载不设超时）
+      </p>
       <p class="muted hint" v-if="store.gateWaitedSec > 20">
         上游带宽可能不足。主播可换用低码率预设重新切片，或等上游把缓冲补齐后再开始。
       </p>
@@ -70,6 +73,8 @@ const statusText = computed(() => {
       </span>
       <span v-if="!store.isHost">缓冲 {{ store.bufferedAhead.toFixed(1) }}s</span>
       <span v-if="!store.isHost">矫正 {{ store.syncMode }}</span>
+      <!-- 滞后过久：已提示用户并跳转到主播当前进度（SPEC §7.5 卡顿策略） -->
+      <span v-if="store.lagNotice" class="warn">{{ store.lagNotice }}</span>
       <span>seq {{ state.seq }}</span>
     </div>
   </div>

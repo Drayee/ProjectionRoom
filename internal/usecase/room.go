@@ -56,6 +56,9 @@ type Member struct {
 	RTTMs             float64
 	ThroughputBps     float64
 	UploadCapacityBps int64
+	// StallCount 是客户端上报的累计卡顿次数。它是"这条路已经不行了"的直接信号：
+	// 服务端据此立刻换路（degraded 单独不足以触发，见 UpdateMetrics）。
+	StallCount int
 
 	// 分片拥有情况（base64 位图）。服务端只做记录，供 M4 监控面板展示；
 	// 逐分片的父节点选择在客户端用同一张位图直接完成（SPEC §6.4）。
@@ -104,6 +107,11 @@ type Room struct {
 	plan         Plan
 	lastSent     map[string]string
 	lastAssignAt time.Time
+	// avoidPrimary 是"下一轮重算时避开某个成员当前主父"的一次性指令（卡顿换路）。
+	// 用完即清：它只影响紧跟着的那一次规划，否则会变成永久惩罚。
+	avoidPrimary map[string]string
+	// lastDegradedReplanAt 是上一次因卡顿触发换路的时间，用于给换路限流。
+	lastDegradedReplanAt time.Time
 }
 
 // Info 返回某个成员的信息。
@@ -221,6 +229,8 @@ func (r *Room) participantsLocked() []Participant {
 		if previous, ok := r.plan.Assignments[member.ID]; ok {
 			p.CurrentPrimary = previous.PrimaryID
 		}
+		// 卡顿换路：这一轮把当前主父标成"避开"（软排除）。
+		p.AvoidPrimary = r.avoidPrimary[member.ID]
 		out = append(out, p)
 	}
 	return out

@@ -65,14 +65,27 @@ const MAX_INFLIGHT = 4
 /** 与 SPEC §7.3 一致的抖动缓冲目标。 */
 const BUFFER_TARGET_SEC = 2
 /**
- * 启动门控：观众必须攒够这么多秒的缓冲才允许起播。
+ * 启动门控（SPEC §7.3）：从**主播时间戳所在分片**起，必须有 n 片连续且完整的缓冲才允许起播。
+ *
+ * n = 4（2s/片 ≈ 8s），与原来的"≥8s"同量级，但判据换成"连续分片"：
+ * 只看秒数会被零散的小片段骗过，播放到中间缺口照样卡住。
  * 门控不设超时上限 —— 上游没数据就一直显示"加载中"，而不是拿薄缓冲硬播（那会带来同步振荡）。
  */
-const STARTUP_BUFFER_SEC = 8
-/** 跳转后重建缓冲的门控阈值（比首次起播低一些，避免每次跳转都长时间等待）。 */
-const RESEEK_BUFFER_SEC = 4
-/** 至少连续追加这么多片才算缓冲成型，防止小片段凑秒数。 */
-const STARTUP_BUFFER_SEGMENTS = 4
+const STARTUP_GATE_SEGMENTS = 4
+/** 跳转/换父后重建缓冲的门控阈值（比首次起播低，避免每次跳转都长时间等待）。 */
+const RESEEK_GATE_SEGMENTS = 2
+/**
+ * 滞后过久阈值（秒）：落后主播这么多就认为"靠速率追不回来了"，
+ * 提示用户并直接跳到主播当前进度（SPEC §7.5 卡顿策略的最后一步）。
+ */
+const LAG_JUMP_SEC = 12
+/** 追回到这个范围内就撤掉滞后提示。 */
+const LAG_CLEAR_SEC = 2
+/**
+ * 目标分片迟迟取不到多久（毫秒）之后，改按主播**当前**进度重新取片。
+ * 场景：跳转目标或残留缺口全网都还没有，死等它只会一直停在"加载中"。
+ */
+const REQUIRED_STALE_MS = 2500
 /** 开闸前至少要有的时钟偏移样本数（最小平滤波靠样本收敛）。 */
 const MIN_CLOCK_SAMPLES = 6
 /**
@@ -130,9 +143,17 @@ export const useRoomStore = defineStore('room', () => {
   const gated = ref(false)
   const gateReason = ref('')
   const gateBufferedSec = ref(0)
-  const gateThresholdSec = ref(STARTUP_BUFFER_SEC)
+  /** 门控要求：从主播时间戳所在分片起，需要连续多少片完整缓冲。 */
+  const gateThresholdSegments = ref(STARTUP_GATE_SEGMENTS)
+  /** 当前从锚点分片起连续完整的缓冲分片数（门控判据，供 UI 与验收观察）。 */
+  const gateBufferedSegments = ref(0)
   const gateWaitedSec = ref(0)
   let gateStartedAt = 0
+
+  /** 落后主播的秒数（正数 = 落后）与"滞后跳转"的提示文案。 */
+  const lagSec = ref(0)
+  const lagNotice = ref('')
+  let lastLagJumpAt = 0
 
   /** 计时纪元：主播页面每次加载生成一个，随进度下发（C13）。 */
   const clockEpoch = ref(newClockEpoch())
@@ -142,6 +163,8 @@ export const useRoomStore = defineStore('room', () => {
   let initRequested = false
   /** 跳转后必须先取到的分片序号；取到之前调度器会一直优先补取它。 */
   let requiredSegment: number | null = null
+  /** requiredSegment 是什么时候设成当前值的：超时未满足就改按主播当前进度取片。 */
+  let requiredSegmentSince = 0
   /** 主播设定的播放速率（同步环的微调是它之上的临时缩放）。 */
   let authoritativeRate = 1
   /** 正在进行的播放器挂载，用于挡住并发 attach。 */
@@ -233,6 +256,15 @@ export const useRoomStore = defineStore('room', () => {
     onPrimaryChanged: () => {
       resetFetchState()
       broadcastHaveState()
+      // 卡顿/换路之后（SPEC §7.5）：新父节点上的缓冲可能已经断档，
+      // 因此只要当前处于不健康状态，就按"连续 n 片"重新开闸，而不是拿残缓冲继续播。
+      // 主动重平衡（缓冲健康）时不重新开闸 —— 那会让用户白白多看一次加载。
+      if (!isHost.value && (gated.value || bufferedAhead.value < BUFFER_TARGET_SEC)) {
+        noteLifecycle(
+          `换路后重新开闸 primary=${topology.primaryId.value} buffer=${bufferedAhead.value.toFixed(2)}`,
+        )
+        enterGate('父节点变更，重新建立缓冲', RESEEK_GATE_SEGMENTS)
+      }
       void pumpPrefetch()
     },
   })
@@ -366,15 +398,16 @@ export const useRoomStore = defineStore('room', () => {
       return
     }
     if (msg.t === 'progress' || msg.t === 'time-sync') {
-      // 中继职责：把上级给的权威进度原样转发给子节点（SPEC §7.5）。
-      if (!isHost.value && peerId === topology.primaryId.value) {
-        forwardToChildren(msg)
-      }
       if (isHost.value) return
+      // 只有主父的进度是权威的：备用父也会转发同一份进度，混用会让时钟来回跳。
+      const fromPrimary = peerId === topology.primaryId.value
+      let accepted = false
       if (typeof msg.currentTime === 'number' && typeof msg.hostClockMs === 'number') {
-        const accepted = clock.onProgress({
+        accepted = clock.onProgress({
           currentTime: msg.currentTime,
           hostClockMs: msg.hostClockMs,
+          parentClockMs: msg.parentClockMs,
+          parentOffsetMs: msg.parentOffsetMs,
           clockEpoch: msg.clockEpoch,
           paused: Boolean(msg.paused),
           rate: msg.rate ?? 1,
@@ -382,6 +415,9 @@ export const useRoomStore = defineStore('room', () => {
         })
         if (accepted) void applyPlayback(clock.playback.value)
       }
+      // 中继职责：只把主父来的、刚被接受的样本往下传，并且带上**更新后**的偏移估计，
+      // 这样子节点拿到的是"这一跳之后"的时钟锚点（顺序颠倒会让子节点永远慢一个样本）。
+      if (fromPrimary && accepted) forwardToChildren(msg)
     }
   }
 
@@ -458,10 +494,22 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
-  /** 把权威进度原样转发给子节点：不改 currentTime / hostClockMs / seq（SPEC §7.5）。 */
+  /**
+   * 逐跳中继：把权威进度转发给子节点，并改写成"以我为起点"的时钟锚点（SPEC §7.5）。
+   *
+   * 不改 currentTime / hostClockMs / seq —— 那是主播的权威值；
+   * 只补 parentClockMs（我此刻的本地时钟）与 parentOffsetMs（我到主播的偏移估计）。
+   * 子节点因此只需要测"它到我"这一跳，再与我的偏移相加，
+   * 多跳链路不再把每一跳的排队延迟都累加进偏移估计（ALGORITHM P1）。
+   */
   function forwardToChildren(msg: PeerControl) {
+    const relayed: PeerControl = {
+      ...msg,
+      parentClockMs: Math.round(performance.now()),
+      parentOffsetMs: Math.round(clock.offsetMs.value),
+    }
     for (const childId of topology.children.value) {
-      rtc.send(childId, encodeControl(msg))
+      rtc.send(childId, encodeControl(relayed))
     }
   }
 
@@ -476,6 +524,7 @@ export const useRoomStore = defineStore('room', () => {
   /** 换父之后复位取数状态：旧父节点上的在途请求已经无意义。 */
   function resetFetchState() {
     requiredSegment = null
+    requiredSegmentSince = 0
     initRequested = chunkStore.hasInit()
     topology.resetAttempts()
     requester.reset()
@@ -485,21 +534,29 @@ export const useRoomStore = defineStore('room', () => {
     send: (peerId, data) => rtc.send(peerId, data),
   })
 
-  /** 进入加载门控：暂停播放，等到缓冲达标再起播。 */
-  function enterGate(reason: string, thresholdSec = STARTUP_BUFFER_SEC) {
+  /** 进入加载门控：暂停播放，等到"主播时间戳所在分片起连续 n 片"再起播。 */
+  function enterGate(reason: string, thresholdSegments = STARTUP_GATE_SEGMENTS) {
     if (isHost.value) return
     if (!gated.value) {
       gateStartedAt = performance.now()
+      gateBufferedSegments.value = 0
     }
     gated.value = true
     gateReason.value = reason
-    gateThresholdSec.value = thresholdSec
+    gateThresholdSegments.value = thresholdSegments
     syncMode.value = 'gated'
+    // 门控期间"落后多少"没有意义（播放头还停在旧位置），清掉避免误导。
+    lagSec.value = 0
+    lagNotice.value = ''
     player.video.value?.pause()
   }
 
   /**
    * 门控检查：缓冲够了就起播，不够就继续等。
+   *
+   * 判据是"主播时间戳所在分片 + 连续 n 片"（SPEC §7.3）：
+   *   - 锚点取主播此刻应播到的位置 —— 门控期间播放头还停在 0，按播放头判会南辕北辙；
+   *   - 数的是**完整连续**的分片，而不是追加游标：游标只能说明"曾经 append 过"。
    *
    * 永不超时是刻意的：宁可一直显示"加载中"，也不要在薄缓冲下起播 ——
    * 后者会立刻触发大幅漂移矫正，把"同步偏差"从几十毫秒放大到几百毫秒。
@@ -514,11 +571,12 @@ export const useRoomStore = defineStore('room', () => {
     gateWaitedSec.value = (performance.now() - gateStartedAt) / 1000
 
     const anchorSeg = segmentIndexAt(index, anchor)
-    const appended = nextAppend >= anchorSeg + STARTUP_BUFFER_SEGMENTS
+    const contiguous = player.bufferedSegmentsFrom(index, anchorSeg)
+    gateBufferedSegments.value = contiguous
     // 时钟样本不够就再等：开闸瞬间的偏差尖峰全部来自还没收敛的偏移估计
     //（实测起播后 0.2s 的偏差 -387ms，随后被速率修正逐秒拉回）。
     const clockReady = clock.sampleCount() >= MIN_CLOCK_SAMPLES && clock.settledSeconds() >= CLOCK_SETTLE_SEC
-    if (!appended || gateBufferedSec.value < gateThresholdSec.value || !clockReady) {
+    if (contiguous < gateThresholdSegments.value || !clockReady) {
       syncMode.value = 'gated'
       return
     }
@@ -527,8 +585,9 @@ export const useRoomStore = defineStore('room', () => {
     gateReason.value = ''
     // 数据已经在缓冲里：直接定位到权威位置，不清缓冲。
     noteLifecycle(
-      `开闸 anchor=${anchor.toFixed(2)} before=${(video.currentTime ?? 0).toFixed(2)} ` +
-        `offset=${Math.round(clock.offsetMs.value)} samples=${clock.sampleCount()}`,
+      `开闸 anchor=${anchor.toFixed(2)} seg=${anchorSeg} 连续=${contiguous} ` +
+        `offset=${Math.round(clock.offsetMs.value)}(hop=${Math.round(clock.hopOffsetMs.value)}` +
+        `+parent=${Math.round(clock.parentOffsetMs.value)}) samples=${clock.sampleCount()}`,
     )
     player.seekTo(anchor)
     noteLifecycle(`开闸后 video=${(video.currentTime ?? 0).toFixed(2)} expected=${(clock.expectedAt() ?? 0).toFixed(2)}`)
@@ -578,8 +637,10 @@ export const useRoomStore = defineStore('room', () => {
       // 只在这个位置确实还没数据时才"盯着它补取"；已经有缓冲就别再试，
       // 否则每 200ms 就会向下一个父节点发一次注定失败的请求（实测能刷出几十次）。
       requiredSegment = player.bufferedAhead(time) <= 0 ? playheadSeg : null
+      requiredSegmentSince = performance.now()
     } else if (requiredSegment !== null && player.bufferedAhead(time) > 0) {
       requiredSegment = null
+      requiredSegmentSince = 0
     }
     // 起点不能低于 nextAppend：否则会把已经 append 过、甚至已被淘汰的分片反复重取
     //（实测能刷出上千次无谓交付）。
@@ -599,6 +660,19 @@ export const useRoomStore = defineStore('room', () => {
     if (requiredSegment !== null) {
       if (nextAppend > requiredSegment || chunkStore.has(requiredSegment)) {
         requiredSegment = null
+        requiredSegmentSince = 0
+      } else if (performance.now() - requiredSegmentSince > REQUIRED_STALE_MS) {
+        // 目标分片迟迟拿不到（多半是全网都还没有，例如抢跑太远的位置）：
+        // 改按主播**当前**进度重新取片，而不是盯着一个旧位置无限等下去（SPEC §7.5）。
+        const hostNow = clock.ready.value ? clock.expectedAt() : null
+        const fresh = hostNow !== null ? segmentIndexAt(index, hostNow) : requiredSegment
+        if (fresh > requiredSegment) {
+          noteLifecycle(`目标分片 ${requiredSegment} 取不到，改按主播当前进度 ${fresh}`)
+          requiredSegment = fresh
+          // 游标跟着走：否则 flushOrdered 会一直等着那个永远不来的分片。
+          nextAppend = fresh
+        }
+        requiredSegmentSince = performance.now()
       } else if (host || requester.pendingCount() < MAX_INFLIGHT) {
         void fetchChunk(requiredSegment)
       }
@@ -744,6 +818,27 @@ export const useRoomStore = defineStore('room', () => {
       return
     }
 
+    // 滞后过久（SPEC §7.5 卡顿策略的最后一步）：速率追不回来了，
+    // 提示用户并**直接跳到主播当前进度**；目标分片缺失时由门控与
+    // requiredSegment 的"改按主播当前进度取片"兜底。
+    const hostNow = clock.expectedAt()
+    if (hostNow !== null && !state.paused) {
+      lagSec.value = hostNow - video.currentTime
+      if (lagSec.value > LAG_JUMP_SEC) {
+        // 限流：追不回来时不要每 100ms 跳一次（那会变成"反复重灌"的死循环）。
+        if (performance.now() - lastLagJumpAt > 5000) {
+          lastLagJumpAt = performance.now()
+          lagNotice.value = `落后主播 ${lagSec.value.toFixed(1)}s，正在跳转到主播进度`
+          noteLifecycle(`滞后跳转 lag=${lagSec.value.toFixed(1)}s target=${hostNow.toFixed(2)}`)
+          await hardSeek(hostNow)
+        }
+        return
+      }
+      if (lagNotice.value !== '' && lagSec.value < LAG_CLEAR_SEC) {
+        lagNotice.value = ''
+      }
+    }
+
     const result = clock.correction(video.currentTime)
     syncMode.value = result.mode
 
@@ -804,7 +899,7 @@ export const useRoomStore = defineStore('room', () => {
     // 跳转后给 1.5s 稳定期：这段时间里缓冲还在重建，
     // 立刻按目标矫正只会在"seek → 追 → 再 seek"之间来回振荡，把偏差 spike 放大。
     correctionSettleUntil = performance.now() + 1500
-    enterGate('跳转后重建缓冲', RESEEK_BUFFER_SEC)
+    enterGate('跳转后重建缓冲', RESEEK_GATE_SEGMENTS)
 
     const segIndex = segmentIndexAt(index, target)
     await player.clearBuffered()
@@ -812,6 +907,7 @@ export const useRoomStore = defineStore('room', () => {
     initRequested = false
     nextAppend = segIndex
     requiredSegment = segIndex
+    requiredSegmentSince = performance.now()
 
     await pumpPrefetch()
     await waitForAppend(segIndex)
@@ -829,14 +925,19 @@ export const useRoomStore = defineStore('room', () => {
     const video = player.video.value
     if (!video) return null
     progressSeq += 1
+    const hostClockMs = Math.round(performance.now())
     return {
       t: 'progress',
       currentTime: video.currentTime,
-      hostClockMs: Math.round(performance.now()),
+      hostClockMs,
       clockEpoch: clockEpoch.value,
       paused: video.paused,
       rate: video.playbackRate,
       seq: progressSeq,
+      // 主播本地时钟就是主播时钟：parentOffsetMs 为 0。
+      // 中继节点转发时会用"它自己的时钟 + 它到主播的偏移"改写这两个字段。
+      parentClockMs: hostClockMs,
+      parentOffsetMs: 0,
     }
   }
 
@@ -858,13 +959,16 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function clockStoreSendTimeSync(peerId: string) {
+    const hostClockMs = Math.round(performance.now())
     rtc.send(
       peerId,
       encodeControl({
         t: 'time-sync',
-        hostClockMs: Math.round(performance.now()),
+        hostClockMs,
         clockEpoch: clockEpoch.value,
         seq: progressSeq,
+        parentClockMs: hostClockMs,
+        parentOffsetMs: 0,
       }),
     )
   }
@@ -878,12 +982,15 @@ export const useRoomStore = defineStore('room', () => {
 
   function tickTimeSync() {
     if (!isHost.value || !joined.value) return
+    const hostClockMs = Math.round(performance.now())
     rtc.broadcast(
       encodeControl({
         t: 'time-sync',
-        hostClockMs: Math.round(performance.now()),
+        hostClockMs,
         clockEpoch: clockEpoch.value,
         seq: progressSeq,
+        parentClockMs: hostClockMs,
+        parentOffsetMs: 0,
       }),
     )
   }
@@ -1182,8 +1289,14 @@ export const useRoomStore = defineStore('room', () => {
     gated,
     gateReason,
     gateBufferedSec,
-    gateThresholdSec,
+    gateThresholdSegments,
+    gateBufferedSegments,
     gateWaitedSec,
+    // 滞后策略（卡顿 → 换路 → 追赶 → 跳转）的观测量
+    lagSec,
+    lagNotice,
+    hopOffsetMs: clock.hopOffsetMs,
+    parentOffsetMs: clock.parentOffsetMs,
     playerDebugState: () => player.debugState(),
     lifecycle: storeLifecycle,
     topologyAssignment: topology.assignment,

@@ -728,3 +728,145 @@ func TestSendTopologyForUnknownMember(t *testing.T) {
 		t.Fatalf("主播请求拓扑不应失败: %v", err)
 	}
 }
+
+// directCount 统计发往某连接的指定类型消息条数。
+func (f *fakeBus) directCount(id, msgType string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	count := 0
+	for _, raw := range f.direct[id] {
+		if env, err := model.Unmarshal(raw); err == nil && env.Type == msgType {
+			count++
+		}
+	}
+	return count
+}
+
+// setupFanoutRoom 搭一个"有第二条路可走"的房间：主播 5 Mbps（K0=2）配 2 Mbps 码率，
+// 三个观众各 5 Mbps 上行 → v1/v2 直连主播，v3 只能挂在 v1 下面（深度 2）。
+func setupFanoutRoom(t *testing.T, m *Manager, bus *fakeBus) *Room {
+	t.Helper()
+
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	if err := m.UpdateMetrics(r.ID, "host", model.Metrics{UploadCapacityBps: 5_000_000, RTTMs: 10}); err != nil {
+		t.Fatalf("主播上报度量失败: %v", err)
+	}
+	index := sampleMediaIndex(2_000_000)
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
+		t.Fatalf("发布索引失败: %v", err)
+	}
+	for _, id := range []string{"v1", "v2", "v3"} {
+		if err := m.Join(r.ID, id, id, model.RoleViewer, ""); err != nil {
+			t.Fatalf("%s 进房失败: %v", id, err)
+		}
+		if err := m.UpdateMetrics(r.ID, id, model.Metrics{UploadCapacityBps: 5_000_000, RTTMs: 30}); err != nil {
+			t.Fatalf("%s 上报度量失败: %v", id, err)
+		}
+	}
+	_ = bus
+
+	return r
+}
+
+// TestStallTriggersPathChange 覆盖"卡顿 → 服务器换路"这条链路（SPEC §7.5）：
+// v3 原本挂在 v1 下面，上报一次新卡顿后必须换到另一条路上（v2），
+// 且避开的应当是它**当前**的主父。
+func TestStallTriggersPathChange(t *testing.T) {
+	m, bus := newTestManager(t, 16)
+	r := setupFanoutRoom(t, m, bus)
+
+	before := bus.lastDirectOfType(t, "v3", model.TypeParentAssignment).Topology
+	if before == nil || before.PrimaryID != "v1" || before.Depth != 2 {
+		t.Fatalf("前置条件不成立：v3 应挂在 v1 下（深度 2），实际 %+v", before)
+	}
+
+	// 一次真实卡顿：stallCount 从 0 涨到 1，同时带着 degraded 与空缓冲。
+	if err := m.UpdateMetrics(r.ID, "v3", model.Metrics{
+		UploadCapacityBps: 5_000_000,
+		RTTMs:             30,
+		StallCount:        1,
+		BufferHealth:      0,
+		Degraded:          true,
+		PrimaryID:         "v1",
+	}); err != nil {
+		t.Fatalf("上报卡顿失败: %v", err)
+	}
+
+	after := bus.lastDirectOfType(t, "v3", model.TypeParentAssignment).Topology
+	if after == nil {
+		t.Fatal("换路后 v3 没有收到新的拓扑分配")
+	}
+	if after.PrimaryID == "v1" {
+		t.Fatalf("卡顿后仍挂在原来的主父上，路径没有改变: %+v", after)
+	}
+	// 唯一另一条"深度最小"的路是 v2（同为深度 1 的兄弟节点）。
+	if after.PrimaryID != "v2" {
+		t.Fatalf("卡顿后应换到 v2，实际 %+v", after)
+	}
+	if after.Depth != before.Depth {
+		t.Fatalf("换路不应改变树的深度：原来 %d，现在 %d", before.Depth, after.Depth)
+	}
+
+	// 换路必须只影响当事节点：v1/v2 的父子关系不变。
+	if got := bus.lastDirectOfType(t, "v1", model.TypeParentAssignment).Topology.PrimaryID; got != "host" {
+		t.Fatalf("v1 不应被换路影响，实际主父 %q", got)
+	}
+}
+
+// TestDegradedAloneDoesNotReplan 说明为什么触发条件是"新卡顿"而不是 degraded：
+// 门控等待、刚起播的节点都会上报 degraded，按它换路会让整屋不停搬家。
+func TestDegradedAloneDoesNotReplan(t *testing.T) {
+	m, bus := newTestManager(t, 16)
+	r := setupFanoutRoom(t, m, bus)
+
+	countBefore := bus.directCount("v3", model.TypeParentAssignment)
+
+	for i := 0; i < 3; i++ {
+		if err := m.UpdateMetrics(r.ID, "v3", model.Metrics{
+			UploadCapacityBps: 5_000_000,
+			RTTMs:             30,
+			StallCount:        0,
+			BufferHealth:      1,
+			Degraded:          true,
+			PrimaryID:         "v1",
+		}); err != nil {
+			t.Fatalf("上报 degraded 失败: %v", err)
+		}
+	}
+
+	if got := bus.directCount("v3", model.TypeParentAssignment); got != countBefore {
+		t.Fatalf("只有 degraded 时不应重新下发拓扑，条数从 %d 变成 %d", countBefore, got)
+	}
+	if got := bus.lastDirectOfType(t, "v3", model.TypeParentAssignment).Topology.PrimaryID; got != "v1" {
+		t.Fatalf("只有 degraded 时不应换路，实际主父 %q", got)
+	}
+}
+
+// TestStallReplanIsRateLimited 覆盖换路限流：连续卡顿上报不能变成"每几秒搬一次家"。
+func TestStallReplanIsRateLimited(t *testing.T) {
+	m, bus := newTestManager(t, 16)
+	r := setupFanoutRoom(t, m, bus)
+
+	if err := m.UpdateMetrics(r.ID, "v3", model.Metrics{StallCount: 1, Degraded: true, PrimaryID: "v1"}); err != nil {
+		t.Fatalf("上报卡顿失败: %v", err)
+	}
+	afterFirst := bus.directCount("v3", model.TypeParentAssignment)
+
+	// 立刻再报两次新卡顿：都在 3s 限流窗口内，不应再触发换路。
+	for _, n := range []int{2, 3} {
+		if err := m.UpdateMetrics(r.ID, "v3", model.Metrics{StallCount: n, Degraded: true, PrimaryID: "v2"}); err != nil {
+			t.Fatalf("上报卡顿失败: %v", err)
+		}
+	}
+
+	if got := bus.directCount("v3", model.TypeParentAssignment); got != afterFirst {
+		t.Fatalf("3s 限流窗口内不应重复换路：条数从 %d 变成 %d", afterFirst, got)
+	}
+}

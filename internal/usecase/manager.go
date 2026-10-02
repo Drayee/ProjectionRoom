@@ -20,6 +20,10 @@ const (
 	// reassignMinInterval 限制拓扑重算频率：度量每 5s 上报一次，
 	// 没有节流的话一次网络抖动就会引发一串无谓的重挂载（SPEC §6.3 要求换防平滑）。
 	reassignMinInterval = 1500 * time.Millisecond
+
+	// degradedReplanInterval 限制"卡顿换路"的频率：卡顿会连续上报多轮，
+	// 每轮都重算就退化成"每几秒搬一次家"，而搬家本身又会打断缓冲 —— 那是抖动的来源。
+	degradedReplanInterval = 3 * time.Second
 )
 
 // Broadcaster 由 service.Hub 实现。
@@ -72,6 +76,7 @@ func (m *Manager) Create(roomID, password string, streamBps int64) (*Room, error
 		StreamBps:    streamBps,
 		CreatedAt:    time.Now(),
 		members:      make(map[string]*Member),
+		avoidPrimary: make(map[string]string),
 		lastPlayback: model.PlaybackState{Paused: true, Rate: 1},
 	}
 	m.rooms[roomID] = r
@@ -341,11 +346,27 @@ func (m *Manager) UpdateMetrics(roomID, clientID string, metrics model.Metrics) 
 	if metrics.UploadCapacityBps > 0 {
 		member.UploadCapacityBps = metrics.UploadCapacityBps
 	}
+	// 卡顿（stall）是"当前这条路已经不行了"的直接信号：立刻换路，不等 5s 度量节流。
+	// degraded 单独不足以触发 —— 门控等待、刚起播的节点都会上报 degraded，
+	// 拿它当触发条件会让整屋每 3 秒搬一次家，而节流的存在正是为了防这个。
+	stalled := metrics.StallCount > member.StallCount
+	member.StallCount = metrics.StallCount
+	avoidCurrentParent := false
+	if stalled && member.PrimaryID != "" && time.Since(r.lastDegradedReplanAt) >= degradedReplanInterval {
+		r.lastDegradedReplanAt = time.Now()
+		r.avoidPrimary[clientID] = member.PrimaryID
+		avoidCurrentParent = true
+		log.Printf("room %s: %s 上报卡顿（累计 %d 次，缓冲 %.1fs，模式 %s），按避开主父 %s 重新规划路径",
+			roomID, clientID, member.StallCount, metrics.BufferHealth, r.plan.Mode, member.PrimaryID)
+	} else if metrics.Degraded && member.PrimaryID != "" {
+		log.Printf("room %s: %s 上报 degraded（缓冲 %.1fs），暂不换路（未观测到新卡顿）",
+			roomID, clientID, metrics.BufferHealth)
+	}
 	r.mu.Unlock()
 
 	// 上行实测值变了就必须立刻重算（容量与准入都跟着变）；
 	// 只有 RTT 之类的抖动交给节流，避免无谓的重挂载。
-	m.ReassignTopology(roomID, uploadChanged)
+	m.ReassignTopology(roomID, uploadChanged || avoidCurrentParent)
 
 	return nil
 }
@@ -373,6 +394,10 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 	})
 	r.plan = plan
 	r.lastAssignAt = time.Now()
+	// 避开指令是一次性的：只影响刚算完的这一轮，否则会退化成对某个父节点的永久惩罚。
+	if len(r.avoidPrimary) > 0 {
+		r.avoidPrimary = make(map[string]string)
+	}
 
 	var outbound []model.Envelope
 	for _, a := range plan.Assignments {

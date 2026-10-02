@@ -448,3 +448,63 @@ func TestAssignReplacesDepartedDistributor(t *testing.T) {
 		t.Fatal("已离开的节点不应出现在分配表里")
 	}
 }
+
+// TestAssignAvoidPrimaryMovesToSibling 覆盖"卡顿换路"的正面效果（SPEC §7.5）：
+// 被标为避开的父节点这一轮不再被选中，连"继续用现任"的捷径都取消。
+func TestAssignAvoidPrimaryMovesToSibling(t *testing.T) {
+	opts := Options{StreamBps: 2_000_000}
+	// 主播 K0 = floor(5*0.8/2) = 2：v1、v2 直连主播，v3 只能挂到 v1 下面。
+	participants := parts(
+		host(5_000_000),
+		viewer("v1", 2, 5_000_000),
+		viewer("v2", 3, 5_000_000),
+		viewer("v3", 4, 5_000_000),
+	)
+
+	first := Assign("host", participants, opts)
+	if got := first.Assignments["v3"].PrimaryID; got != "v1" {
+		t.Fatalf("前置条件不成立：v3 应挂在 v1 下，实际 %q", got)
+	}
+
+	// 模拟服务端：把每个成员的当前主父写回，并把 v3 的当前主父标成"避开"。
+	for i := range participants {
+		if a, ok := first.Assignments[participants[i].ID]; ok {
+			participants[i].CurrentPrimary = a.PrimaryID
+		}
+	}
+	for i := range participants {
+		if participants[i].ID == "v3" {
+			participants[i].AvoidPrimary = "v1"
+		}
+	}
+
+	second := Assign("host", participants, opts)
+	if got := second.Assignments["v3"].PrimaryID; got != "v2" {
+		t.Fatalf("避开 v1 后 v3 应换到 v2，实际 %q", got)
+	}
+	if second.Assignments["v3"].Depth != first.Assignments["v3"].Depth {
+		t.Fatalf("换路不应改变树的深度：原来 %d，现在 %d",
+			first.Assignments["v3"].Depth, second.Assignments["v3"].Depth)
+	}
+	assertTreeSane(t, second, participants, opts)
+}
+
+// TestAssignAvoidPrimaryFallsBackWhenOnlyOption 覆盖软排除语义：
+// 被避开的父节点是唯一可行选择时仍然要用它 ——
+// 硬性排除会把节点从"卡顿"直接变成"没有数据"，那比卡顿更糟。
+func TestAssignAvoidPrimaryFallsBackWhenOnlyOption(t *testing.T) {
+	opts := Options{StreamBps: 2_000_000}
+	participants := parts(host(5_000_000), viewer("v1", 2, 5_000_000))
+	participants[1].CurrentPrimary = "host"
+	participants[1].AvoidPrimary = "host"
+
+	plan := Assign("host", participants, opts)
+
+	a, ok := plan.Assignments["v1"]
+	if !ok || a.PrimaryID != "host" {
+		t.Fatalf("避开的父节点是唯一选择时应退回选它，实际 %+v", a)
+	}
+	if len(plan.Unassigned) != 0 {
+		t.Fatalf("不应有未安置节点，实际 %v", plan.Unassigned)
+	}
+}

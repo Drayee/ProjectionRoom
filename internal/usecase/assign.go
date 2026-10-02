@@ -30,6 +30,10 @@ type Participant struct {
 	Order int
 	// CurrentPrimary 是当前主父，用于抑制抖动：只要它还有余量就继续用。
 	CurrentPrimary string
+	// AvoidPrimary 是本轮**不要**再选的父节点（卡顿换路时由服务端指定）。
+	// 只做软排除：如果排除后无处可放，仍然会退回选它 ——
+	// 硬性排除会把节点从"卡顿"直接变成"没有数据"，那比卡顿更糟。
+	AvoidPrimary string
 }
 
 // Options 是分配参数。
@@ -346,11 +350,25 @@ func Assign(hostID string, participants []Participant, opts Options) Plan {
 //  1. 在所有还有余量、且深度允许的节点里取**深度最小**的一层 —— 树越浅，跳数与故障半径越小；
 //  2. 同一层内再按 score 选（余量占比优先，其次 RTT、稳定性）；
 //  3. 已经挂着的父节点只要还有余量就继续用 —— 重挂载的代价远高于收益。
+//
+// 例外是 AvoidPrimary（卡顿换路的软排除）：它连"继续用现任"的捷径都取消，
+// 只有排除后真的无处可放时才退回选它。
 func chooseParent(nodes map[string]*allocNode, candidate Participant, opts Options) string {
-	if current, ok := nodes[candidate.CurrentPrimary]; ok && current.spare() > 0 && current.depth+1 <= opts.MaxDepth {
+	avoid := candidate.AvoidPrimary
+	if current, ok := nodes[candidate.CurrentPrimary]; ok && current.id != avoid &&
+		current.spare() > 0 && current.depth+1 <= opts.MaxDepth {
 		return candidate.CurrentPrimary
 	}
 
+	best := bestParentByScore(nodes, candidate, opts, avoid)
+	if best == "" && avoid != "" {
+		best = bestParentByScore(nodes, candidate, opts, "")
+	}
+	return best
+}
+
+// bestParentByScore 是"同深度比分数"的那一半；skip 非空时跳过该候选。
+func bestParentByScore(nodes map[string]*allocNode, candidate Participant, opts Options, skip string) string {
 	// 按加入顺序遍历，而不是遍历 map：并列时必须给出一致的结果，
 	// 否则同样的输入会得到不同的树，调试与验收都无从复现。
 	ids := make([]string, 0, len(nodes))
@@ -369,7 +387,7 @@ func chooseParent(nodes map[string]*allocNode, candidate Participant, opts Optio
 	var bestScore float64
 	for _, id := range ids {
 		n := nodes[id]
-		if n.id == candidate.ID || n.spare() <= 0 || n.depth+1 > opts.MaxDepth {
+		if n.id == candidate.ID || n.id == skip || n.spare() <= 0 || n.depth+1 > opts.MaxDepth {
 			continue
 		}
 		if best == "" || n.depth < bestDepth || (n.depth == bestDepth && n.score() > bestScore) {
