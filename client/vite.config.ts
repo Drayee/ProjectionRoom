@@ -1,4 +1,4 @@
-﻿import { defineConfig } from 'vite'
+import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // Go 服务端地址。前后端分离开发（SPEC §1.3）：Vite 负责页面，Go 负责 /api 与 /ws。

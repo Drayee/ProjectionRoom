@@ -182,6 +182,15 @@ export function useChunkRequester(opts: {
     return inflight.size
   }
 
+  /** 某个父节点当前的在途请求数：条带化按主父积压决定是否把分片分流给备用父。 */
+  function pendingFor(peerId: string): number {
+    let count = 0
+    for (const key of inflight.keys()) {
+      if (key.startsWith(`${peerId}#`)) count += 1
+    }
+    return count
+  }
+
   function reset() {
     for (const entry of inflight.values()) {
       window.clearTimeout(entry.timer)
@@ -191,5 +200,17 @@ export function useChunkRequester(opts: {
     samples.length = 0
   }
 
-  return { request, handleControl, handleBinary, isInit, p95DeliveryMs, pendingCount, reset, delivered, timedOut, failed }
+  return {
+    request,
+    handleControl,
+    handleBinary,
+    isInit,
+    p95DeliveryMs,
+    pendingCount,
+    pendingFor,
+    reset,
+    delivered,
+    timedOut,
+    failed,
+  }
 }

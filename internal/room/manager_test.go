@@ -70,30 +70,43 @@ func (f *fakeBus) CloseRoom(roomID string) {
 	f.closed = append(f.closed, roomID)
 }
 
-// lastDirect 返回发往某连接的最后一条消息。
-func (f *fakeBus) lastDirect(t *testing.T, id string) protocol.Envelope {
+// lastBroadcastOfType 返回房间内最后一条指定类型的广播。
+func (f *fakeBus) lastBroadcastOfType(t *testing.T, roomID, msgType string) protocol.Envelope {
+	t.Helper()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := len(f.roomWide[roomID]) - 1; i >= 0; i-- {
+		var env protocol.Envelope
+		if json.Unmarshal(f.roomWide[roomID][i], &env) == nil && env.Type == msgType {
+			return env
+		}
+	}
+	t.Fatalf("房间 %s 没有类型为 %s 的广播", roomID, msgType)
+
+	return protocol.Envelope{}
+}
+
+// lastDirectOfType 返回发往某连接的最后一条指定类型消息。
+//
+// 必须按类型取：拓扑分配与容量广播会插在 joined / member-joined 中间，
+// "取最后一条"会读到别的消息上去。
+func (f *fakeBus) lastDirectOfType(t *testing.T, id, msgType string) protocol.Envelope {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	list := f.direct[id]
-	if len(list) == 0 {
-		t.Fatalf("连接 %s 没有收到任何定向消息", id)
+	for i := len(list) - 1; i >= 0; i-- {
+		var env protocol.Envelope
+		if json.Unmarshal(list[i], &env) == nil && env.Type == msgType {
+			return env
+		}
 	}
-	return decode(t, list[len(list)-1])
-}
+	t.Fatalf("连接 %s 没有收到类型为 %s 的定向消息", id, msgType)
 
-// lastBroadcast 返回房间内最后一条广播消息。
-func (f *fakeBus) lastBroadcast(t *testing.T, roomID string) protocol.Envelope {
-	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	list := f.roomWide[roomID]
-	if len(list) == 0 {
-		t.Fatalf("房间 %s 没有收到任何广播消息", roomID)
-	}
-	return decode(t, list[len(list)-1])
+	return protocol.Envelope{}
 }
 
 // broadcastCount 统计房间内某类型的广播条数。
@@ -152,7 +165,7 @@ func TestCreateAndJoinFlow(t *testing.T) {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 
-	joined := bus.lastDirect(t, "host")
+	joined := bus.lastDirectOfType(t, "host", protocol.TypeJoined)
 	if joined.Type != protocol.TypeJoined || joined.HostID != "host" || joined.SelfID != "host" {
 		t.Fatalf("主播入房快照不正确: %+v", joined)
 	}
@@ -164,16 +177,16 @@ func TestCreateAndJoinFlow(t *testing.T) {
 		t.Fatalf("观众进房失败: %v", err)
 	}
 
-	vJoined := bus.lastDirect(t, "viewer1")
+	vJoined := bus.lastDirectOfType(t, "viewer1", protocol.TypeJoined)
 	if vJoined.Type != protocol.TypeJoined || len(vJoined.Members) != 2 {
 		t.Fatalf("观众入房快照应含 2 名成员: %+v", vJoined)
 	}
 
-	broadcast := bus.lastBroadcast(t, r.ID)
+	broadcast := bus.lastBroadcastOfType(t, r.ID, protocol.TypeMemberJoined)
 	if broadcast.Type != protocol.TypeMemberJoined || broadcast.Member == nil || broadcast.Member.ID != "viewer1" {
 		t.Fatalf("应广播 member-joined: %+v", broadcast)
 	}
-	if except := bus.excepts[r.ID][len(bus.excepts[r.ID])-1]; except != "viewer1" {
+	if except := bus.lastExceptFor(t, r.ID, protocol.TypeMemberJoined); except != "viewer1" {
 		t.Fatalf("member-joined 应排除加入者本人，实际 except=%q", except)
 	}
 }
@@ -238,7 +251,7 @@ func TestChatIsServerOrderedAndMemberOnly(t *testing.T) {
 		t.Fatalf("聊天失败: %v", err)
 	}
 
-	chat := bus.lastBroadcast(t, r.ID)
+	chat := bus.lastBroadcastOfType(t, r.ID, protocol.TypeChat)
 	if chat.Type != protocol.TypeChat || chat.Text != "一起看" || chat.From != "host" {
 		t.Fatalf("聊天广播不正确: %+v", chat)
 	}
@@ -271,7 +284,7 @@ func TestOnlyHostCanControlAndSeqIsMonotonic(t *testing.T) {
 	if err := m.HandleControl(r.ID, "host", viewerIntent); err != nil {
 		t.Fatalf("主播下发控制失败: %v", err)
 	}
-	first := bus.lastBroadcast(t, r.ID)
+	first := bus.lastBroadcastOfType(t, r.ID, protocol.TypeRoomControl)
 	if first.Type != protocol.TypeRoomControl || first.Playback == nil {
 		t.Fatalf("应广播 room-control: %+v", first)
 	}
@@ -283,7 +296,7 @@ func TestOnlyHostCanControlAndSeqIsMonotonic(t *testing.T) {
 	if err := m.HandleControl(r.ID, "host", protocol.Envelope{Action: protocol.ActionPause, CurrentTime: 30}); err != nil {
 		t.Fatalf("主播暂停失败: %v", err)
 	}
-	second := bus.lastBroadcast(t, r.ID)
+	second := bus.lastBroadcastOfType(t, r.ID, protocol.TypeRoomControl)
 	if second.Playback.Seq != 2 || !second.Playback.Paused {
 		t.Fatalf("seq 应单调递增且记录暂停态: %+v", second.Playback)
 	}
@@ -295,7 +308,7 @@ func TestOnlyHostCanControlAndSeqIsMonotonic(t *testing.T) {
 	if err := m.HandleControl(r.ID, "host", protocol.Envelope{Action: protocol.ActionSeek, CurrentTime: 45, Paused: true}); err != nil {
 		t.Fatalf("主播跳转失败: %v", err)
 	}
-	third := bus.lastBroadcast(t, r.ID)
+	third := bus.lastBroadcastOfType(t, r.ID, protocol.TypeRoomControl)
 	if third.Playback.Seq != 3 || !third.Playback.Paused || third.Playback.CurrentTime != 45 {
 		t.Fatalf("seek 应保留暂停态并递增 seq: %+v", third.Playback)
 	}
@@ -304,7 +317,7 @@ func TestOnlyHostCanControlAndSeqIsMonotonic(t *testing.T) {
 	if err := m.Join(r.ID, "v2", "迟到观众", protocol.RoleViewer, ""); err != nil {
 		t.Fatalf("迟到观众进房失败: %v", err)
 	}
-	late := bus.lastDirect(t, "v2")
+	late := bus.lastDirectOfType(t, "v2", protocol.TypeJoined)
 	if late.Playback == nil || late.Playback.Seq != 3 || late.Playback.CurrentTime != 45 || !late.Playback.Paused {
 		t.Fatalf("入房快照应携带最新播放状态: %+v", late.Playback)
 	}
@@ -324,7 +337,7 @@ func TestLeaveLifecycle(t *testing.T) {
 	}
 
 	m.Leave(r.ID, "v1")
-	if left := bus.lastBroadcast(t, r.ID); left.Type != protocol.TypeMemberLeft || left.ClientID != "v1" {
+	if left := bus.lastBroadcastOfType(t, r.ID, protocol.TypeMemberLeft); left.ClientID != "v1" {
 		t.Fatalf("应广播 member-left: %+v", left)
 	}
 	if _, ok := m.Get(r.ID); !ok {
@@ -332,7 +345,7 @@ func TestLeaveLifecycle(t *testing.T) {
 	}
 
 	m.Leave(r.ID, "host")
-	if closed := bus.lastBroadcast(t, r.ID); closed.Type != protocol.TypeRoomClosed {
+	if closed := bus.lastBroadcastOfType(t, r.ID, protocol.TypeRoomClosed); closed.Type != protocol.TypeRoomClosed {
 		t.Fatalf("主播离开应广播 room-closed: %+v", closed)
 	}
 	if len(bus.closed) != 1 || bus.closed[0] != r.ID {
@@ -364,24 +377,6 @@ func TestCreateRejectsDuplicateRoomID(t *testing.T) {
 	if _, err := m.Create("ROOM01", "", 0); !errors.Is(err, ErrRoomExists) {
 		t.Fatalf("重复房间码应返回 ErrRoomExists，实际 %v", err)
 	}
-}
-
-// lastBroadcastOfType 返回房间内最后一条指定类型的广播。
-func (f *fakeBus) lastBroadcastOfType(t *testing.T, roomID, msgType string) protocol.Envelope {
-	t.Helper()
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	for i := len(f.roomWide[roomID]) - 1; i >= 0; i-- {
-		var env protocol.Envelope
-		if json.Unmarshal(f.roomWide[roomID][i], &env) == nil && env.Type == msgType {
-			return env
-		}
-	}
-	t.Fatalf("房间 %s 没有类型为 %s 的广播", roomID, msgType)
-
-	return protocol.Envelope{}
 }
 
 // lastExceptFor 返回房间内最后一条指定类型广播的 except 参数。
@@ -467,7 +462,7 @@ func TestSetMediaIndexRequiresHostAndLocks(t *testing.T) {
 	if err := m.Join(r.ID, "v2", "迟到观众", protocol.RoleViewer, ""); err != nil {
 		t.Fatalf("迟到观众进房失败: %v", err)
 	}
-	late := bus.lastDirect(t, "v2")
+	late := bus.lastDirectOfType(t, "v2", protocol.TypeJoined)
 	if len(late.MediaIndex) == 0 {
 		t.Fatal("入房快照必须携带分片索引")
 	}
@@ -517,13 +512,19 @@ func TestCapacityGateFollowsMeasuredUplink(t *testing.T) {
 		t.Fatalf("超出 1+K0 应返回 ErrFull，实际 %v", err)
 	}
 
-	// 观众的度量不应影响房间容量。
+	// M3 起，观众的实测上行会变成"转发容量"：房间上限因此变大，
+	// 但主播自己的 K0 不受影响 —— 瓶颈仍在主播的上行（SPEC §6.2）。
+	beforeRelay := r.Capacity(16)
 	if err := m.UpdateMetrics(r.ID, "v1", protocol.Metrics{UploadCapacityBps: 100_000_000}); err != nil {
 		t.Fatalf("观众上报度量失败: %v", err)
 	}
-	after := r.Capacity(16)
-	if after.HostChildSlots != 1 || after.MaxMembers != 2 {
-		t.Fatalf("观众的上行不应改变容量: %+v", after)
+	afterRelay := r.Capacity(16)
+	if afterRelay.HostChildSlots != 1 || afterRelay.Mode != string(topology.ModeChain) {
+		t.Fatalf("主播的 K0 不应因观众的度量而改变: %+v", afterRelay)
+	}
+	if afterRelay.MaxMembers <= beforeRelay.MaxMembers {
+		t.Fatalf("强上行观众应成为转发节点并扩大房间上限：before=%d after=%d",
+			beforeRelay.MaxMembers, afterRelay.MaxMembers)
 	}
 }
 
@@ -538,5 +539,215 @@ func TestUpdateMetricsRejectsNonMember(t *testing.T) {
 	}
 	if err := m.UpdateMetrics("NOSUCH", "ghost", protocol.Metrics{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("不存在的房间应返回 ErrNotFound，实际 %v", err)
+	}
+}
+
+// ---------- M3：拓扑分配与单链分发 ----------
+
+func TestTopologyAssignmentsAreBroadcast(t *testing.T) {
+	m, bus := newTestManager(t, 16)
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+
+	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	// 16 Mbps 上行 / 2 Mbps 码率 → K0 = 6：三个观众应全部直连主播。
+	if err := m.UpdateMetrics(r.ID, "host", protocol.Metrics{UploadCapacityBps: 16_000_000, RTTMs: 10}); err != nil {
+		t.Fatalf("主播上报度量失败: %v", err)
+	}
+	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
+	if err != nil {
+		t.Fatalf("序列化索引失败: %v", err)
+	}
+	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+		t.Fatalf("发布索引失败: %v", err)
+	}
+
+	for _, id := range []string{"v1", "v2", "v3"} {
+		if err := m.Join(r.ID, id, id, protocol.RoleViewer, ""); err != nil {
+			t.Fatalf("%s 进房失败: %v", id, err)
+		}
+	}
+
+	for _, id := range []string{"host", "v1", "v2", "v3"} {
+		env := bus.lastDirectOfType(t, id, protocol.TypeParentAssignment)
+		if env.Topology == nil {
+			t.Fatalf("%s 没有收到拓扑分配", id)
+		}
+	}
+
+	hostTopo := bus.lastDirectOfType(t, "host", protocol.TypeParentAssignment).Topology
+	if hostTopo.Depth != 0 || len(hostTopo.Children) != 3 {
+		t.Fatalf("主播应是深度 0 且带 3 个子节点，实际 %+v", hostTopo)
+	}
+	for _, id := range []string{"v1", "v2", "v3"} {
+		topo := bus.lastDirectOfType(t, id, protocol.TypeParentAssignment).Topology
+		if topo.PrimaryID != "host" || topo.Depth != 1 {
+			t.Fatalf("%s 应直连主播，实际 %+v", id, topo)
+		}
+		if len(topo.BackupIDs) == 0 {
+			t.Fatalf("%s 应至少有一个备用父（主父慢时才有退路）", id)
+		}
+		if topo.Mode != string(topology.ModeFanout) {
+			t.Fatalf("模式应为 fanout，实际 %q", topo.Mode)
+		}
+	}
+
+	capacity := bus.lastBroadcastOfType(t, r.ID, protocol.TypeCapacity)
+	if capacity.Capacity == nil || capacity.Capacity.Mode != string(topology.ModeFanout) || capacity.Capacity.HostChildSlots != 6 {
+		t.Fatalf("容量广播不正确: %+v", capacity.Capacity)
+	}
+}
+
+func TestChainModeGivesHostExactlyOneChild(t *testing.T) {
+	m, bus := newTestManager(t, 16)
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
+	if err != nil {
+		t.Fatalf("序列化索引失败: %v", err)
+	}
+	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+		t.Fatalf("发布索引失败: %v", err)
+	}
+	for _, id := range []string{"relay", "leaf1", "leaf2"} {
+		if err := m.Join(r.ID, id, id, protocol.RoleViewer, ""); err != nil {
+			t.Fatalf("%s 进房失败: %v", id, err)
+		}
+	}
+
+	// 主播实测 4 Mbps → K0 = floor(4×0.8/2) = 1 → 单链模式；
+	// relay 实测 20 Mbps → 它必须成为那个唯一的分发节点。
+	if err := m.UpdateMetrics(r.ID, "host", protocol.Metrics{UploadCapacityBps: 4_000_000}); err != nil {
+		t.Fatalf("主播上报失败: %v", err)
+	}
+	if err := m.UpdateMetrics(r.ID, "relay", protocol.Metrics{UploadCapacityBps: 20_000_000}); err != nil {
+		t.Fatalf("relay 上报失败: %v", err)
+	}
+
+	hostTopo := bus.lastDirectOfType(t, "host", protocol.TypeParentAssignment).Topology
+	if hostTopo.Mode != string(topology.ModeChain) {
+		t.Fatalf("K0=1 时应为单链模式，实际 %q", hostTopo.Mode)
+	}
+	if len(hostTopo.Children) != 1 || hostTopo.Children[0] != "relay" {
+		t.Fatalf("单链模式下主播只能有 1 个子节点（分发节点），实际 %v", hostTopo.Children)
+	}
+	if hostTopo.DistributorID != "relay" {
+		t.Fatalf("分发节点应为上行最强的 relay，实际 %q", hostTopo.DistributorID)
+	}
+
+	relayTopo := bus.lastDirectOfType(t, "relay", protocol.TypeParentAssignment).Topology
+	if relayTopo.PrimaryID != "host" || relayTopo.Depth != 1 {
+		t.Fatalf("分发节点应直连主播，实际 %+v", relayTopo)
+	}
+
+	for _, id := range []string{"leaf1", "leaf2"} {
+		topo := bus.lastDirectOfType(t, id, protocol.TypeParentAssignment).Topology
+		if topo.PrimaryID != "relay" || topo.Depth != 2 {
+			t.Fatalf("%s 应挂在分发节点下（depth=2），实际 %+v", id, topo)
+		}
+	}
+}
+
+func TestDistributorHandoffBroadcast(t *testing.T) {
+	m, bus := newTestManager(t, 16)
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
+	if err != nil {
+		t.Fatalf("序列化索引失败: %v", err)
+	}
+	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+		t.Fatalf("发布索引失败: %v", err)
+	}
+	if err := m.Join(r.ID, "relay1", "转发1", protocol.RoleViewer, ""); err != nil {
+		t.Fatalf("relay1 进房失败: %v", err)
+	}
+
+	if err := m.UpdateMetrics(r.ID, "host", protocol.Metrics{UploadCapacityBps: 4_000_000}); err != nil {
+		t.Fatalf("主播上报失败: %v", err)
+	}
+	if err := m.UpdateMetrics(r.ID, "relay1", protocol.Metrics{UploadCapacityBps: 6_000_000}); err != nil {
+		t.Fatalf("relay1 上报失败: %v", err)
+	}
+	if got := bus.lastDirectOfType(t, "host", protocol.TypeParentAssignment).Topology.DistributorID; got != "relay1" {
+		t.Fatalf("分发节点应为 relay1，实际 %q", got)
+	}
+
+	// 再加入一个强得多的节点：换防必须发生，并且要广播出来。
+	if err := m.Join(r.ID, "relay2", "转发2", protocol.RoleViewer, ""); err != nil {
+		t.Fatalf("relay2 进房失败: %v", err)
+	}
+	before := bus.broadcastCount(r.ID, protocol.TypeDistributorChange)
+	if err := m.UpdateMetrics(r.ID, "relay2", protocol.Metrics{UploadCapacityBps: 30_000_000}); err != nil {
+		t.Fatalf("relay2 上报失败: %v", err)
+	}
+
+	if got := bus.lastDirectOfType(t, "host", protocol.TypeParentAssignment).Topology.DistributorID; got != "relay2" {
+		t.Fatalf("应换防到强得多的 relay2，实际 %q", got)
+	}
+	if after := bus.broadcastCount(r.ID, protocol.TypeDistributorChange); after <= before {
+		t.Fatalf("换防必须广播 distributor-change（before=%d after=%d）", before, after)
+	}
+
+	change := bus.lastBroadcastOfType(t, r.ID, protocol.TypeDistributorChange)
+	if change.Distributor == nil || change.Distributor.FromID != "relay1" || change.Distributor.ToID != "relay2" {
+		t.Fatalf("换防广播内容不正确: %+v", change.Distributor)
+	}
+}
+
+func TestChunkReportIsRecorded(t *testing.T) {
+	m, _ := newTestManager(t, 8)
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+
+	if err := m.SetChunkReport(r.ID, "host", "AQID", true); err != nil {
+		t.Fatalf("记录分片上报失败: %v", err)
+	}
+
+	r.mu.Lock()
+	member := r.members["host"]
+	r.mu.Unlock()
+	if member == nil || member.HaveBits != "AQID" || !member.Complete {
+		t.Fatalf("分片上报未被记录: %+v", member)
+	}
+
+	if err := m.SetChunkReport(r.ID, "ghost", "AQID", false); !errors.Is(err, ErrNotJoined) {
+		t.Fatalf("非成员上报应返回 ErrNotJoined，实际 %v", err)
+	}
+}
+
+func TestSendTopologyForUnknownMember(t *testing.T) {
+	m, _ := newTestManager(t, 8)
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	if err := m.SendTopology(r.ID, "ghost"); !errors.Is(err, ErrNotJoined) {
+		t.Fatalf("非成员请求拓扑应返回 ErrNotJoined，实际 %v", err)
+	}
+	if err := m.SendTopology(r.ID, "host"); err != nil {
+		t.Fatalf("主播请求拓扑不应失败: %v", err)
 	}
 }

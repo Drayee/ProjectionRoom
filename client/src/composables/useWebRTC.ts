@@ -24,7 +24,7 @@ const STATS_INTERVAL_MS = 5000
 export function useWebRTC(opts: {
   iceServers: () => RTCIceServer[]
   sendSignal: (to: string, payload: SignalPayload) => void
-  onControl: (peerId: string, msg: PeerControl) => void
+  onControl: (peerId: string, msg: PeerControl, raw: string) => void
   onBinary: (peerId: string, data: ArrayBuffer) => void
   onOpen?: (peerId: string) => void
   onClose?: (peerId: string) => void
@@ -124,7 +124,7 @@ export function useWebRTC(opts: {
       return
     }
 
-    opts.onControl(peerId, msg)
+    opts.onControl(peerId, msg, raw)
   }
 
   function startPing(peerId: string, channel: RTCDataChannel) {
@@ -156,6 +156,10 @@ export function useWebRTC(opts: {
       return
     }
     const offer = await pc.createOffer()
+    // 期间可能已经收到对方的 offer（glare）：这时必须放弃自己这份，别把状态机搞坏。
+    if (pc.signalingState !== 'stable') {
+      return
+    }
     await pc.setLocalDescription(offer)
     opts.sendSignal(peerId, { kind: 'offer', sdp: pc.localDescription?.sdp ?? offer.sdp ?? '' })
   }
@@ -181,6 +185,16 @@ export function useWebRTC(opts: {
     switch (payload.kind) {
       case 'offer': {
         if (!payload.sdp) return
+        // Glare：双方同时发 offer 时，先回滚自己那份，永远让位于收到的 offer。
+        // 没有这一步会在 setLocalDescription / setRemoteDescription 上抛
+        // "Called in wrong state: have-remote-offer"，连接就再也建不起来。
+        if (pc.signalingState === 'have-local-offer') {
+          try {
+            await pc.setLocalDescription({ type: 'rollback' } as RTCLocalSessionDescriptionInit)
+          } catch {
+            // 回滚失败就继续尝试设置远端描述，失败会被上层捕获。
+          }
+        }
         await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp })
         await flushCandidates(from, pc)
         const answer = await pc.createAnswer()
@@ -364,3 +378,5 @@ export function useWebRTC(opts: {
     peerCount: () => pcs.size,
   }
 }
+
+

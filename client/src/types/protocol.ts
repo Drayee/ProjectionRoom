@@ -22,6 +22,7 @@ export const T = {
   MemberLeft: 'member-left',
   MemberList: 'member-list',
   Capacity: 'capacity',
+  Topology: 'topology',
   ParentAssignment: 'parent-assignment',
   DistributorChange: 'distributor-change',
   RoomClosed: 'room-closed',
@@ -53,6 +54,27 @@ export interface PlaybackState {
   seq: number
   /** 主播页面的时钟纪元；变化即表示主播重载过页面，必须重置时钟滤波（C13）。 */
   clockEpoch?: string
+}
+
+/** 一个节点在分发树中的位置（SPEC §6.1）。 */
+export interface TopologyAssignment {
+  peerId: string
+  primaryId?: string
+  backupIds?: string[]
+  /** 以本节点为主父的成员：进度与时钟锚点沿这条路径逐跳转发（§7.5）。 */
+  children?: string[]
+  depth: number
+  mode: string
+  distributorId?: string
+  reason?: string
+  maxDepth: number
+}
+
+/** 单链模式下的分发节点换防通知（SPEC §6.3）。 */
+export interface DistributorChange {
+  fromId?: string
+  toId?: string
+  reason?: string
 }
 
 /** 实测度量：UploadCapacityBps 取自 getStats().availableOutgoingBitrate（C11）。 */
@@ -97,6 +119,11 @@ export interface Envelope {
   members?: MemberInfo[]
   mediaIndex?: MediaIndex
   capacity?: Capacity
+  topology?: TopologyAssignment
+  distributor?: DistributorChange
+  /** 分片拥有位图（base64）。 */
+  have?: string
+  complete?: boolean
   code?: string
   message?: string
 }
@@ -114,6 +141,8 @@ export interface PeerControl {
   rid?: string
   idx?: number
   code?: string
+  /** have 消息的位图（base64）。 */
+  chunks?: string
   complete?: boolean
   ts?: number
   currentTime?: number
@@ -145,3 +174,7 @@ export interface RoomInfoResponse {
   capacity?: Capacity
   error?: string
 }
+
+
+
+

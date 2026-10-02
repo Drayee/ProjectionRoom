@@ -54,11 +54,15 @@ type Member struct {
 	BackupIDs   []string
 	JoinedAt    time.Time
 
-	// 实测度量。M2 只用主播的上行做容量闸门；
-	// M3 的父节点评分与分发节点选举会用到全部成员的这些字段（SPEC §6.4、§6.5）。
+	// 实测度量：拓扑分配与容量计算全部来自这里（SPEC §6.2、§6.4）。
 	RTTMs             float64
 	ThroughputBps     float64
 	UploadCapacityBps int64
+
+	// 分片拥有情况（base64 位图）。服务端只做记录，供 M4 监控面板展示；
+	// 逐分片的父节点选择在客户端用同一张位图直接完成（SPEC §6.4）。
+	HaveBits string
+	Complete bool
 }
 
 func (m *Member) info() protocol.MemberInfo {
@@ -92,14 +96,16 @@ type Room struct {
 	// MediaIndex 是主播发布的分片索引，一经设定即锁定（SPEC §8.1）。
 	MediaIndex json.RawMessage
 
-	// hostUploadBps 是主播的实测上行；0 表示尚未测到（容量模式为 pending）。
-	hostUploadBps int64
-
 	Seq          int64
 	lastPlayback protocol.PlaybackState
 
 	members map[string]*Member
 	order   []string
+
+	// plan 是最近一次拓扑计算；lastSent 记录已下发给每个成员的分配指纹，避免重复广播（SPEC §6.3）。
+	plan         topology.Plan
+	lastSent     map[string]string
+	lastAssignAt time.Time
 }
 
 // Info 返回某个成员的信息。
@@ -156,7 +162,8 @@ func (r *Room) Capacity(maxMembers int) protocol.Capacity {
 }
 
 // capacityLocked 计算容量判断。
-// 没有实测上行时模式是 pending —— 容量未知就要如实说未知，不能用一个保守默认值假装知道（SPEC §6.2）。
+// 口径全部来自最近一次拓扑计算：K0 是主播能直连的人数，空位数决定还能进几个人。
+// 还没算过拓扑时模式是 pending —— 容量未知就如实说未知，不能拿一个默认值假装知道（SPEC §6.2）。
 func (r *Room) capacityLocked(maxMembers int) protocol.Capacity {
 	capacity := protocol.Capacity{
 		Mode:       protocol.ModePending,
@@ -164,10 +171,10 @@ func (r *Room) capacityLocked(maxMembers int) protocol.Capacity {
 		StreamBps:  r.StreamBps,
 	}
 
-	if r.hostUploadBps > 0 {
-		slots := topology.HostChildSlots(r.hostUploadBps, r.StreamBps)
-		capacity.HostChildSlots = slots
-		capacity.Mode = string(topology.SelectMode(slots))
+	// 只有实测过主播上行才敢报出具体容量；否则保持 pending。
+	if r.plan.Measured {
+		capacity.Mode = string(r.plan.Mode)
+		capacity.HostChildSlots = r.plan.HostSlots
 	}
 
 	return capacity
@@ -175,18 +182,77 @@ func (r *Room) capacityLocked(maxMembers int) protocol.Capacity {
 
 // joinLimitLocked 返回当前允许的成员总数。
 //
-// 拿到实测上行后，M2 的星形拓扑上限就是主播能直接服务的人数（1 + K0）：
-// 再多的人挂上去也只会一起卡。实测之前只受配置里的硬上限约束（SPEC §6.2）。
+// 上限 = 现有成员 + 树上仍然空着的子节点位。这是比"1+K0"更准的口径：
+// 每个有上行余量的转发节点都在为房间贡献容量（SPEC §6.2）。
+// 还没算过拓扑时只受配置里的硬上限约束。
 func (r *Room) joinLimitLocked(maxMembers int) int {
-	if r.hostUploadBps <= 0 {
+	if len(r.plan.Assignments) == 0 || !r.plan.Measured {
 		return maxMembers
 	}
 
-	limit := 1 + topology.HostChildSlots(r.hostUploadBps, r.StreamBps)
+	// 只按实测容量开闸：未实测的转发节点一个位都不算。
+	limit := len(r.members) + r.plan.GateSlots
 	if limit > maxMembers {
-		return maxMembers
+		limit = maxMembers
+	}
+	if limit < 1 {
+		limit = 1
 	}
 	return limit
+}
+
+// participantsLocked 把当前成员整理成拓扑算法的输入。
+func (r *Room) participantsLocked() []topology.Participant {
+	out := make([]topology.Participant, 0, len(r.order))
+	for i, id := range r.order {
+		member, ok := r.members[id]
+		if !ok {
+			continue
+		}
+
+		p := topology.Participant{
+			ID:        member.ID,
+			IsHost:    member.Role == protocol.RoleHost,
+			UploadBps: member.UploadCapacityBps,
+			RTTMs:     member.RTTMs,
+			// 稳定性暂时按 1 处理：重连计数属于 M4 的监控指标。
+			Stability: 1,
+			Order:     i + 1,
+		}
+		// 已经挂着的父节点只要还有余量就保持不变，避免每次重算都搬家。
+		if previous, ok := r.plan.Assignments[member.ID]; ok {
+			p.CurrentPrimary = previous.PrimaryID
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// topologyLocked 生成某个成员的拓扑下发内容（调用方需持锁）。
+func (r *Room) topologyLocked(peerID string) *protocol.TopologyAssignment {
+	a, ok := r.plan.Assignments[peerID]
+	if !ok {
+		return nil
+	}
+	return &protocol.TopologyAssignment{
+		PeerID:        a.PeerID,
+		PrimaryID:     a.PrimaryID,
+		BackupIDs:     a.BackupIDs,
+		Children:      a.Children,
+		Depth:         a.Depth,
+		Mode:          string(r.plan.Mode),
+		DistributorID: r.plan.DistributorID,
+		Reason:        r.plan.Reason,
+		MaxDepth:      topology.DefaultMaxDepth,
+	}
+}
+
+// TopologyFor 返回某个成员当前的拓扑位置。
+func (r *Room) TopologyFor(peerID string) *protocol.TopologyAssignment {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.topologyLocked(peerID)
 }
 
 func (r *Room) memberInfosLocked() []protocol.MemberInfo {

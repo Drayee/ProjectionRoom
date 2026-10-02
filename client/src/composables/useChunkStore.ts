@@ -34,6 +34,11 @@ export function useChunkStore() {
     return true
   }
 
+  /** 已拥有的分片序号列表（用于生成 have 位图）。 */
+  function indices(): number[] {
+    return [...buffers.value.keys()]
+  }
+
   function has(index: number): boolean {
     return buffers.value.has(index)
   }
@@ -58,5 +63,7 @@ export function useChunkStore() {
     initChunk = null
   }
 
-  return { owned, hasInit, putInit, getInit, put, has, get, evictBefore, reset, size: () => buffers.value.size }
+  return { owned, hasInit, putInit, getInit, put, has, get, indices, evictBefore, reset, size: () => buffers.value.size }
 }
+
+

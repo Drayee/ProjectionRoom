@@ -37,11 +37,11 @@ const CHECK_CONTROLS = !argv.includes('--no-controls')
 
 if (!MEDIA_DIR) {
   console.error('必须用 --media 指定 cmd/segmenter 产出的分片目录')
-  process.exit(2)
+  process.exitCode = 2
 }
 if (!existsSync(join(MEDIA_DIR, 'index.json'))) {
   console.error(`目录里没有 index.json：${MEDIA_DIR}`)
-  process.exit(2)
+  process.exitCode = 2
 }
 
 // ---------- 小工具 ----------
@@ -520,12 +520,19 @@ async function main() {
     host.close()
     viewer.close()
     cleanup()
-    process.exit(pass ? 0 : 1)
+    process.exitCode = pass ? 0 : 1
   } catch (err) {
     console.error(`验收脚本失败：${err.message}`)
     cleanup()
-    process.exit(1)
+    process.exitCode = 1
   }
 }
 
-await main()
+/** 强制退出但先让 stdout 冲刷：只设 exitCode 会被 keep-alive 连接与定时器挂住。 */
+async function finish() {
+  await main()
+  await sleep(300)
+  process.exit(process.exitCode ?? 0)
+}
+
+await finish()

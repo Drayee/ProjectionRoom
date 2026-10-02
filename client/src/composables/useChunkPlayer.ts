@@ -17,6 +17,12 @@ export function useChunkPlayer() {
   const stalls = ref(0)
 
   const video = shallowRef<HTMLVideoElement | null>(null)
+  /** 生命周期日志：播放器被静默卸载过的话，必须能从这里看出来。 */
+  const lifecycle = ref<string[]>([])
+
+  function note(event: string) {
+    lifecycle.value = [...lifecycle.value.slice(-24), `${Math.round(performance.now())}:${event}`]
+  }
 
   let mediaSource: MediaSource | null = null
   let sourceBuffer: SourceBuffer | null = null
@@ -26,6 +32,20 @@ export function useChunkPlayer() {
 
   function pump() {
     queued.value = queue.length
+
+    // MediaSource 被关闭（元素被替换、资源被释放）时必须立刻停手并标记未挂载：
+    // 继续 append 只会刷出 "This SourceBuffer has been removed from the parent media source"，
+    // 而且 attached 一直是 true 的话，上层永远不会重新挂载 —— 画面就再也回不来了。
+    if (mediaSource && mediaSource.readyState === 'closed') {
+      note('pump:MediaSource 已关闭')
+      attached.value = false
+      ready.value = false
+      initAppended.value = false
+      queue.length = 0
+      queued.value = 0
+      return
+    }
+
     if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) {
       return
     }
@@ -35,21 +55,25 @@ export function useChunkPlayer() {
       sourceBuffer.appendBuffer(buf)
     } catch (err) {
       error.value = `appendBuffer 失败：${(err as Error).message}`
+      note(`append-fail:${(err as Error).message.slice(0, 40)}`)
       queue.length = 0
       queued.value = 0
     }
   }
 
   async function attach(el: HTMLVideoElement, mimeType: string): Promise<void> {
+    note(`attach:start(mime=${mimeType})`)
     detach()
     video.value = el
 
     if (typeof MediaSource === 'undefined') {
       error.value = '当前浏览器不支持 MediaSource'
+      note('attach:skip-无 MediaSource')
       return
     }
     if (!MediaSource.isTypeSupported(mimeType)) {
       error.value = `浏览器不支持该编码：${mimeType}`
+      note('attach:skip-编码不支持')
       return
     }
 
@@ -92,6 +116,7 @@ export function useChunkPlayer() {
 
     attached.value = true
     ready.value = true
+    note('attach:ready')
   }
 
   /** 把一段分片排入写入队列。init 段与媒体分片走同一个队列，顺序由调用方保证。 */
@@ -194,6 +219,7 @@ export function useChunkPlayer() {
   }
 
   function detach() {
+    note(`detach(attached=${attached.value})`)
     if (sourceBuffer && pumpBound) {
       sourceBuffer.removeEventListener('updateend', pumpBound)
       pumpBound = null
@@ -220,9 +246,25 @@ export function useChunkPlayer() {
     mediaSource = null
   }
 
+  /** 调试/验收用：暴露 MediaSource 与 SourceBuffer 的真实状态。 */
+  function debugState() {
+    return {
+      attached: attached.value,
+      ready: ready.value,
+      queued: queued.value,
+      initAppended: initAppended.value,
+      stalls: stalls.value,
+      mediaSourceState: mediaSource ? mediaSource.readyState : 'none',
+      sourceBufferCount: mediaSource && mediaSource.readyState === 'open' ? mediaSource.sourceBuffers.length : -1,
+      hasObjectUrl: objectUrl !== '',
+      lifecycle: lifecycle.value,
+    }
+  }
+
   return {
     video,
     attached,
+    debugState,
     ready,
     error,
     queued,

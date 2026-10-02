@@ -115,9 +115,17 @@ func handleMessage(hub *signal.Hub, rooms *room.Manager, client *signal.Client, 
 			_ = client.Send(protocol.ErrorEnvelope(code, message))
 		}
 
-	case protocol.TypeChunksReport, protocol.TypeTopologyRequest:
-		// M3 接入：分片拥有情况 bitset 与拓扑分配请求（SPEC §5.1、§6.3）。
-		// 当前阶段静默忽略，避免把连接打挂。
+	case protocol.TypeChunksReport:
+		if err := rooms.SetChunkReport(roomID, clientID, env.Have, env.Complete); err != nil {
+			_, code, message := roomErrorResponse(err)
+			_ = client.Send(protocol.ErrorEnvelope(code, message))
+		}
+
+	case protocol.TypeTopologyRequest:
+		if err := rooms.SendTopology(roomID, clientID); err != nil {
+			_, code, message := roomErrorResponse(err)
+			_ = client.Send(protocol.ErrorEnvelope(code, message))
+		}
 
 	case protocol.TypeLeave:
 		rooms.Leave(roomID, clientID)

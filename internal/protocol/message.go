@@ -32,6 +32,7 @@ const (
 	TypeMemberLeft        = "member-left"
 	TypeMemberList        = "member-list"
 	TypeCapacity          = "capacity"
+	TypeTopology          = "topology"
 	TypeParentAssignment  = "parent-assignment"
 	TypeDistributorChange = "distributor-change"
 	TypeRoomClosed        = "room-closed"
@@ -118,6 +119,14 @@ type Envelope struct {
 	Member  *MemberInfo  `json:"member,omitempty"`
 	Members []MemberInfo `json:"members,omitempty"`
 
+	// 拓扑（SPEC §6.1–§6.3）
+	Topology    *TopologyAssignment `json:"topology,omitempty"`
+	Distributor *DistributorChange  `json:"distributor,omitempty"`
+
+	// 分片拥有情况（base64 位图），服务端记录用于监控；父节点选择在客户端用位图直接完成
+	Have     string `json:"have,omitempty"`
+	Complete bool   `json:"complete,omitempty"`
+
 	// 房间元信息与错误
 	MediaIndex json.RawMessage `json:"mediaIndex,omitempty"`
 	Capacity   *Capacity       `json:"capacity,omitempty"`
@@ -150,6 +159,27 @@ type Metrics struct {
 	UploadCapacityBps int64 `json:"uploadCapacityBps,omitempty"`
 	// Depth 是该节点在拓扑中的深度。
 	Depth int `json:"depth,omitempty"`
+}
+
+// TopologyAssignment 是一个节点在分发树中的位置（SPEC §6.1）。
+// Children 只包含"以本节点为主父"的成员：进度与时钟锚点沿这条路径逐跳转发（§7.5）。
+type TopologyAssignment struct {
+	PeerID        string   `json:"peerId"`
+	PrimaryID     string   `json:"primaryId,omitempty"`
+	BackupIDs     []string `json:"backupIds,omitempty"`
+	Children      []string `json:"children,omitempty"`
+	Depth         int      `json:"depth"`
+	Mode          string   `json:"mode"`
+	DistributorID string   `json:"distributorId,omitempty"`
+	Reason        string   `json:"reason,omitempty"`
+	MaxDepth      int      `json:"maxDepth"`
+}
+
+// DistributorChange 是单链模式下分发节点的换防通知（SPEC §6.3）。
+type DistributorChange struct {
+	FromID string `json:"fromId,omitempty"`
+	ToID   string `json:"toId,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // MemberInfo 是成员列表中的一个条目。

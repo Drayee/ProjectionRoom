@@ -7,6 +7,7 @@ import { encodeFrame, useChunkRequester } from '../composables/useChunkRequester
 import { useChunkPlayer } from '../composables/useChunkPlayer'
 import { useSyncClock } from '../composables/useSyncClock'
 import { useWebRTC } from '../composables/useWebRTC'
+import { useTopology } from '../composables/useTopology'
 import { segmentIndexAt } from '../types/media'
 import { Action, FrameType, T } from '../types/protocol'
 import type { MediaIndex } from '../types/media'
@@ -86,6 +87,12 @@ export const useRoomStore = defineStore('room', () => {
   const needsGesture = ref(false)
 
   let chatKey = 0
+  /** 房间生命周期日志（调试与验收用）。 */
+  const storeLifecycle = ref<string[]>([])
+
+  function noteLifecycle(event: string) {
+    storeLifecycle.value = [...storeLifecycle.value.slice(-19), `${Math.round(performance.now())}:${event}`]
+  }
 
   // ---------- 媒体与播放 ----------
   const media = useMediaIndex()
@@ -109,14 +116,21 @@ export const useRoomStore = defineStore('room', () => {
   let initRequested = false
   /** 跳转后必须先取到的分片序号；取到之前调度器会一直优先补取它。 */
   let requiredSegment: number | null = null
+  /** 主播设定的播放速率（同步环的微调是它之上的临时缩放）。 */
+  let authoritativeRate = 1
+  /** 正在进行的播放器挂载，用于挡住并发 attach。 */
+  let playerAttachInFlight: Promise<void> | null = null
   let lastHardSeekAt = 0
   let lastHardSeekTarget = -1
   let lastConnectAttemptAt = 0
+  /** 跳转后的稳定期截止时间（性能时钟毫秒）。 */
+  let correctionSettleUntil = 0
 
   let schedulerTimer: number | undefined
   let syncTimer: number | undefined
   let progressTimer: number | undefined
   let metricsTimer: number | undefined
+  let haveTimer: number | undefined
 
   // ---------- 信令 ----------
   const signaling = useSignaling({
@@ -140,11 +154,13 @@ export const useRoomStore = defineStore('room', () => {
     onOpen: (peerId) => {
       // 主播给新连上的观众补齐当前播放状态与时钟锚点。
       if (isHost.value) {
-        sendProgressTo(peerId)
+        sendProgressBurst(peerId)
         clockStoreSendTimeSync(peerId)
+        broadcastHaveState()
         return
       }
       // 观众连上主播后立刻开始拉分片。
+      broadcastHaveState()
       void pumpPrefetch()
     },
   })
@@ -166,6 +182,35 @@ export const useRoomStore = defineStore('room', () => {
   const videoReady = computed(() => player.ready.value)
   const uploadCapacityBps = rtc.uploadCapacityBps
 
+  // ---------- 拓扑与多父调度（SPEC §6.1–§6.4）----------
+  const lastDistributorChange = ref('')
+
+  const topology = useTopology({
+    selfId: () => clientId.value,
+    isHost: () => isHost.value,
+    connectToPeer: connectTo,
+    sendToPeer: (peerId, text) => rtc.send(peerId, text),
+    connectedPeers: () => rtc.openChannels(),
+    segmentCount: () => mediaIndex.value?.segments.length ?? 0,
+    // 主播是 Seeder：它能按需从本地文件读出任意分片，位图必须如实广告"全都有"。
+    // 只广告自己预取窗口的话，启用 owner-first 取数后所有人都不会再向它要窗口外的分片。
+    ownedSegments: () => {
+      if (isHost.value) {
+        const total = mediaIndex.value?.segments.length ?? 0
+        const all = new Array<number>(total + 1)
+        for (let i = 0; i <= total; i += 1) all[i] = i
+        return all
+      }
+      return [0, ...chunkStore.indices()]
+    },
+    pendingFor: (peerId) => requester.pendingFor(peerId),
+    onPrimaryChanged: () => {
+      resetFetchState()
+      broadcastHaveState()
+      void pumpPrefetch()
+    },
+  })
+
   // ---------- 信令消息 ----------
   function handleMessage(env: Envelope) {
     switch (env.type) {
@@ -183,6 +228,9 @@ export const useRoomStore = defineStore('room', () => {
           void applyRemoteMediaIndex(env.mediaIndex)
         } else if (!isHost.value && hostId.value) {
           void connectToHost()
+        }
+        if (env.topology) {
+          void topology.apply(env.topology)
         }
         break
 
@@ -205,6 +253,18 @@ export const useRoomStore = defineStore('room', () => {
 
       case T.Capacity:
         if (env.capacity) capacity.value = env.capacity
+        break
+
+      case T.ParentAssignment:
+      case T.Topology:
+        if (env.topology) void topology.apply(env.topology)
+        break
+
+      case T.DistributorChange:
+        topology.noteDistributorChange()
+        if (env.distributor) {
+          lastDistributorChange.value = `${env.distributor.fromId || '无'} → ${env.distributor.toId || '无'}`
+        }
         break
 
       case T.Chat:
@@ -266,7 +326,7 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   // ---------- Peer 消息 ----------
-  function handlePeerControl(peerId: string, msg: PeerControl) {
+  function handlePeerControl(peerId: string, msg: PeerControl, raw: string) {
     if (msg.t === 'req') {
       void serveRequest(peerId, msg)
       return
@@ -275,7 +335,15 @@ export const useRoomStore = defineStore('room', () => {
       requester.handleControl(peerId, msg)
       return
     }
+    if (msg.t === 'have') {
+      topology.notePeerHave(peerId, msg.chunks ?? '')
+      return
+    }
     if (msg.t === 'progress' || msg.t === 'time-sync') {
+      // 中继职责：把上级给的权威进度原样转发给子节点（SPEC §7.5）。
+      if (!isHost.value && peerId === topology.primaryId.value) {
+        forwardToChildren(raw)
+      }
       if (isHost.value) return
       if (typeof msg.currentTime === 'number' && typeof msg.hostClockMs === 'number') {
         const accepted = clock.onProgress({
@@ -304,30 +372,107 @@ export const useRoomStore = defineStore('room', () => {
 
   /** 主播应答分片请求：本地读文件 → 先发控制消息再发二进制帧。 */
   async function serveRequest(peerId: string, msg: PeerControl) {
-    if (!isHost.value || msg.idx === undefined) return
+    if (msg.idx === undefined) return
     const index = msg.idx
 
     if (!rtc.send(peerId, JSON.stringify({ t: 'chunk', rid: msg.rid, idx: index } satisfies PeerControl))) {
       return
     }
 
-    const payload = await media.readChunk(index)
+    // 主播从本地文件读；转发节点从自己已经收到的分片里取（SPEC §6.4 的中继职责）。
+    let payload: ArrayBuffer | null = null
+    if (isHost.value) {
+      payload = await media.readChunk(index)
+    } else if (index === 0) {
+      payload = chunkStore.getInit()
+    } else {
+      payload = chunkStore.get(index)
+    }
     if (!payload) {
       rtc.send(peerId, JSON.stringify({ t: 'err', rid: msg.rid, idx: index, code: 'NOT_FOUND' } satisfies PeerControl))
       return
     }
 
+    await throttleWait(payload.byteLength)
     rtc.send(peerId, encodeFrame(index === 0 ? FrameType.Init : FrameType.Media, index, payload))
   }
 
+  // ---------- 验收钩子（仅调试用，生产路径不设置）----------
+  let uploadThrottleBps = 0
+  let throttleAllowance = 0
+  let throttleLast = 0
+
+  /** 应用层限速：模拟"这个节点上行只有 N bps"（SPEC §10 M3 验收 D 用）。 */
+  async function throttleWait(bytes: number) {
+    if (uploadThrottleBps <= 0) return
+    const now = performance.now()
+    throttleAllowance += ((now - throttleLast) / 1000) * uploadThrottleBps
+    throttleLast = now
+    if (throttleAllowance >= bytes) {
+      throttleAllowance -= bytes
+      return
+    }
+    const waitMs = ((bytes - throttleAllowance) / uploadThrottleBps) * 1000
+    throttleAllowance = 0
+    await new Promise((resolve) => window.setTimeout(resolve, Math.min(waitMs, 5000)))
+  }
+
+  /** 验收脚本用它注入实测上行：headless 下 getStats 不产生可用估计（C15）。 */
+  function reportMetrics(uploadCapacityBps: number, rttMs = 20) {
+    signaling.send({ type: T.Metrics, metrics: { uploadCapacityBps, rttMs } })
+  }
+
   // ---------- 分片调度（主播与观众共用）----------
+  /** 与某个成员建立连接（拓扑分配与主播回落都走它）。 */
+  async function connectTo(peerId: string) {
+    if (!peerId || peerId === clientId.value) return
+    try {
+      await rtc.connect(peerId)
+    } catch (err) {
+      lastError.value = `连接 ${peerId} 失败：${(err as Error).message}`
+    }
+  }
+
+  /** 把权威进度原样转发给子节点：不改 currentTime / hostClockMs / seq（SPEC §7.5）。 */
+  function forwardToChildren(raw: string) {
+    for (const childId of topology.children.value) {
+      rtc.send(childId, raw)
+    }
+  }
+
+  /** 广播分片拥有位图，并同步上报服务端（服务端只记录，供监控与诊断）。 */
+  function broadcastHaveState() {
+    const result = topology.broadcastHave()
+    if (result) {
+      signaling.send({ type: T.ChunksReport, have: result.bits, complete: result.complete })
+    }
+  }
+
+  /** 换父之后复位取数状态：旧父节点上的在途请求已经无意义。 */
+  function resetFetchState() {
+    requiredSegment = null
+    initRequested = chunkStore.hasInit()
+    topology.resetAttempts()
+    requester.reset()
+  }
+
   const requester = useChunkRequester({
     send: (peerId, data) => rtc.send(peerId, data),
   })
 
   async function pumpPrefetch() {
     const index = mediaIndex.value
-    if (!index || !player.attached.value) return
+    if (!index) return
+
+    // 自愈：MediaSource 可能被平台悄悄关闭（元素被替换、资源被回收）。
+    // 只要"有索引但没挂上"，就在这里重新挂载 —— 否则一旦掉线就永久卡死，
+    // 表现为"画面永远不动，而日志里只有一行 appendBuffer 失败"。
+    if (!player.attached.value) {
+      noteLifecycle('播放器未挂载，调度器触发重新挂载')
+      await ensurePlayer(index)
+      resetFetchState()
+      return
+    }
 
     const host = isHost.value
     const peer = hostId.value
@@ -381,7 +526,14 @@ export const useRoomStore = defineStore('room', () => {
           chunkStore.put(index, payload)
         }
       } else {
-        const delivery = await requester.request(hostId.value, index)
+        const peerId = topology.pickParent(index)
+        if (!peerId) {
+          chunkErrors.value += 1
+          return
+        }
+        topology.noteAttempt(index)
+        const delivery = await requester.request(peerId, index)
+        topology.noteDelivered(index)
         if (index === 0 || delivery.type === FrameType.Init) {
           chunkStore.putInit(delivery.payload)
         } else {
@@ -413,7 +565,8 @@ export const useRoomStore = defineStore('room', () => {
     }
 
     // 丢开已经播过的分片，避免长视频吃满内存。
-    chunkStore.evictBefore(Math.max(1, nextAppend - 4))
+    const retention = topology.children.value.length > 0 ? 12 : 4
+    chunkStore.evictBefore(Math.max(1, nextAppend - retention))
   }
 
   async function primeBuffer(segments: number, timeoutMs = 10000): Promise<boolean> {
@@ -444,9 +597,14 @@ export const useRoomStore = defineStore('room', () => {
     }
 
     clock.setPaused(false)
-    if (video.playbackRate !== state.rate && state.rate > 0) {
-      video.playbackRate = state.rate
+
+    // 只在主播**改了**速率时套用权威速率；
+    // 每条进度都无脑套用会把同步环的 ±5% 微调冲掉 —— 偏差会恒定卡死、永远修不回来。
+    if (state.rate > 0 && state.rate !== authoritativeRate) {
+      authoritativeRate = state.rate
+      video.playbackRate = authoritativeRate
     }
+
     await tryPlay()
   }
 
@@ -474,6 +632,11 @@ export const useRoomStore = defineStore('room', () => {
       await tryPlay()
     }
 
+    if (performance.now() < correctionSettleUntil) {
+      syncMode.value = 'settling'
+      return
+    }
+
     // 当前位置没有可播数据时一律不矫正：空 MediaSource 上的 seek 只会把 currentTime
     // 改成一个"空位置"，看起来像在播，实际什么都没缓冲（验证脚本正是靠这一点抓到的）。
     if (bufferedAhead.value <= 0) {
@@ -485,11 +648,13 @@ export const useRoomStore = defineStore('room', () => {
     syncMode.value = result.mode
 
     switch (result.mode) {
-      case 'rate':
-        if (video.playbackRate !== result.rate) video.playbackRate = result.rate
+      case 'rate': {
+        const adjusted = authoritativeRate * result.rate
+        if (Math.abs(video.playbackRate - adjusted) > 0.001) video.playbackRate = adjusted
         break
+      }
       case 'ok':
-        if (video.playbackRate !== 1) video.playbackRate = 1
+        if (Math.abs(video.playbackRate - authoritativeRate) > 0.001) video.playbackRate = authoritativeRate
         break
       case 'jump':
         if (!player.jumpWithinBuffer(result.target)) {
@@ -536,6 +701,9 @@ export const useRoomStore = defineStore('room', () => {
       syncResets.value += 1
     }
     syncMode.value = 'seek'
+    // 跳转后给 1.5s 稳定期：这段时间里缓冲还在重建，
+    // 立刻按目标矫正只会在"seek → 追 → 再 seek"之间来回振荡，把偏差 spike 放大。
+    correctionSettleUntil = performance.now() + 1500
 
     const segIndex = segmentIndexAt(index, target)
     await player.clearBuffered()
@@ -568,6 +736,18 @@ export const useRoomStore = defineStore('room', () => {
       paused: video.paused,
       rate: video.playbackRate,
       seq: progressSeq,
+    }
+  }
+
+  /**
+   * 新接入的子节点连发几个进度样本。
+   *
+   * 时钟偏移用的是"窗口内最小值"滤波：只有一两个样本时它还很粗糙，
+   * 新节点起播那几秒的偏差 spike 主要来自这里。多发几次能让它迅速收敛。
+   */
+  function sendProgressBurst(peerId: string) {
+    for (let i = 0; i < 5; i += 1) {
+      window.setTimeout(() => sendProgressTo(peerId), i * 120)
     }
   }
 
@@ -625,6 +805,9 @@ export const useRoomStore = defineStore('room', () => {
     schedulerTimer = window.setInterval(() => void pumpPrefetch(), 200)
     syncTimer = window.setInterval(() => void tickSync(), 100)
     metricsTimer = window.setInterval(tickMetrics, 5000)
+    // 先立刻广播一次：子节点越早知道"我有哪些分片"，越少把请求打给还没有数据的节点。
+    broadcastHaveState()
+    haveTimer = window.setInterval(broadcastHaveState, 3000)
     if (isHost.value) {
       progressTimer = window.setInterval(() => {
         tickProgress()
@@ -635,13 +818,14 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function stopLoops() {
-    for (const timer of [schedulerTimer, syncTimer, progressTimer, metricsTimer]) {
+    for (const timer of [schedulerTimer, syncTimer, progressTimer, metricsTimer, haveTimer]) {
       if (timer !== undefined) window.clearInterval(timer)
     }
     schedulerTimer = undefined
     syncTimer = undefined
     progressTimer = undefined
     metricsTimer = undefined
+    haveTimer = undefined
     rtc.stopStats()
   }
 
@@ -654,17 +838,33 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
+  /**
+   * 挂载播放器（幂等且**不可重入**）。
+   *
+   * 必须挡住并发调用：媒体索引与视频元素是两条独立的到达路径，
+   * 两次并发 attach 会创建两个 MediaSource，后一个替换掉前一个，
+   * 于是 sourceBuffer 指向被摘除的那个，之后每次 appendBuffer 都报
+   * "This SourceBuffer has been removed from the parent media source"。
+   */
   async function ensurePlayer(index: MediaIndex) {
+    if (player.attached.value) return
+    if (playerAttachInFlight) return playerAttachInFlight
+
     const el = videoEl.value
     if (!el) return
-    if (player.attached.value) return
 
-    try {
+    playerAttachInFlight = (async () => {
       await player.attach(el, index.mimeType)
-    } catch (err) {
-      mediaError.value = (err as Error).message
-      return
-    }
+    })()
+      .catch((err: Error) => {
+        mediaError.value = err.message
+      })
+      .finally(() => {
+        playerAttachInFlight = null
+      })
+
+    await playerAttachInFlight
+    if (!player.attached.value) return
 
     chunkStore.reset()
     initRequested = false
@@ -674,13 +874,13 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   async function connectToHost(force = false) {
-    if (isHost.value || !hostId.value) return
+    if (isHost.value) return
+    // 优先连"分配给我的主父"：叶子可能被安排在转发节点下，
+    // 全都直连主播会把主播的上行打满（容量闸门正是按树算的）。
+    const target = topology.primaryId.value || hostId.value
+    if (!target) return
     if (!force && rtc.peerCount() > 0) return
-    try {
-      await rtc.connect(hostId.value)
-    } catch (err) {
-      lastError.value = `连接主播失败：${(err as Error).message}`
-    }
+    await connectTo(target)
   }
 
   /** 通道迟迟建不起来时（ICE 失败 / 主播刚重连）每隔 2s 重试一次，而不是干等。 */
@@ -693,6 +893,7 @@ export const useRoomStore = defineStore('room', () => {
 
   // ---------- 对外动作 ----------
   function enterRoom(creds: JoinCredentials) {
+    noteLifecycle('enterRoom')
     leaveRoom()
     credentials.value = creds
     joined.value = false
@@ -708,10 +909,12 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function leaveRoom() {
+    noteLifecycle('leaveRoom')
     if (joined.value) signaling.send({ type: T.Leave })
     stopLoops()
     requester.reset()
     rtc.closeAll()
+    topology.reset()
     player.detach()
     chunkStore.reset()
     media.reset()
@@ -738,7 +941,23 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function setVideoElement(el: HTMLVideoElement | null) {
+    const previous = videoEl.value
+    const lastTime = player.video.value?.currentTime ?? 0
     videoEl.value = el
+
+    // 元素换了（组件重挂载）：旧元素上的 MediaSource 会随之关闭，
+    // 必须重新挂载，并把"下一个要追加的分片"挪回当前播放位置。
+    if (el && el !== previous && player.attached.value) {
+      noteLifecycle('videoElement 被替换，重新挂载播放器')
+      player.detach()
+      const index = mediaIndex.value
+      if (index) {
+        nextAppend = segmentIndexAt(index, lastTime)
+        requiredSegment = nextAppend
+        initRequested = chunkStore.hasInit()
+      }
+    }
+
     if (el && mediaIndex.value && !player.attached.value) {
       void ensurePlayer(mediaIndex.value)
     }
@@ -847,6 +1066,19 @@ export const useRoomStore = defineStore('room', () => {
     chunkErrors,
     bufferedAhead,
     peerCount,
+    // 注意：必须是函数。Pinia setup store 返回对象里的普通值只在创建时求值一次，
+    // 直接写 player.debugState() 会永远返回"刚创建时"的状态 —— 那会把人带偏。
+    playerDebugState: () => player.debugState(),
+    lifecycle: storeLifecycle,
+    topologyAssignment: topology.assignment,
+    topologyMode: topology.mode,
+    topologyDepth: topology.depth,
+    topologyReason: topology.reason,
+    primaryParentId: topology.primaryId,
+    backupParentIds: topology.backupIds,
+    childrenIds: topology.children,
+    distributorId: topology.distributorId,
+    lastDistributorChange,
     peers: rtc.peers,
     uploadCapacityBps,
     delivered: requester.delivered,
@@ -866,8 +1098,34 @@ export const useRoomStore = defineStore('room', () => {
     seekTo,
     setRate,
     resumeAfterGesture,
+    reportMetrics,
+    setUploadThrottle: (bps: number) => {
+      uploadThrottleBps = bps
+      throttleAllowance = 0
+      throttleLast = performance.now()
+    },
     dismissError: () => {
       lastError.value = ''
     },
   }
 })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

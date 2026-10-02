@@ -4,27 +4,47 @@ import { useRoomStore } from '../stores/room'
 
 const store = useRoomStore()
 
-// M1 的 mode 恒为 pending：容量要等实测上行（getStats）才有意义，M3 接入（SPEC §6.1、§6.2）。
+function memberName(id: string): string {
+  if (!id) return '—'
+  return store.members.find((m) => m.id === id)?.displayName ?? id.slice(0, 6)
+}
+
 const modeText = computed(() => {
-  switch (store.capacity?.mode) {
+  switch (store.topologyMode) {
     case 'fanout':
       return '扇出模式'
     case 'chain':
-      return '单链分发模式'
+      return '单链分发'
     default:
       return '容量待实测'
   }
 })
 
 const parentText = computed(() => {
-  if (store.isHost) return '我是分发根节点'
-  return store.parentName ? `上级：${store.parentName}` : '上级：主播'
+  if (store.isHost) return '我是源节点'
+  const primary = store.primaryParentId
+  if (!primary) return '等待分配'
+  const backups = store.backupParentIds.length
+  return `上级 ${memberName(primary)}${backups > 0 ? `（+${backups} 备用）` : ''}`
+})
+
+const roleText = computed(() => {
+  const children = store.childrenIds.length
+  return children === 0 ? '叶子' : `转发 ${children} 个下游`
+})
+
+const tooltip = computed(() => {
+  const parts = [store.topologyReason || '等待服务端分配拓扑', `深度 ${store.topologyDepth}`]
+  if (store.distributorId) parts.push(`分发节点 ${memberName(store.distributorId)}`)
+  if (store.lastDistributorChange) parts.push(`最近换防 ${store.lastDistributorChange}`)
+  return parts.join(' · ')
 })
 </script>
 
 <template>
-  <span class="badge topology" :title="`${modeText} · ${parentText}`">
-    {{ modeText }} · 深度 {{ store.depth }}
+  <span class="badge topology" :title="tooltip">
+    {{ modeText }} · 深度 {{ store.topologyDepth }} · {{ parentText }} · {{ roleText }}
+    <template v-if="store.distributorId"> · 分发 {{ memberName(store.distributorId) }}</template>
   </span>
 </template>
 
@@ -32,5 +52,9 @@ const parentText = computed(() => {
 .topology {
   border-color: var(--accent);
   color: var(--accent);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

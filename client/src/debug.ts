@@ -53,6 +53,27 @@ export interface DebugSnapshot {
     maxMembers: number
     chatCount: number
   }
+  topology: {
+    mode: string
+    depth: number
+    primaryId: string
+    backupIds: string[]
+    children: string[]
+    distributorId: string
+    reason: string
+    lastDistributorChange: string
+  }
+  lifecycle: string[]
+  player: {
+    attached: boolean
+    ready: boolean
+    queued: number
+    initAppended: boolean
+    stalls: number
+    mediaSourceState: string
+    sourceBufferCount: number
+    hasObjectUrl: boolean
+  }
   errors: {
     last: string
     media: string
@@ -117,6 +138,18 @@ export function installDebugHook(): void {
           maxMembers: store.capacity?.maxMembers ?? 0,
           chatCount: store.chat.length,
         },
+        lifecycle: store.lifecycle,
+        player: store.playerDebugState(),
+        topology: {
+          mode: store.topologyMode,
+          depth: store.topologyDepth,
+          primaryId: store.primaryParentId,
+          backupIds: store.backupParentIds,
+          children: store.childrenIds,
+          distributorId: store.distributorId,
+          reason: store.topologyReason,
+          lastDistributorChange: store.lastDistributorChange,
+        },
         errors: {
           last: store.lastError,
           media: store.mediaError,
@@ -125,7 +158,14 @@ export function installDebugHook(): void {
       }
     },
     store,
+    /** 注入实测上行（headless 的 getStats 不产生估计值）。 */
+    reportMetrics: (uploadCapacityBps: number, rttMs = 20) => store.reportMetrics(uploadCapacityBps, rttMs),
+    /** 应用层限速，模拟慢上行节点。 */
+    setUploadThrottle: (bps: number) => store.setUploadThrottle(bps),
   }
 
   ;(window as unknown as { __pr?: typeof api }).__pr = api
 }
+
+
+

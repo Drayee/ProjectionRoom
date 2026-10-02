@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/media"
 	"ProjectionRoom/internal/protocol"
+	"ProjectionRoom/internal/topology"
 )
 
 const (
@@ -19,6 +21,10 @@ const (
 	roomCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	roomCodeLen      = 6
 	maxDisplayName   = 24
+
+	// reassignMinInterval 限制拓扑重算频率：度量每 5s 上报一次，
+	// 没有节流的话一次网络抖动就会引发一串无谓的重挂载（SPEC §6.3 要求换防平滑）。
+	reassignMinInterval = 1500 * time.Millisecond
 )
 
 // Broadcaster 由 signal.Hub 实现。
@@ -151,6 +157,7 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 	playback := r.lastPlayback
 	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
 	mediaIndex := r.MediaIndex
+	topologyInfo := r.topologyLocked(clientID)
 	info := member.info()
 	r.mu.Unlock()
 
@@ -165,6 +172,7 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 		Playback:   &playback,
 		Capacity:   &capacity,
 		MediaIndex: mediaIndex,
+		Topology:   topologyInfo,
 	}))
 
 	// member-joined 广播给其他人，让他们的成员列表刷新。
@@ -176,6 +184,9 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 	}), clientID)
 
 	log.Printf("room %s: %s(%s) 加入，当前 %d 人", roomID, displayName, role, len(infos))
+
+	// 入房快照先发，拓扑分配后发（客户端据此再建 P2P 连接）。
+	m.ReassignTopology(roomID, true)
 
 	return nil
 }
@@ -218,6 +229,10 @@ func (m *Manager) Leave(roomID, clientID string) {
 		m.closeRoom(roomID, "主播已离开，房间关闭")
 		return
 	}
+
+	// 有人离开会腾出（或收走）容量，父子关系需要跟着变。
+	m.ReassignTopology(roomID, true)
+
 	if remaining == 0 {
 		m.mu.Lock()
 		delete(m.rooms, roomID)
@@ -309,6 +324,9 @@ func (m *Manager) SetMediaIndex(roomID, clientID string, raw json.RawMessage) er
 	log.Printf("room %s: 主播发布分片索引（%d 段，%.2f Mbps，mime=%s）",
 		roomID, len(index.Segments), float64(index.BitrateBps)/1_000_000, index.MimeType)
 
+	// 码率变了：容量模型与顶层拓扑都要按新码率重算。
+	m.ReassignTopology(roomID, true)
+
 	return nil
 }
 
@@ -328,24 +346,199 @@ func (m *Manager) UpdateMetrics(roomID, clientID string, metrics protocol.Metric
 	}
 	member.RTTMs = metrics.RTTMs
 	member.ThroughputBps = metrics.ThroughputBps
-	member.UploadCapacityBps = metrics.UploadCapacityBps
-
-	changed := false
-	if member.Role == protocol.RoleHost && metrics.UploadCapacityBps > 0 && metrics.UploadCapacityBps != r.hostUploadBps {
-		r.hostUploadBps = metrics.UploadCapacityBps
-		changed = true
+	uploadChanged := metrics.UploadCapacityBps > 0 && metrics.UploadCapacityBps != member.UploadCapacityBps
+	if metrics.UploadCapacityBps > 0 {
+		member.UploadCapacityBps = metrics.UploadCapacityBps
 	}
-	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
 	r.mu.Unlock()
 
-	if changed {
-		m.broadcastCapacity(roomID, capacity)
-		log.Printf("room %s: 主播实测上行 %.2f Mbps → K0=%d（模式 %s，成员上限 %d）",
-			roomID, float64(metrics.UploadCapacityBps)/1_000_000, capacity.HostChildSlots, capacity.Mode,
-			1+capacity.HostChildSlots)
-	}
+	// 上行实测值变了就必须立刻重算（容量与准入都跟着变）；
+	// 只有 RTT 之类的抖动交给节流，避免无谓的重挂载。
+	m.ReassignTopology(roomID, uploadChanged)
 
 	return nil
+}
+
+// ReassignTopology 重算分发拓扑，并把发生变化的那部分下发给相关成员。
+//
+// 只在分配真的变了才发：这正是 SPEC §6.3 要求的"换防期间不强断连接"的前提 ——
+// 客户端据此复用已有连接，只是改变"谁服务谁"。
+func (m *Manager) ReassignTopology(roomID string, force bool) {
+	r, ok := m.Get(roomID)
+	if !ok {
+		return
+	}
+
+	r.mu.Lock()
+	if !force && time.Since(r.lastAssignAt) < reassignMinInterval {
+		r.mu.Unlock()
+		return
+	}
+
+	previous := r.plan
+	plan := topology.Assign(r.HostID, r.participantsLocked(), topology.Options{
+		StreamBps:           r.StreamBps,
+		PreviousDistributor: previous.DistributorID,
+	})
+	r.plan = plan
+	r.lastAssignAt = time.Now()
+
+	var outbound []protocol.Envelope
+	for _, a := range plan.Assignments {
+		fingerprint := assignmentFingerprint(a, plan.Mode, plan.DistributorID)
+		if r.lastSent[a.PeerID] == fingerprint {
+			continue
+		}
+		if r.lastSent == nil {
+			r.lastSent = make(map[string]string)
+		}
+		r.lastSent[a.PeerID] = fingerprint
+
+		topologyInfo := protocol.TopologyAssignment{
+			PeerID:        a.PeerID,
+			PrimaryID:     a.PrimaryID,
+			BackupIDs:     a.BackupIDs,
+			Children:      a.Children,
+			Depth:         a.Depth,
+			Mode:          string(plan.Mode),
+			DistributorID: plan.DistributorID,
+			Reason:        plan.Reason,
+			MaxDepth:      topology.DefaultMaxDepth,
+		}
+		outbound = append(outbound, protocol.Envelope{
+			Type:     protocol.TypeParentAssignment,
+			RoomID:   roomID,
+			Topology: &topologyInfo,
+		})
+	}
+
+	// 把拓扑写回成员信息：成员列表与监控面板显示的应当就是真实的父子关系。
+	var updatedMembers []protocol.MemberInfo
+	for id, a := range plan.Assignments {
+		member, ok := r.members[id]
+		if !ok {
+			continue
+		}
+		if member.PrimaryID == a.PrimaryID && member.Depth == a.Depth && sameStrings(member.BackupIDs, a.BackupIDs) {
+			continue
+		}
+		member.PrimaryID = a.PrimaryID
+		member.Depth = a.Depth
+		member.BackupIDs = append([]string(nil), a.BackupIDs...)
+	}
+	if len(plan.Assignments) > 0 {
+		updatedMembers = r.memberInfosLocked()
+	}
+
+	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
+	distributorChanged := previous.Mode == topology.ModeChain && plan.DistributorID != previous.DistributorID
+	fromID := previous.DistributorID
+	toID := plan.DistributorID
+	reason := plan.Reason
+	unassigned := len(plan.Unassigned)
+	summary := plan.Describe()
+	r.mu.Unlock()
+
+	for _, env := range outbound {
+		if env.Topology == nil {
+			continue
+		}
+		if err := m.bus.SendTo(env.Topology.PeerID, protocol.MustEnvelope(env)); err != nil {
+			log.Printf("room %s: 下发拓扑给 %s 失败: %v", roomID, env.Topology.PeerID, err)
+		}
+	}
+
+	if distributorChanged {
+		m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
+			Type:        protocol.TypeDistributorChange,
+			RoomID:      roomID,
+			Distributor: &protocol.DistributorChange{FromID: fromID, ToID: toID, Reason: reason},
+		}), "")
+		log.Printf("room %s: 分发节点换防 %s → %s", roomID, fromID, toID)
+	}
+
+	m.broadcastCapacity(roomID, capacity)
+
+	if updatedMembers != nil {
+		m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
+			Type:    protocol.TypeMemberList,
+			RoomID:  roomID,
+			Members: updatedMembers,
+		}), "")
+	}
+
+	if len(outbound) > 0 || distributorChanged {
+		log.Printf("room %s: %s（下发 %d 条分配）", roomID, summary, len(outbound))
+	}
+	if unassigned > 0 {
+		log.Printf("room %s: 有 %d 个成员当前安置不下（容量或深度不足）", roomID, unassigned)
+	}
+}
+
+// assignmentFingerprint 用一个短字符串概括下发内容，用于判断"要不要重新下发"。
+//
+// 必须把 mode 与 distributorId 也算进去：单链模式下换防时，
+// 各节点的父子关系可能完全没变（主播仍然只连一个子节点），但分发节点换了 ——
+// 漏掉它们就会出现"换防了却没通知任何人"。
+func assignmentFingerprint(a topology.Assignment, mode topology.Mode, distributorID string) string {
+	return string(mode) + "|" + distributorID + "|" + a.PrimaryID + "|" +
+		strings.Join(a.BackupIDs, ",") + "|" + strings.Join(a.Children, ",") + "|" + itoa(a.Depth)
+}
+
+func itoa(v int) string {
+	return strconv.Itoa(v)
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// SetChunkReport 记录成员上报的分片拥有情况。
+// M3 的逐分片父节点选择在客户端用同一张位图完成；服务端这里只做记录，供 M4 监控面板与诊断使用。
+func (m *Manager) SetChunkReport(roomID, clientID, have string, complete bool) error {
+	r, ok := m.Get(roomID)
+	if !ok {
+		return ErrNotFound
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	member, exists := r.members[clientID]
+	if !exists {
+		return ErrNotJoined
+	}
+	member.HaveBits = have
+	member.Complete = complete
+
+	return nil
+}
+
+// SendTopology 把当前拓扑单独发给某个成员（客户端可随时请求刷新）。
+func (m *Manager) SendTopology(roomID, clientID string) error {
+	r, ok := m.Get(roomID)
+	if !ok {
+		return ErrNotFound
+	}
+
+	topologyInfo := r.TopologyFor(clientID)
+	if topologyInfo == nil {
+		return ErrNotJoined
+	}
+
+	return m.bus.SendTo(clientID, protocol.MustEnvelope(protocol.Envelope{
+		Type:     protocol.TypeTopology,
+		RoomID:   roomID,
+		Topology: topologyInfo,
+	}))
 }
 
 // HandleControl 处理房主控制。
