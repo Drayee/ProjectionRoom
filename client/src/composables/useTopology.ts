@@ -9,7 +9,7 @@ export interface TopologyDeps {
   isHost: () => boolean
   /** 与某个成员建立（或复用）DataChannel。 */
   connectToPeer: (peerId: string) => Promise<void>
-  sendToPeer: (peerId: string, text: string) => boolean
+  sendToPeer: (peerId: string, msg: PeerControl) => boolean
   connectedPeers: () => string[]
   /** 索引里的分片总数。 */
   segmentCount: () => number
@@ -21,26 +21,6 @@ export interface TopologyDeps {
   onPrimaryChanged?: () => void
 }
 
-function encodeBits(bits: Uint8Array): string {
-  let binary = ''
-  for (let i = 0; i < bits.length; i += 1) {
-    binary += String.fromCharCode(bits[i])
-  }
-  return btoa(binary)
-}
-
-function decodeBits(text: string): Uint8Array {
-  try {
-    const binary = atob(text)
-    const out = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i += 1) {
-      out[i] = binary.charCodeAt(i)
-    }
-    return out
-  } catch {
-    return new Uint8Array(0)
-  }
-}
 
 /**
  * 拓扑与多父调度（SPEC §6.1–§6.4）。
@@ -174,11 +154,12 @@ export function useTopology(deps: TopologyDeps) {
     attempts.clear()
   }
 
-  function notePeerHave(peerId: string, chunks: string) {
-    if (!chunks) {
+  function notePeerHave(peerId: string, chunks: Uint8Array<ArrayBuffer>) {
+    if (!chunks || chunks.length === 0) {
       return
     }
-    peerHave.value.set(peerId, decodeBits(chunks))
+    // protobuf 里位图就是 bytes：不需要 base64 往返。
+    peerHave.value.set(peerId, chunks)
   }
 
   function forgetPeer(peerId: string) {
@@ -186,7 +167,7 @@ export function useTopology(deps: TopologyDeps) {
   }
 
   /** 生成并广播本节点的分片拥有位图；返回值同时用于上报服务端。 */
-  function broadcastHave(): { bits: string; complete: boolean } | null {
+  function broadcastHave(): { bits: Uint8Array<ArrayBuffer>; complete: boolean } | null {
     const total = deps.segmentCount()
     if (total <= 0) {
       return null
@@ -201,12 +182,12 @@ export function useTopology(deps: TopologyDeps) {
       }
     }
 
-    const bits = encodeBits(bytes)
+    const bits = bytes
     const complete = owned.filter((index) => index >= 1).length >= total
     const message: PeerControl = { t: 'have', chunks: bits, complete }
 
     for (const peerId of deps.connectedPeers()) {
-      deps.sendToPeer(peerId, JSON.stringify(message))
+      deps.sendToPeer(peerId, message)
     }
 
     return { bits, complete }

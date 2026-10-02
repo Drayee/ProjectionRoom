@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/wire v0.7.0
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -37,5 +38,4 @@ require (
 	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 )

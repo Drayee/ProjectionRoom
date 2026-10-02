@@ -1,5 +1,8 @@
-// 与 Go 端 internal/protocol/message.go 一一对应的消息契约（SPEC §5.1）。
-// 任何一边改字段，另一边必须同步 —— 它们是同一个协议的两份投影。
+// 客户端侧的领域消息类型（可读版本）。
+//
+// 线上编码是 protobuf（见 types/codec.ts 与 proto/projection_room.proto）；
+// 本文件是业务代码使用的形状 —— 数值就是 number，不需要到处写 bigint。
+// 改协议时：先改 .proto，再改 codec.ts 的转换，最后才动这里。
 
 import type { MediaIndex } from './media'
 
@@ -56,6 +59,27 @@ export interface PlaybackState {
   clockEpoch?: string
 }
 
+/** 实测度量：UploadCapacityBps 取自 getStats().availableOutgoingBitrate（C11）。 */
+export interface Metrics {
+  rttMs?: number
+  throughputBps?: number
+  uploadCapacityBps?: number
+  depth?: number
+  /** 健康度：用于"卡顿 → 服务器重算路径"。 */
+  bufferHealth?: number
+  p95DeliveryMs?: number
+  stallCount?: number
+  degraded?: boolean
+  primaryId?: string
+}
+
+export interface Capacity {
+  mode: string
+  maxMembers: number
+  streamBps: number
+  hostChildSlots: number
+}
+
 /** 一个节点在分发树中的位置（SPEC §6.1）。 */
 export interface TopologyAssignment {
   peerId: string
@@ -75,21 +99,6 @@ export interface DistributorChange {
   fromId?: string
   toId?: string
   reason?: string
-}
-
-/** 实测度量：UploadCapacityBps 取自 getStats().availableOutgoingBitrate（C11）。 */
-export interface Metrics {
-  rttMs?: number
-  throughputBps?: number
-  uploadCapacityBps?: number
-  depth?: number
-}
-
-export interface Capacity {
-  mode: string
-  maxMembers: number
-  streamBps: number
-  hostChildSlots: number
 }
 
 export interface Envelope {
@@ -121,11 +130,12 @@ export interface Envelope {
   capacity?: Capacity
   topology?: TopologyAssignment
   distributor?: DistributorChange
-  /** 分片拥有位图（base64）。 */
-  have?: string
+  /** 分片拥有位图（原始位，不再是 base64 字符串）。 */
+  have?: Uint8Array<ArrayBuffer>
   complete?: boolean
   code?: string
   message?: string
+  reason?: string
 }
 
 /** WebRTC 信令载荷：服务端只做原样转发，不解析（SPEC §5.1）。 */
@@ -135,14 +145,17 @@ export interface SignalPayload {
   candidate?: RTCIceCandidateInit
 }
 
-/** Peer 之间的 DataChannel 控制消息（文本帧）；分片数据走二进制帧（SPEC §5.2）。 */
+/**
+ * Peer 之间的 DataChannel 控制消息。
+ * 帧格式（1 字节 kind 前缀 + protobuf）见 types/codec.ts；分片数据不走这里。
+ */
 export interface PeerControl {
   t: 'req' | 'chunk' | 'err' | 'have' | 'ping' | 'pong' | 'progress' | 'time-sync'
   rid?: string
   idx?: number
   code?: string
-  /** have 消息的位图（base64）。 */
-  chunks?: string
+  /** have 消息的位图。 */
+  chunks?: Uint8Array<ArrayBuffer>
   complete?: boolean
   ts?: number
   currentTime?: number
@@ -151,13 +164,11 @@ export interface PeerControl {
   paused?: boolean
   rate?: number
   seq?: number
+  /** 逐跳时钟中继：转发节点自己的本地时钟读数。 */
+  parentClockMs?: number
+  /** 逐跳时钟中继：转发节点自己到主播的偏移估计（毫秒）。 */
+  parentOffsetMs?: number
 }
-
-export const FrameType = {
-  Init: 0x01,
-  Media: 0x02,
-  Tail: 0x03,
-} as const
 
 export interface CreateRoomResponse {
   roomId: string
@@ -174,7 +185,3 @@ export interface RoomInfoResponse {
   capacity?: Capacity
   error?: string
 }
-
-
-
-

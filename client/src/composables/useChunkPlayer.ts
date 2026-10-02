@@ -27,7 +27,7 @@ export function useChunkPlayer() {
   let mediaSource: MediaSource | null = null
   let sourceBuffer: SourceBuffer | null = null
   let objectUrl = ''
-  const queue: ArrayBuffer[] = []
+  const queue: Uint8Array<ArrayBuffer>[] = []
   let pumpBound: (() => void) | null = null
 
   function pump() {
@@ -49,7 +49,7 @@ export function useChunkPlayer() {
     if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) {
       return
     }
-    const buf = queue.shift() as ArrayBuffer
+    const buf = queue.shift() as Uint8Array<ArrayBuffer>
     queued.value = queue.length
     try {
       sourceBuffer.appendBuffer(buf)
@@ -120,7 +120,7 @@ export function useChunkPlayer() {
   }
 
   /** 把一段分片排入写入队列。init 段与媒体分片走同一个队列，顺序由调用方保证。 */
-  function append(type: number, payload: ArrayBuffer) {
+  function append(type: number, payload: Uint8Array<ArrayBuffer>) {
     queue.push(payload)
     if (type === 0x01) {
       initAppended.value = true

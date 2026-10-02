@@ -1,0 +1,181 @@
+// ProjectionRoom 线上协议（唯一真源）。
+//
+// 约定：
+//   - 本文件是客户端与服务器之间**所有**控制消息的唯一真源，改字段先改这里再重新生成；
+//   - 视频分片数据不经 protobuf：它走 DataChannel 的原始二进制帧（8 字节头 + fMP4 片段），
+//     包一层只会平白多一次大块内存拷贝；
+//   - type / role / action / code 用 string 而不是 enum：它们是开放集合，
+//     用字符串能让日志、前端调试与向后兼容都简单一档。
+syntax = "proto3";
+
+package projection_room.v1;
+
+option go_package = "ProjectionRoom/internal/pb;pb";
+
+// MediaSegment 是一个媒体分片（与 internal/media.Segment 一一对应）。
+message MediaSegment {
+  int32 index = 1;      // 从 1 开始；0 保留给 init 段
+  string file = 2;
+  int64 offset = 3;
+  int64 size = 4;
+  double duration = 5;
+  double start_pts = 6;
+  bool keyframe = 7;
+  string sha256 = 8;
+}
+
+// MediaIndex 是主播发布的分片索引。
+message MediaIndex {
+  int32 version = 1;
+  string init_file = 2;
+  string mime_type = 3;
+  double total_duration = 4;
+  double segment_sec = 5;
+  int64 bitrate_bps = 6;
+  int64 total_bytes = 7;
+  repeated MediaSegment segments = 8;
+}
+
+// PlaybackState 是播放权威信息。主播是唯一时间源，中继只转发不改写。
+message PlaybackState {
+  bool paused = 1;
+  double current_time = 2;
+  int64 host_clock_ms = 3;  // 主播单调时钟读数
+  double rate = 4;
+  int64 seq = 5;            // 单调递增，乱序/重复一律丢弃
+  string clock_epoch = 6;   // 主播页面时钟纪元；变化即重置偏移滤波
+}
+
+// Metrics 是成员上报的实测度量。
+message Metrics {
+  double rtt_ms = 1;
+  double throughput_bps = 2;
+  int64 upload_capacity_bps = 3;
+  int32 depth = 4;
+  // 以下用于"卡顿 → 重算路径"：健康度恶化时客户端主动上报，服务器据此重排拓扑。
+  double buffer_health = 5;   // 已就绪缓冲秒数 / 目标缓冲秒数，0-1
+  double p95_delivery_ms = 6; // 最近分片交付 p95
+  int32 stall_count = 7;
+  bool degraded = 8;          // 自评"我现在拖后腿了"
+  string primary_id = 9;      // 当前主父，便于服务器判断是不是上游的问题
+}
+
+// MemberInfo 是成员列表条目。
+message MemberInfo {
+  string id = 1;
+  string display_name = 2;
+  string role = 3;
+  int32 depth = 4;
+  string primary_id = 5;
+  repeated string backup_ids = 6;
+  int64 joined_at = 7;
+}
+
+// Capacity 是房间容量判断。
+message Capacity {
+  string mode = 1;
+  int32 max_members = 2;
+  int64 stream_bps = 3;
+  int32 host_child_slots = 4;
+}
+
+// TopologyAssignment 是一个节点在分发树中的位置。
+message TopologyAssignment {
+  string peer_id = 1;
+  string primary_id = 2;
+  repeated string backup_ids = 3;
+  repeated string children = 4;  // 以本节点为主父的成员：进度沿这条路径逐跳转发
+  int32 depth = 5;
+  string mode = 6;
+  string distributor_id = 7;
+  string reason = 8;
+  int32 max_depth = 9;
+}
+
+// DistributorChange 是单链模式下分发节点的换防通知。
+message DistributorChange {
+  string from_id = 1;
+  string to_id = 2;
+  string reason = 3;
+}
+
+// Envelope 是 WebSocket 上的统一信封。
+message Envelope {
+  string type = 1;
+
+  string room_id = 2;
+  string client_id = 3;
+  string to = 4;
+  string from = 5;
+
+  string display_name = 6;
+  string role = 7;
+  string password = 8;
+
+  bytes payload = 9;  // SDP / ICE 原样透传
+
+  string text = 10;
+  int64 ts = 11;
+
+  // 客户端上行：房主控制意图
+  string action = 12;
+  double current_time = 13;
+  int64 host_clock_ms = 14;
+  string clock_epoch = 15;
+  bool paused = 16;
+  double rate = 17;
+
+  // 服务端下行：播放权威信息
+  PlaybackState playback = 18;
+  int64 seq = 19;
+  Metrics metrics = 20;
+
+  string self_id = 21;
+  string host_id = 22;
+  MemberInfo member = 23;
+  repeated MemberInfo members = 24;
+
+  MediaIndex media_index = 25;
+  Capacity capacity = 26;
+  TopologyAssignment topology = 27;
+  DistributorChange distributor = 28;
+
+  // 分片拥有位图（原先是 base64 字符串；改成 bytes 省掉一次编解码与 33% 体积）
+  bytes have = 29;
+  bool complete = 30;
+
+  string code = 31;
+  string message = 32;
+
+  // 请求/通知的缘由（如 topology-request 的 "stalled"、换防原因）
+  string reason = 33;
+}
+
+// PeerControl 是 DataChannel 上的控制消息。
+// 分片数据本身不走这里：它在控制消息之后以原始二进制帧发送。
+message PeerControl {
+  string t = 1;  // req | chunk | err | have | ping | pong | progress | time-sync
+
+  string rid = 2;
+  int32 idx = 3;
+  string code = 4;
+
+  bytes chunks = 5;    // have 位图
+  bool complete = 6;
+  int64 ts = 7;
+
+  // progress / time-sync
+  double current_time = 8;
+  int64 host_clock_ms = 9;
+  string clock_epoch = 10;
+  bool paused = 11;
+  double rate = 12;
+  int64 seq = 13;
+
+  // 逐跳时钟中继（解决"多跳叶子稳定滞后 = 路径最小单向延迟"）：
+  // 转发节点填入**自己的本地时钟**与**自己到主播的偏移估计**，
+  // 子节点据此把"到父的偏移"与"父到主播的偏移"相加，
+  // 误差从"整条路径的单向延迟"降到"各跳半 RTT 之和"。
+  int64 parent_clock_ms = 14;
+  double parent_offset_ms = 15;
+}

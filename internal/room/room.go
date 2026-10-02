@@ -6,11 +6,11 @@
 package room
 
 import (
-	"encoding/json"
 	"errors"
 	"sync"
 	"time"
 
+	"ProjectionRoom/internal/media"
 	"ProjectionRoom/internal/protocol"
 	"ProjectionRoom/internal/topology"
 )
@@ -61,7 +61,7 @@ type Member struct {
 
 	// 分片拥有情况（base64 位图）。服务端只做记录，供 M4 监控面板展示；
 	// 逐分片的父节点选择在客户端用同一张位图直接完成（SPEC §6.4）。
-	HaveBits string
+	HaveBits []byte
 	Complete bool
 }
 
@@ -94,7 +94,7 @@ type Room struct {
 	// StreamBps 是容量模型的码率输入：主播发布索引前用配置估计值，之后用索引里的实测码率。
 	StreamBps int64
 	// MediaIndex 是主播发布的分片索引，一经设定即锁定（SPEC §8.1）。
-	MediaIndex json.RawMessage
+	MediaIndex *media.Index
 
 	Seq          int64
 	lastPlayback protocol.PlaybackState
@@ -145,7 +145,7 @@ func (r *Room) Snapshot(maxMembers int) (
 	members []protocol.MemberInfo,
 	playback protocol.PlaybackState,
 	capacity protocol.Capacity,
-	mediaIndex json.RawMessage,
+	mediaIndex *media.Index,
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

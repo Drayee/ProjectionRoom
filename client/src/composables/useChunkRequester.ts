@@ -1,47 +1,16 @@
 import { ref } from 'vue'
-import { FrameType } from '../types/protocol'
+import { KIND_INIT, encodeControl, type Bytes, type DecodedMedia } from '../types/codec'
 import type { PeerControl } from '../types/protocol'
 
-/** 二进制帧头：ver(1) type(1) flags(2) chunkIndex(4)（SPEC §5.2）。 */
-export const FRAME_HEADER_BYTES = 8
-
-export function encodeFrame(type: number, chunkIndex: number, payload: ArrayBuffer): ArrayBuffer {
-  const out = new ArrayBuffer(FRAME_HEADER_BYTES + payload.byteLength)
-  const view = new DataView(out)
-  view.setUint8(0, 1)
-  view.setUint8(1, type)
-  view.setUint16(2, 0)
-  view.setUint32(4, chunkIndex)
-  new Uint8Array(out, FRAME_HEADER_BYTES).set(new Uint8Array(payload))
-  return out
-}
-
-export interface DecodedFrame {
-  type: number
-  chunkIndex: number
-  payload: ArrayBuffer
-}
-
-export function decodeFrame(data: ArrayBuffer): DecodedFrame | null {
-  if (data.byteLength < FRAME_HEADER_BYTES) {
-    return null
-  }
-  const view = new DataView(data)
-  if (view.getUint8(0) !== 1) {
-    return null
-  }
-  return {
-    type: view.getUint8(1),
-    chunkIndex: view.getUint32(4),
-    payload: data.slice(FRAME_HEADER_BYTES),
-  }
-}
+// 帧的编解码在 types/codec.ts（控制消息与分片帧都在那里定义），
+// 本文件只负责"发请求 / 等响应 / 超时转投"。
 
 export interface Delivery {
   index: number
   peerId: string
-  type: number
-  payload: ArrayBuffer
+  kind: number
+  /** 零拷贝视图：直接交给 SourceBuffer.appendBuffer。 */
+  payload: Bytes
   ms: number
 }
 
@@ -63,7 +32,7 @@ const DEFAULT_TIMEOUT_MS = 3000
  * 先到先用，其余结果自然作废 —— 这是 M3 多父条带化与超时转投的基础（SPEC §6.4 L2）。
  */
 export function useChunkRequester(opts: {
-  send: (peerId: string, data: string | ArrayBuffer) => boolean
+  send: (peerId: string, data: Bytes) => boolean
   timeoutMs?: number
 }) {
   const inflight = new Map<string, Inflight>()
@@ -101,7 +70,7 @@ export function useChunkRequester(opts: {
     inflight.set(key, entry)
 
     const control: PeerControl = { t: 'req', rid, idx: index }
-    if (!opts.send(peerId, JSON.stringify(control))) {
+    if (!opts.send(peerId, encodeControl(control))) {
       window.clearTimeout(timer)
       inflight.delete(key)
       failed.value += 1
@@ -132,13 +101,8 @@ export function useChunkRequester(opts: {
    * 处理二进制帧。
    * 命中在途请求就完成它；未命中（M3 的推送式分发或迟到响应）也照样返回，由调用方决定怎么用。
    */
-  function handleBinary(peerId: string, data: ArrayBuffer): Delivery | null {
-    const frame = decodeFrame(data)
-    if (!frame) {
-      return null
-    }
-
-    const key = keyOf(peerId, frame.chunkIndex)
+  function handleMedia(peerId: string, media: DecodedMedia): Delivery {
+    const key = keyOf(peerId, media.chunkIndex)
     const entry = inflight.get(key)
     const ms = entry ? performance.now() - entry.startedAt : 0
 
@@ -153,10 +117,10 @@ export function useChunkRequester(opts: {
     }
 
     const delivery: Delivery = {
-      index: frame.chunkIndex,
+      index: media.chunkIndex,
       peerId,
-      type: frame.type,
-      payload: frame.payload,
+      kind: media.kind,
+      payload: media.payload,
       ms,
     }
     entry?.resolve(delivery)
@@ -164,8 +128,8 @@ export function useChunkRequester(opts: {
     return delivery
   }
 
-  function isInit(frameType: number): boolean {
-    return frameType === FrameType.Init
+  function isInit(kind: number): boolean {
+    return kind === KIND_INIT
   }
 
   /** 最近 20 次交付时延的 p95（没有样本时返回 0）。 */
@@ -203,7 +167,7 @@ export function useChunkRequester(opts: {
   return {
     request,
     handleControl,
-    handleBinary,
+    handleMedia,
     isInit,
     p95DeliveryMs,
     pendingCount,

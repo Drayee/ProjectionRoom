@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -60,17 +59,18 @@ func wsHandler(cfg *config.Config, hub *signal.Hub, rooms *room.Manager) gin.Han
 			if err != nil {
 				return
 			}
-			if typ != websocket.MessageText {
-				// 二进制帧留给后续阶段的兜底转发；当前架构下服务端不传输视频字节。
+			if typ != websocket.MessageBinary {
+				// 信令已经是 protobuf 二进制帧；文本帧不再处理。
+				// 注意：这里处理的是"控制报文"，视频分片走 WebRTC DataChannel，不经过服务器。
 				continue
 			}
 
-			var env protocol.Envelope
-			if err := json.Unmarshal(data, &env); err != nil {
-				_ = client.Send(protocol.ErrorEnvelope(protocol.CodeBadRequest, "报文不是合法 JSON"))
+			env, err := protocol.Unmarshal(data)
+			if err != nil {
+				_ = client.Send(protocol.ErrorEnvelope(protocol.CodeBadRequest, "报文不是合法的 protobuf 信封"))
 				continue
 			}
-			handleMessage(hub, rooms, client, roomID, clientID, env)
+			handleMessage(hub, rooms, client, roomID, clientID, *env)
 		}
 	}
 }

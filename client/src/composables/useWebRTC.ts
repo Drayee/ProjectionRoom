@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { decodeFrame, encodeControl, type Bytes, type DecodedMedia } from '../types/codec'
 import type { PeerControl, SignalPayload } from '../types/protocol'
 
 export interface PeerRuntime {
@@ -24,8 +25,8 @@ const STATS_INTERVAL_MS = 5000
 export function useWebRTC(opts: {
   iceServers: () => RTCIceServer[]
   sendSignal: (to: string, payload: SignalPayload) => void
-  onControl: (peerId: string, msg: PeerControl, raw: string) => void
-  onBinary: (peerId: string, data: ArrayBuffer) => void
+  onControl: (peerId: string, msg: PeerControl) => void
+  onMedia: (peerId: string, media: DecodedMedia) => void
   onOpen?: (peerId: string) => void
   onClose?: (peerId: string) => void
 }) {
@@ -94,26 +95,28 @@ export function useWebRTC(opts: {
     }
 
     channel.onmessage = (event) => {
-      if (typeof event.data === 'string') {
-        handleControlText(peerId, event.data)
+      if (!(event.data instanceof ArrayBuffer)) {
         return
       }
-      if (event.data instanceof ArrayBuffer) {
-        opts.onBinary(peerId, event.data)
+      // DataChannel 上控制消息（protobuf）与分片帧都是二进制，
+      // 由 1 字节 kind 前缀区分，见 types/codec.ts。
+      const decoded = decodeFrame(new Uint8Array(event.data))
+      if (!decoded) {
+        return
+      }
+      if (decoded.control) {
+        handleControl(peerId, decoded.control)
+        return
+      }
+      if (decoded.media) {
+        opts.onMedia(peerId, decoded.media)
       }
     }
   }
 
-  function handleControlText(peerId: string, raw: string) {
-    let msg: PeerControl
-    try {
-      msg = JSON.parse(raw) as PeerControl
-    } catch {
-      return
-    }
-
+  function handleControl(peerId: string, msg: PeerControl) {
     if (msg.t === 'ping') {
-      send(peerId, JSON.stringify({ t: 'pong', ts: msg.ts } satisfies PeerControl))
+      send(peerId, encodeControl({ t: 'pong', ts: msg.ts }))
       return
     }
     if (msg.t === 'pong') {
@@ -124,7 +127,7 @@ export function useWebRTC(opts: {
       return
     }
 
-    opts.onControl(peerId, msg, raw)
+    opts.onControl(peerId, msg)
   }
 
   function startPing(peerId: string, channel: RTCDataChannel) {
@@ -132,7 +135,7 @@ export function useWebRTC(opts: {
     const timer = window.setInterval(() => {
       if (channel.readyState === 'open') {
         try {
-          channel.send(JSON.stringify({ t: 'ping', ts: performance.now() } satisfies PeerControl))
+          channel.send(encodeControl({ t: 'ping', ts: performance.now() }))
         } catch {
           stopPing(peerId)
         }
@@ -229,25 +232,21 @@ export function useWebRTC(opts: {
     }
   }
 
-  function send(peerId: string, data: string | ArrayBuffer): boolean {
+  /** 发送一条已编码的二进制帧（控制消息或分片帧）。 */
+  function send(peerId: string, data: Bytes): boolean {
     const channel = channels.get(peerId)
     if (!channel || channel.readyState !== 'open') {
       return false
     }
     try {
-      // 分开两个分支：RTCDataChannel.send 的重载无法从 string | ArrayBuffer 联合类型里推断。
-      if (typeof data === 'string') {
-        channel.send(data)
-      } else {
-        channel.send(data)
-      }
+      channel.send(data)
       return true
     } catch {
       return false
     }
   }
 
-  function broadcast(data: string | ArrayBuffer): number {
+  function broadcast(data: Bytes): number {
     let sent = 0
     for (const peerId of channels.keys()) {
       if (send(peerId, data)) {

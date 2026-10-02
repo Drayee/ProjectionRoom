@@ -85,12 +85,12 @@ export function useMediaIndex() {
   }
 
   /** 读取某个分片的内容（0 表示 init 段）。主播按需读取，不把整部片子读进内存。 */
-  async function readChunk(segmentIndex: number): Promise<ArrayBuffer | null> {
-    if (segmentIndex === 0) {
-      return initFile ? initFile.arrayBuffer() : null
+  async function readChunk(segmentIndex: number): Promise<Uint8Array<ArrayBuffer> | null> {
+    const file = segmentIndex === 0 ? initFile : segments.get(segmentIndex)
+    if (!file) {
+      return null
     }
-    const file = segments.get(segmentIndex)
-    return file ? file.arrayBuffer() : null
+    return new Uint8Array(await file.arrayBuffer())
   }
 
   function reset() {

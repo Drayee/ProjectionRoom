@@ -7,16 +7,16 @@ import { ref } from 'vue'
  * 按需 File.slice().arrayBuffer() 读取，避免把整部片子读进内存（SPEC §4.4）。
  */
 export function useChunkStore() {
-  const buffers = ref(new Map<number, ArrayBuffer>())
+  const buffers = ref(new Map<number, Uint8Array<ArrayBuffer>>())
   const owned = ref(0)
 
-  let initChunk: ArrayBuffer | null = null
+  let initChunk: Uint8Array<ArrayBuffer> | null = null
 
-  function putInit(data: ArrayBuffer) {
+  function putInit(data: Uint8Array<ArrayBuffer>) {
     initChunk = data
   }
 
-  function getInit(): ArrayBuffer | null {
+  function getInit(): Uint8Array<ArrayBuffer> | null {
     return initChunk
   }
 
@@ -25,7 +25,7 @@ export function useChunkStore() {
   }
 
   /** 存入一个分片；已存在时返回 false。 */
-  function put(index: number, data: ArrayBuffer): boolean {
+  function put(index: number, data: Uint8Array<ArrayBuffer>): boolean {
     if (buffers.value.has(index)) {
       return false
     }
@@ -43,7 +43,7 @@ export function useChunkStore() {
     return buffers.value.has(index)
   }
 
-  function get(index: number): ArrayBuffer | null {
+  function get(index: number): Uint8Array<ArrayBuffer> | null {
     return buffers.value.get(index) ?? null
   }
 

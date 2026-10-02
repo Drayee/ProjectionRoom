@@ -3,13 +3,14 @@ import { defineStore } from 'pinia'
 import { useSignaling } from '../composables/useSignaling'
 import { useMediaIndex } from '../composables/useMediaIndex'
 import { useChunkStore } from '../composables/useChunkStore'
-import { encodeFrame, useChunkRequester } from '../composables/useChunkRequester'
+import { useChunkRequester } from '../composables/useChunkRequester'
 import { useChunkPlayer } from '../composables/useChunkPlayer'
 import { useSyncClock } from '../composables/useSyncClock'
 import { useWebRTC } from '../composables/useWebRTC'
 import { useTopology } from '../composables/useTopology'
 import { segmentIndexAt } from '../types/media'
-import { Action, FrameType, T } from '../types/protocol'
+import { KIND_INIT, KIND_MEDIA, encodeControl, encodeMediaFrame, type DecodedMedia } from '../types/codec'
+import { Action, T } from '../types/protocol'
 import type { MediaIndex } from '../types/media'
 import type {
   Capacity,
@@ -175,7 +176,7 @@ export const useRoomStore = defineStore('room', () => {
     iceServers: () => iceServers.value,
     sendSignal: (to, payload) => signaling.send({ type: T.Signal, to, payload }),
     onControl: handlePeerControl,
-    onBinary: handlePeerBinary,
+    onMedia: handlePeerMedia,
     onOpen: (peerId) => {
       // 主播给新连上的观众补齐当前播放状态与时钟锚点。
       if (isHost.value) {
@@ -214,7 +215,7 @@ export const useRoomStore = defineStore('room', () => {
     selfId: () => clientId.value,
     isHost: () => isHost.value,
     connectToPeer: connectTo,
-    sendToPeer: (peerId, text) => rtc.send(peerId, text),
+    sendToPeer: (peerId, msg) => rtc.send(peerId, encodeControl(msg)),
     connectedPeers: () => rtc.openChannels(),
     segmentCount: () => mediaIndex.value?.segments.length ?? 0,
     // 主播是 Seeder：它能按需从本地文件读出任意分片，位图必须如实广告"全都有"。
@@ -351,7 +352,7 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   // ---------- Peer 消息 ----------
-  function handlePeerControl(peerId: string, msg: PeerControl, raw: string) {
+  function handlePeerControl(peerId: string, msg: PeerControl) {
     if (msg.t === 'req') {
       void serveRequest(peerId, msg)
       return
@@ -361,13 +362,13 @@ export const useRoomStore = defineStore('room', () => {
       return
     }
     if (msg.t === 'have') {
-      topology.notePeerHave(peerId, msg.chunks ?? '')
+      topology.notePeerHave(peerId, msg.chunks ?? new Uint8Array(0))
       return
     }
     if (msg.t === 'progress' || msg.t === 'time-sync') {
       // 中继职责：把上级给的权威进度原样转发给子节点（SPEC §7.5）。
       if (!isHost.value && peerId === topology.primaryId.value) {
-        forwardToChildren(raw)
+        forwardToChildren(msg)
       }
       if (isHost.value) return
       if (typeof msg.currentTime === 'number' && typeof msg.hostClockMs === 'number') {
@@ -384,10 +385,9 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
-  function handlePeerBinary(peerId: string, data: ArrayBuffer) {
-    const delivery = requester.handleBinary(peerId, data)
-    if (!delivery) return
-    if (delivery.type === FrameType.Init || delivery.index === 0) {
+  function handlePeerMedia(peerId: string, media: DecodedMedia) {
+    const delivery = requester.handleMedia(peerId, media)
+    if (delivery.index === 0 || delivery.kind === KIND_INIT) {
       chunkStore.putInit(delivery.payload)
     } else {
       chunkStore.put(delivery.index, delivery.payload)
@@ -400,12 +400,12 @@ export const useRoomStore = defineStore('room', () => {
     if (msg.idx === undefined) return
     const index = msg.idx
 
-    if (!rtc.send(peerId, JSON.stringify({ t: 'chunk', rid: msg.rid, idx: index } satisfies PeerControl))) {
+    if (!rtc.send(peerId, encodeControl({ t: 'chunk', rid: msg.rid, idx: index }))) {
       return
     }
 
     // 主播从本地文件读；转发节点从自己已经收到的分片里取（SPEC §6.4 的中继职责）。
-    let payload: ArrayBuffer | null = null
+    let payload: Uint8Array<ArrayBuffer> | null = null
     if (isHost.value) {
       payload = await media.readChunk(index)
     } else if (index === 0) {
@@ -414,12 +414,12 @@ export const useRoomStore = defineStore('room', () => {
       payload = chunkStore.get(index)
     }
     if (!payload) {
-      rtc.send(peerId, JSON.stringify({ t: 'err', rid: msg.rid, idx: index, code: 'NOT_FOUND' } satisfies PeerControl))
+      rtc.send(peerId, encodeControl({ t: 'err', rid: msg.rid, idx: index, code: 'NOT_FOUND' }))
       return
     }
 
     await throttleWait(payload.byteLength)
-    rtc.send(peerId, encodeFrame(index === 0 ? FrameType.Init : FrameType.Media, index, payload))
+    rtc.send(peerId, encodeMediaFrame(index === 0 ? KIND_INIT : KIND_MEDIA, index, payload))
   }
 
   // ---------- 验收钩子（仅调试用，生产路径不设置）----------
@@ -459,9 +459,9 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   /** 把权威进度原样转发给子节点：不改 currentTime / hostClockMs / seq（SPEC §7.5）。 */
-  function forwardToChildren(raw: string) {
+  function forwardToChildren(msg: PeerControl) {
     for (const childId of topology.children.value) {
-      rtc.send(childId, raw)
+      rtc.send(childId, encodeControl(msg))
     }
   }
 
@@ -624,7 +624,7 @@ export const useRoomStore = defineStore('room', () => {
         topology.noteAttempt(index)
         const delivery = await requester.request(peerId, index)
         topology.noteDelivered(index)
-        if (index === 0 || delivery.type === FrameType.Init) {
+        if (index === 0 || delivery.kind === KIND_INIT) {
           chunkStore.putInit(delivery.payload)
         } else {
           chunkStore.put(delivery.index, delivery.payload)
@@ -644,13 +644,13 @@ export const useRoomStore = defineStore('room', () => {
 
     const init = chunkStore.getInit()
     if (init && !player.initAppended.value) {
-      player.append(FrameType.Init, init)
+      player.append(KIND_INIT, init)
     }
 
     while (chunkStore.has(nextAppend)) {
       const buf = chunkStore.get(nextAppend)
       if (!buf) break
-      player.append(FrameType.Media, buf)
+      player.append(KIND_MEDIA, buf)
       nextAppend += 1
     }
 
@@ -854,18 +854,18 @@ export const useRoomStore = defineStore('room', () => {
 
   function sendProgressTo(peerId: string) {
     const msg = buildProgress()
-    if (msg) rtc.send(peerId, JSON.stringify(msg))
+    if (msg) rtc.send(peerId, encodeControl(msg))
   }
 
   function clockStoreSendTimeSync(peerId: string) {
     rtc.send(
       peerId,
-      JSON.stringify({
+      encodeControl({
         t: 'time-sync',
         hostClockMs: Math.round(performance.now()),
         clockEpoch: clockEpoch.value,
         seq: progressSeq,
-      } satisfies PeerControl),
+      }),
     )
   }
 
@@ -873,18 +873,18 @@ export const useRoomStore = defineStore('room', () => {
     if (!isHost.value || !joined.value) return
     const msg = buildProgress()
     if (!msg) return
-    rtc.broadcast(JSON.stringify(msg))
+    rtc.broadcast(encodeControl(msg))
   }
 
   function tickTimeSync() {
     if (!isHost.value || !joined.value) return
     rtc.broadcast(
-      JSON.stringify({
+      encodeControl({
         t: 'time-sync',
         hostClockMs: Math.round(performance.now()),
         clockEpoch: clockEpoch.value,
         seq: progressSeq,
-      } satisfies PeerControl),
+      }),
     )
   }
 
@@ -896,6 +896,12 @@ export const useRoomStore = defineStore('room', () => {
         rttMs: rtc.averageRttMs(),
         uploadCapacityBps: rtc.uploadCapacityBps.value,
         depth: depth.value,
+        // 健康度：服务器据此判断"这个节点是不是该换条路"
+        bufferHealth: bufferedAhead.value,
+        p95DeliveryMs: requester.p95DeliveryMs(),
+        stallCount: player.stalls.value,
+        degraded: gated.value || bufferedAhead.value < BUFFER_TARGET_SEC,
+        primaryId: topology.primaryId.value,
       },
     })
   }

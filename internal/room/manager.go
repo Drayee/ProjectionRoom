@@ -1,9 +1,7 @@
 package room
 
 import (
-	"bytes"
 	"crypto/rand"
-	"encoding/json"
 	"log"
 	"strconv"
 	"strings"
@@ -274,17 +272,12 @@ func (m *Manager) HandleChat(roomID, clientID, text string) error {
 // SetMediaIndex 由主播发布分片索引：校验、锁定、广播（SPEC §4.3、§5.1）。
 //
 // 服务端必须校验：一个畸形索引会让整个房间算错容量，或者让播放器拿到 appendBuffer 一定失败的 mimeType。
-func (m *Manager) SetMediaIndex(roomID, clientID string, raw json.RawMessage) error {
+func (m *Manager) SetMediaIndex(roomID, clientID string, index *media.Index) error {
 	r, ok := m.Get(roomID)
 	if !ok {
 		return ErrNotFound
 	}
-	if len(raw) == 0 {
-		return ErrBadMediaIndex
-	}
-
-	var index media.Index
-	if err := json.Unmarshal(raw, &index); err != nil {
+	if index == nil {
 		return ErrBadMediaIndex
 	}
 	if err := index.Validate(); err != nil {
@@ -302,12 +295,13 @@ func (m *Manager) SetMediaIndex(roomID, clientID string, raw json.RawMessage) er
 		r.mu.Unlock()
 		return ErrNotHost
 	}
-	if len(r.MediaIndex) > 0 && !bytes.Equal(r.MediaIndex, raw) {
+	// 索引一经设定即锁定；重复发布同一份是幂等的（SPEC §8.1）。
+	if r.MediaIndex != nil && !protocol.SameIndex(r.MediaIndex, index) {
 		r.mu.Unlock()
 		return ErrMediaLocked
 	}
 
-	r.MediaIndex = append(json.RawMessage(nil), raw...)
+	r.MediaIndex = index
 	// 用索引里的实测码率替换配置估计值，容量模型从此有真实输入。
 	r.StreamBps = index.BitrateBps
 	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
@@ -317,7 +311,7 @@ func (m *Manager) SetMediaIndex(roomID, clientID string, raw json.RawMessage) er
 		Type:       protocol.TypeMediaIndex,
 		RoomID:     roomID,
 		From:       clientID,
-		MediaIndex: raw,
+		MediaIndex: index,
 	}), clientID)
 	m.broadcastCapacity(roomID, capacity)
 
@@ -503,7 +497,7 @@ func sameStrings(a, b []string) bool {
 
 // SetChunkReport 记录成员上报的分片拥有情况。
 // M3 的逐分片父节点选择在客户端用同一张位图完成；服务端这里只做记录，供 M4 监控面板与诊断使用。
-func (m *Manager) SetChunkReport(roomID, clientID, have string, complete bool) error {
+func (m *Manager) SetChunkReport(roomID, clientID string, have []byte, complete bool) error {
 	r, ok := m.Get(roomID)
 	if !ok {
 		return ErrNotFound

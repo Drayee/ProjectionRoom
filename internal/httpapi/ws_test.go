@@ -119,14 +119,14 @@ func dial(t *testing.T, srv *httptest.Server, roomID, clientID string) *wsClient
 func (c *wsClient) send(env protocol.Envelope) {
 	c.t.Helper()
 
-	payload, err := json.Marshal(env)
+	payload, err := protocol.Marshal(&env)
 	if err != nil {
-		c.t.Fatalf("序列化消息失败: %v", err)
+		c.t.Fatalf("编码 protobuf 消息失败: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	if err := c.conn.Write(ctx, websocket.MessageText, payload); err != nil {
+	if err := c.conn.Write(ctx, websocket.MessageBinary, payload); err != nil {
 		c.t.Fatalf("发送消息失败: %v", err)
 	}
 }
@@ -143,17 +143,17 @@ func (c *wsClient) readUntil(types ...string) protocol.Envelope {
 		if err != nil {
 			c.t.Fatalf("读取消息失败（等待 %v）: %v", types, err)
 		}
-		if typ != websocket.MessageText {
+		if typ != websocket.MessageBinary {
 			continue
 		}
 
-		var env protocol.Envelope
-		if err := json.Unmarshal(data, &env); err != nil {
-			c.t.Fatalf("解析消息失败: %v (raw=%s)", err, data)
+		env, err := protocol.Unmarshal(data)
+		if err != nil {
+			c.t.Fatalf("解析 protobuf 消息失败: %v", err)
 		}
 		for _, want := range types {
 			if env.Type == want {
-				return env
+				return *env
 			}
 		}
 	}
@@ -418,16 +418,16 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 	viewer.join("观众", protocol.RoleViewer, "")
 	viewer.readUntil(protocol.TypeJoined)
 
-	raw, err := json.Marshal(sampleIndex(2_000_000))
-	if err != nil {
-		t.Fatalf("序列化索引失败: %v", err)
-	}
+	index := sampleIndex(2_000_000)
 
-	host.send(protocol.Envelope{Type: protocol.TypeMediaIndex, MediaIndex: raw})
+	host.send(protocol.Envelope{Type: protocol.TypeMediaIndex, MediaIndex: &index})
 
 	forwarded := viewer.readUntil(protocol.TypeMediaIndex)
-	if !bytes.Contains(forwarded.MediaIndex, []byte("c00002.m4s")) {
-		t.Fatalf("观众必须拿到完整分片索引，实际 %s", forwarded.MediaIndex)
+	if forwarded.MediaIndex == nil || len(forwarded.MediaIndex.Segments) != 2 {
+		t.Fatalf("观众必须拿到完整分片索引，实际 %+v", forwarded.MediaIndex)
+	}
+	if forwarded.MediaIndex.Segments[1].File != "c00002.m4s" {
+		t.Fatalf("索引分片内容不对: %+v", forwarded.MediaIndex.Segments[1])
 	}
 
 	// 索引发布时还没有实测上行：容量必须报 pending，而不是编一个数字。
@@ -440,7 +440,7 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 	}
 
 	// 观众无权发布索引。
-	viewer.send(protocol.Envelope{Type: protocol.TypeMediaIndex, MediaIndex: raw})
+	viewer.send(protocol.Envelope{Type: protocol.TypeMediaIndex, MediaIndex: &index})
 	if errEnv := viewer.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeNotHost {
 		t.Fatalf("观众发布索引应返回 NOT_HOST，实际 %q", errEnv.Code)
 	}

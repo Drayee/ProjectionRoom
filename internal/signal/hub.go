@@ -97,7 +97,8 @@ func (c *Client) writePump(ctx context.Context) {
 			return
 		case msg := <-c.send:
 			writeCtx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-			err := c.conn.Write(writeCtx, websocket.MessageText, msg)
+			// 信令报文是 protobuf：走二进制帧。
+			err := c.conn.Write(writeCtx, websocket.MessageBinary, msg)
 			cancel()
 			if err != nil {
 				c.Close()

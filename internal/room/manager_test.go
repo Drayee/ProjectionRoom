@@ -1,7 +1,7 @@
 package room
 
 import (
-	"encoding/json"
+	"bytes"
 	"errors"
 	"sync"
 	"testing"
@@ -78,9 +78,8 @@ func (f *fakeBus) lastBroadcastOfType(t *testing.T, roomID, msgType string) prot
 	defer f.mu.Unlock()
 
 	for i := len(f.roomWide[roomID]) - 1; i >= 0; i-- {
-		var env protocol.Envelope
-		if json.Unmarshal(f.roomWide[roomID][i], &env) == nil && env.Type == msgType {
-			return env
+		if env, err := protocol.Unmarshal(f.roomWide[roomID][i]); err == nil && env.Type == msgType {
+			return *env
 		}
 	}
 	t.Fatalf("房间 %s 没有类型为 %s 的广播", roomID, msgType)
@@ -99,9 +98,8 @@ func (f *fakeBus) lastDirectOfType(t *testing.T, id, msgType string) protocol.En
 
 	list := f.direct[id]
 	for i := len(list) - 1; i >= 0; i-- {
-		var env protocol.Envelope
-		if json.Unmarshal(list[i], &env) == nil && env.Type == msgType {
-			return env
+		if env, err := protocol.Unmarshal(list[i]); err == nil && env.Type == msgType {
+			return *env
 		}
 	}
 	t.Fatalf("连接 %s 没有收到类型为 %s 的定向消息", id, msgType)
@@ -116,8 +114,7 @@ func (f *fakeBus) broadcastCount(roomID, msgType string) int {
 
 	count := 0
 	for _, raw := range f.roomWide[roomID] {
-		var env protocol.Envelope
-		if json.Unmarshal(raw, &env) == nil && env.Type == msgType {
+		if env, err := protocol.Unmarshal(raw); err == nil && env.Type == msgType {
 			count++
 		}
 	}
@@ -126,11 +123,11 @@ func (f *fakeBus) broadcastCount(roomID, msgType string) int {
 
 func decode(t *testing.T, raw []byte) protocol.Envelope {
 	t.Helper()
-	var env protocol.Envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatalf("解析信封失败: %v (raw=%s)", err, raw)
+	env, err := protocol.Unmarshal(raw)
+	if err != nil {
+		t.Fatalf("解析信封失败: %v", err)
 	}
-	return env
+	return *env
 }
 
 func newTestManager(t *testing.T, maxMembers int) (*Manager, *fakeBus) {
@@ -388,8 +385,7 @@ func (f *fakeBus) lastExceptFor(t *testing.T, roomID, msgType string) string {
 	defer f.mu.Unlock()
 
 	for i := len(f.roomWide[roomID]) - 1; i >= 0; i-- {
-		var env protocol.Envelope
-		if json.Unmarshal(f.roomWide[roomID][i], &env) == nil && env.Type == msgType {
+		if env, err := protocol.Unmarshal(f.roomWide[roomID][i]); err == nil && env.Type == msgType {
 			return f.excepts[roomID][i]
 		}
 	}
@@ -411,30 +407,27 @@ func TestSetMediaIndexRequiresHostAndLocks(t *testing.T) {
 		t.Fatalf("观众进房失败: %v", err)
 	}
 
-	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
-	if err != nil {
-		t.Fatalf("序列化索引失败: %v", err)
-	}
+	index := sampleMediaIndex(2_000_000)
 
-	if err := m.SetMediaIndex(r.ID, "v1", raw); !errors.Is(err, ErrNotHost) {
+	if err := m.SetMediaIndex(r.ID, "v1", &index); !errors.Is(err, ErrNotHost) {
 		t.Fatalf("观众发布索引应返回 ErrNotHost，实际 %v", err)
 	}
-	if err := m.SetMediaIndex(r.ID, "ghost", raw); !errors.Is(err, ErrNotJoined) {
+	if err := m.SetMediaIndex(r.ID, "ghost", &index); !errors.Is(err, ErrNotJoined) {
 		t.Fatalf("未加入的连接应返回 ErrNotJoined，实际 %v", err)
 	}
-	if err := m.SetMediaIndex(r.ID, "host", json.RawMessage(`不是 JSON`)); !errors.Is(err, ErrBadMediaIndex) {
-		t.Fatalf("非 JSON 索引应返回 ErrBadMediaIndex，实际 %v", err)
+	if err := m.SetMediaIndex(r.ID, "host", nil); !errors.Is(err, ErrBadMediaIndex) {
+		t.Fatalf("空索引应返回 ErrBadMediaIndex，实际 %v", err)
 	}
-	if err := m.SetMediaIndex(r.ID, "host", json.RawMessage(`{"version":1,"segments":[]}`)); !errors.Is(err, ErrBadMediaIndex) {
+	if err := m.SetMediaIndex(r.ID, "host", &media.Index{Version: 1}); !errors.Is(err, ErrBadMediaIndex) {
 		t.Fatalf("不自洽的索引应返回 ErrBadMediaIndex，实际 %v", err)
 	}
 
-	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
 		t.Fatalf("主播发布索引失败: %v", err)
 	}
 
 	forwarded := bus.lastBroadcastOfType(t, r.ID, protocol.TypeMediaIndex)
-	if len(forwarded.MediaIndex) == 0 || !json.Valid(forwarded.MediaIndex) {
+	if forwarded.MediaIndex == nil || forwarded.MediaIndex.MimeType == "" {
 		t.Fatalf("应把索引广播给其他人: %+v", forwarded)
 	}
 	if except := bus.lastExceptFor(t, r.ID, protocol.TypeMediaIndex); except != "host" {
@@ -447,14 +440,11 @@ func TestSetMediaIndexRequiresHostAndLocks(t *testing.T) {
 	}
 
 	// 同一份索引重发应当幂等；换一份则被锁定。
-	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
 		t.Fatalf("重复发布同一索引应幂等，实际 %v", err)
 	}
-	other, err := json.Marshal(sampleMediaIndex(1_000_000))
-	if err != nil {
-		t.Fatalf("序列化索引失败: %v", err)
-	}
-	if err := m.SetMediaIndex(r.ID, "host", other); !errors.Is(err, ErrMediaLocked) {
+	other := sampleMediaIndex(1_000_000)
+	if err := m.SetMediaIndex(r.ID, "host", &other); !errors.Is(err, ErrMediaLocked) {
 		t.Fatalf("换片应返回 ErrMediaLocked，实际 %v", err)
 	}
 
@@ -463,7 +453,7 @@ func TestSetMediaIndexRequiresHostAndLocks(t *testing.T) {
 		t.Fatalf("迟到观众进房失败: %v", err)
 	}
 	late := bus.lastDirectOfType(t, "v2", protocol.TypeJoined)
-	if len(late.MediaIndex) == 0 {
+	if late.MediaIndex == nil || len(late.MediaIndex.Segments) == 0 {
 		t.Fatal("入房快照必须携带分片索引")
 	}
 }
@@ -481,11 +471,8 @@ func TestCapacityGateFollowsMeasuredUplink(t *testing.T) {
 		t.Fatalf("观众1 进房失败: %v", err)
 	}
 
-	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
-	if err != nil {
-		t.Fatalf("序列化索引失败: %v", err)
-	}
-	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+	index := sampleMediaIndex(2_000_000)
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
 		t.Fatalf("主播发布索引失败: %v", err)
 	}
 
@@ -558,11 +545,8 @@ func TestTopologyAssignmentsAreBroadcast(t *testing.T) {
 	if err := m.UpdateMetrics(r.ID, "host", protocol.Metrics{UploadCapacityBps: 16_000_000, RTTMs: 10}); err != nil {
 		t.Fatalf("主播上报度量失败: %v", err)
 	}
-	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
-	if err != nil {
-		t.Fatalf("序列化索引失败: %v", err)
-	}
-	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+	index := sampleMediaIndex(2_000_000)
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
 		t.Fatalf("发布索引失败: %v", err)
 	}
 
@@ -611,11 +595,8 @@ func TestChainModeGivesHostExactlyOneChild(t *testing.T) {
 	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
-	if err != nil {
-		t.Fatalf("序列化索引失败: %v", err)
-	}
-	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+	index := sampleMediaIndex(2_000_000)
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
 		t.Fatalf("发布索引失败: %v", err)
 	}
 	for _, id := range []string{"relay", "leaf1", "leaf2"} {
@@ -666,11 +647,8 @@ func TestDistributorHandoffBroadcast(t *testing.T) {
 	if err := m.Join(r.ID, "host", "主播", protocol.RoleHost, ""); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	raw, err := json.Marshal(sampleMediaIndex(2_000_000))
-	if err != nil {
-		t.Fatalf("序列化索引失败: %v", err)
-	}
-	if err := m.SetMediaIndex(r.ID, "host", raw); err != nil {
+	index := sampleMediaIndex(2_000_000)
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
 		t.Fatalf("发布索引失败: %v", err)
 	}
 	if err := m.Join(r.ID, "relay1", "转发1", protocol.RoleViewer, ""); err != nil {
@@ -719,18 +697,19 @@ func TestChunkReportIsRecorded(t *testing.T) {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 
-	if err := m.SetChunkReport(r.ID, "host", "AQID", true); err != nil {
+	have := []byte{0x01, 0x02, 0x03}
+	if err := m.SetChunkReport(r.ID, "host", have, true); err != nil {
 		t.Fatalf("记录分片上报失败: %v", err)
 	}
 
 	r.mu.Lock()
 	member := r.members["host"]
 	r.mu.Unlock()
-	if member == nil || member.HaveBits != "AQID" || !member.Complete {
+	if member == nil || !bytes.Equal(member.HaveBits, have) || !member.Complete {
 		t.Fatalf("分片上报未被记录: %+v", member)
 	}
 
-	if err := m.SetChunkReport(r.ID, "ghost", "AQID", false); !errors.Is(err, ErrNotJoined) {
+	if err := m.SetChunkReport(r.ID, "ghost", have, false); !errors.Is(err, ErrNotJoined) {
 		t.Fatalf("非成员上报应返回 ErrNotJoined，实际 %v", err)
 	}
 }

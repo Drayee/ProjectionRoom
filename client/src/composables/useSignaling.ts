@@ -1,4 +1,5 @@
 import { ref, shallowRef } from 'vue'
+import { decodeEnvelope, encodeEnvelope } from '../types/codec'
 import type { Envelope } from '../types/protocol'
 
 export type SignalingStatus = 'idle' | 'connecting' | 'open' | 'closed'
@@ -21,7 +22,7 @@ export function useSignaling(handlers: SignalingHandlers) {
   const status = ref<SignalingStatus>('idle')
   const socket = shallowRef<WebSocket | null>(null)
 
-  const pending: string[] = []
+  const pending: Uint8Array[] = []
   let currentUrl = ''
   let reconnectTimer: number | undefined
   let reconnectAttempt = 0
@@ -38,24 +39,28 @@ export function useSignaling(handlers: SignalingHandlers) {
 
     status.value = 'connecting'
     const ws = new WebSocket(currentUrl)
+    // 信令报文是 protobuf：按二进制帧接收。
+    ws.binaryType = 'arraybuffer'
     socket.value = ws
 
     ws.onopen = () => {
       status.value = 'open'
       reconnectAttempt = 0
       while (pending.length > 0) {
-        ws.send(pending.shift() as string)
+        ws.send(pending.shift() as Uint8Array)
       }
       handlers.onOpen?.()
     }
 
     ws.onmessage = (event) => {
-      // 二进制帧是 M2 的 WebRTC 信令载体，这里只处理文本帧。
-      if (typeof event.data !== 'string') return
+      if (!(event.data instanceof ArrayBuffer)) {
+        console.warn('信令报文不是二进制帧，已忽略')
+        return
+      }
       try {
-        handlers.onMessage(JSON.parse(event.data) as Envelope)
+        handlers.onMessage(decodeEnvelope(new Uint8Array(event.data)))
       } catch (err) {
-        console.warn('信令报文不是合法 JSON', err, event.data)
+        console.warn('信令报文不是合法 protobuf 信封', err)
       }
     }
 
@@ -80,7 +85,7 @@ export function useSignaling(handlers: SignalingHandlers) {
 
   /** 发送消息；连接未就绪时先排队，onopen 后按序补发。 */
   function send(env: Envelope) {
-    const data = JSON.stringify(env)
+    const data = encodeEnvelope(env)
     const ws = socket.value
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(data)

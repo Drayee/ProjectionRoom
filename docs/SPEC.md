@@ -200,6 +200,12 @@ ffmpeg -i input.mp4 -c:v libx264 -preset veryfast -b:v 1200k \
 
 ## 5. 通信协议
 
+> **编码**：线上是 **protobuf**（唯一真源 `proto/projection_room.proto`，生成代码入库，
+> 重新生成用 `scripts/gen-proto.ps1`）。WebSocket 走**二进制帧**；
+> DataChannel 上控制消息与分片数据都是二进制，由 1 字节 kind 前缀区分（见 §5.2）。
+> 分片数据**不包 protobuf**：那会为每个分片多一次大块内存拷贝。
+> 本节的字段表描述的是消息语义，字段编号以 .proto 为准。
+
 ### 5.1 WebSocket（信令 / 房间，JSON 文本帧）
 
 连接：`ws://host:8080/ws?roomId=<id>&clientId=<uuid>&role=host|viewer`

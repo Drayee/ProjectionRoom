@@ -10,7 +10,14 @@
 //     避免"上行扁平、下行嵌套"两套字段名并存。
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"ProjectionRoom/internal/media"
+)
+
+// 注意：本文件的 json tag 现在只作为"字段名说明"保留 ——
+// 线上编码已经是 protobuf（见 pb.go 与 proto/projection_room.proto）。
 
 // 客户端 → 服务端。
 const (
@@ -124,14 +131,17 @@ type Envelope struct {
 	Distributor *DistributorChange  `json:"distributor,omitempty"`
 
 	// 分片拥有情况（base64 位图），服务端记录用于监控；父节点选择在客户端用位图直接完成
-	Have     string `json:"have,omitempty"`
+	// Have 是分片拥有位图（raw bytes，不再是 base64 字符串）。
+	Have     []byte `json:"have,omitempty"`
 	Complete bool   `json:"complete,omitempty"`
 
 	// 房间元信息与错误
-	MediaIndex json.RawMessage `json:"mediaIndex,omitempty"`
-	Capacity   *Capacity       `json:"capacity,omitempty"`
-	Code       string          `json:"code,omitempty"`
-	Message    string          `json:"message,omitempty"`
+	MediaIndex *media.Index `json:"mediaIndex,omitempty"`
+	Capacity   *Capacity    `json:"capacity,omitempty"`
+	Code       string       `json:"code,omitempty"`
+	Message    string       `json:"message,omitempty"`
+	// Reason 说明请求或通知的缘由（如 topology-request 的 "stalled"）。
+	Reason string `json:"reason,omitempty"`
 }
 
 // PlaybackState 是播放权威信息的服务端表示。
@@ -159,6 +169,14 @@ type Metrics struct {
 	UploadCapacityBps int64 `json:"uploadCapacityBps,omitempty"`
 	// Depth 是该节点在拓扑中的深度。
 	Depth int `json:"depth,omitempty"`
+
+	// 以下用于"卡顿 → 服务器重算路径"：客户端主动上报健康度，
+	// 服务器据此把落后节点重挂到更合适的父节点上（而不是让它一直拖着自己）。
+	BufferHealth  float64 `json:"bufferHealth,omitempty"`
+	P95DeliveryMs float64 `json:"p95DeliveryMs,omitempty"`
+	StallCount    int     `json:"stallCount,omitempty"`
+	Degraded      bool    `json:"degraded,omitempty"`
+	PrimaryID     string  `json:"primaryId,omitempty"`
 }
 
 // TopologyAssignment 是一个节点在分发树中的位置（SPEC §6.1）。
@@ -200,15 +218,6 @@ type Capacity struct {
 	MaxMembers     int    `json:"maxMembers"`
 	StreamBps      int64  `json:"streamBps"`
 	HostChildSlots int    `json:"hostChildSlots"`
-}
-
-// MustEnvelope 序列化固定结构；固定信封序列化失败属于编码错误，直接 panic 暴露。
-func MustEnvelope(env Envelope) []byte {
-	b, err := json.Marshal(env)
-	if err != nil {
-		panic("protocol: 序列化固定信封失败: " + err.Error())
-	}
-	return b
 }
 
 // ErrorEnvelope 构造错误消息。

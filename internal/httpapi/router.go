@@ -83,7 +83,7 @@ func roomInfoHandler(cfg *config.Config, rooms *room.Manager) gin.HandlerFunc {
 			"exists":      true,
 			"roomId":      r.ID,
 			"hasHost":     hostID != "",
-			"hasMedia":    len(mediaIndex) > 0,
+			"hasMedia":    mediaIndex != nil,
 			"memberCount": len(members),
 			"capacity":    capacity,
 		})
