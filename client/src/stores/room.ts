@@ -491,20 +491,36 @@ export const useRoomStore = defineStore('room', () => {
   let uploadThrottleBps = 0
   let throttleAllowance = 0
   let throttleLast = 0
+  /**
+   * 发送串行链：带宽上限必须**共享**。
+   *
+   * 早期实现是"每个请求各自等一下"，结果被并发放大：三个子节点各 4 个在途请求，
+   * 即使限到 6 kbps，聚合吞吐照样够 0.5 片/秒 —— 验收脚本的"限速隔离"因此一直是空操作。
+   * 把发送串成一条链，"带宽"才真正是这条上行共用的额度。
+   */
+  let throttleChain: Promise<void> = Promise.resolve()
 
   /** 应用层限速：模拟"这个节点上行只有 N bps"（SPEC §10 M3 验收 D 用）。 */
-  async function throttleWait(bytes: number) {
-    if (uploadThrottleBps <= 0) return
-    const now = performance.now()
-    throttleAllowance += ((now - throttleLast) / 1000) * uploadThrottleBps
-    throttleLast = now
-    if (throttleAllowance >= bytes) {
-      throttleAllowance -= bytes
-      return
+  function throttleWait(bytes: number): Promise<void> {
+    if (uploadThrottleBps <= 0) {
+      return Promise.resolve()
     }
-    const waitMs = ((bytes - throttleAllowance) / uploadThrottleBps) * 1000
-    throttleAllowance = 0
-    await new Promise((resolve) => window.setTimeout(resolve, Math.min(waitMs, 5000)))
+    const next = throttleChain.then(async () => {
+      const now = performance.now()
+      throttleAllowance += ((now - throttleLast) / 1000) * uploadThrottleBps
+      throttleLast = now
+      if (throttleAllowance >= bytes) {
+        throttleAllowance -= bytes
+        return
+      }
+      // 单次等待封顶：真实链路里丢包/重传会打断"慢慢发"，这里也必须给个上限，
+      // 否则一个分片会把发送链堵死几十秒，看起来像"节点卡死"而不是"带宽不足"。
+      const waitMs = Math.min(((bytes - throttleAllowance) / uploadThrottleBps) * 1000, 8000)
+      throttleAllowance = 0
+      await new Promise((resolve) => window.setTimeout(resolve, waitMs))
+    })
+    throttleChain = next.catch(() => undefined)
+    return next
   }
 
   /** 验收脚本用它注入实测上行：headless 下 getStats 不产生可用估计（C15）。 */
@@ -575,9 +591,6 @@ export const useRoomStore = defineStore('room', () => {
     gateReason.value = reason
     gateThresholdSegments.value = thresholdSegments
     syncMode.value = 'gated'
-    // 门控期间"落后多少"没有意义（播放头还停在旧位置），清掉避免误导。
-    lagSec.value = 0
-    lagNotice.value = ''
     player.video.value?.pause()
   }
 
@@ -599,6 +612,16 @@ export const useRoomStore = defineStore('room', () => {
     const anchor = clock.ready.value ? (clock.expectedAt() ?? 0) : clock.playback.value.currentTime
     gateBufferedSec.value = player.bufferedAhead(anchor)
     gateWaitedSec.value = (performance.now() - gateStartedAt) / 1000
+
+    // 门控期间也要算滞后：播放头停住、主播继续往前走，这个差值就是"落后多少"。
+    // 超过阈值就给用户一句话 —— 开闸时会 seek 到主播**当前**位置，
+    // 等价于"提示并跳到主播进度"（SPEC §7.6）；目标分片缺失时游标会自动前移。
+    if (clock.ready.value && video) {
+      lagSec.value = anchor - video.currentTime
+      if (lagSec.value > LAG_JUMP_SEC) {
+        lagNotice.value = `落后主播 ${lagSec.value.toFixed(0)}s，正在跳到主播进度重新缓冲`
+      }
+    }
 
     const anchorSeg = segmentIndexAt(index, anchor)
     const contiguous = player.bufferedSegmentsFrom(index, anchorSeg)

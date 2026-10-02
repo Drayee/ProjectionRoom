@@ -257,6 +257,10 @@ async function main() {
             lagNotice: snapshot.sync.lagNotice,
             gated: snapshot.gate.gated,
             segs: snapshot.gate.bufferedSegments,
+            // 缓冲与矫正模式：判断"是缓冲够厚没饿着"还是"根本没在供片"。
+            buf: snapshot.sync.bufferedAhead,
+            mode: snapshot.sync.mode,
+            delivered: snapshot.p2p.delivered,
           })
         }
         observations.push({ at: Number(((Date.now() - startedAt) / 1000).toFixed(1)), states })
@@ -379,9 +383,11 @@ async function main() {
                 (s) =>
                   `${s.label}:${s.ct}s/${s.driftMs}ms` +
                   `/${s.primary ? s.primary.slice(0, 8) : '无父'}` +
+                  `/buf${s.buf}s` +
                   `${s.gated ? `/门控${s.segs}` : ''}` +
                   `${s.lagSec > 1 ? `/滞后${s.lagSec}s` : ''}` +
-                  `${s.lagNotice ? '/已提示' : ''}`,
+                  `${s.lagNotice ? '/已提示' : ''}` +
+                  `/交付${s.delivered}`,
               )
               .join('  '),
         )
