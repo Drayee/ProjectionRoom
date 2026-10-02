@@ -25,6 +25,7 @@ function formatTime(seconds: number): string {
 const statusText = computed(() => {
   if (store.playerError) return store.playerError
   if (!store.mediaIndex) return store.isHost ? '等待选择分片目录' : '等待主播开播'
+  if (store.gated) return `加载中 ${store.gateBufferedSec.toFixed(1)}s`
   if (store.needsGesture) return '需要一次点击才能播放'
   if (state.value.paused) return '已暂停'
   return '播放中'
@@ -34,7 +35,7 @@ const statusText = computed(() => {
 <template>
   <div class="stage">
     <!-- 真实播放器：MediaSource 把所有分片按序拼进这里 -->
-    <video ref="videoRef" class="video" playsinline controls></video>
+    <video ref="videoRef" class="video" playsinline :controls="!store.gated"></video>
 
     <div class="overlay" v-if="!store.mediaIndex">
       <p class="big">{{ store.isHost ? '选择分片目录后开播' : '等待主播开播' }}</p>
@@ -44,6 +45,15 @@ const statusText = computed(() => {
             ? '先用 cmd/segmenter 把视频切成 fMP4 分片目录，再在下方选择该目录。'
             : '主播还没选片。开播后这里会自动缓冲并跟随主播进度。'
         }}
+      </p>
+    </div>
+
+    <!-- 启动门控：缓冲不到量就一直是"加载中"，且不设超时上限 -->
+    <div class="overlay gate" v-else-if="store.gated">
+      <p class="big">缓冲中 {{ store.gateBufferedSec.toFixed(1) }}s / {{ store.gateThresholdSec }}s</p>
+      <p class="muted">{{ store.gateReason }} · 已等待 {{ store.gateWaitedSec.toFixed(0) }}s（加载不设超时）</p>
+      <p class="muted hint" v-if="store.gateWaitedSec > 20">
+        上游带宽可能不足。主播可换用低码率预设重新切片，或等上游把缓冲补齐后再开始。
       </p>
     </div>
 
@@ -97,6 +107,10 @@ const statusText = computed(() => {
   gap: 8px;
   padding: 20px;
   background: rgba(8, 8, 12, 0.78);
+}
+
+.overlay.gate .hint {
+  color: var(--accent);
 }
 
 .overlay.gesture {

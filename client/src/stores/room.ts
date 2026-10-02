@@ -63,6 +63,23 @@ const HOST_WINDOW = 8
 const MAX_INFLIGHT = 4
 /** 与 SPEC §7.3 一致的抖动缓冲目标。 */
 const BUFFER_TARGET_SEC = 2
+/**
+ * 启动门控：观众必须攒够这么多秒的缓冲才允许起播。
+ * 门控不设超时上限 —— 上游没数据就一直显示"加载中"，而不是拿薄缓冲硬播（那会带来同步振荡）。
+ */
+const STARTUP_BUFFER_SEC = 8
+/** 跳转后重建缓冲的门控阈值（比首次起播低一些，避免每次跳转都长时间等待）。 */
+const RESEEK_BUFFER_SEC = 4
+/** 至少连续追加这么多片才算缓冲成型，防止小片段凑秒数。 */
+const STARTUP_BUFFER_SEGMENTS = 4
+/** 开闸前至少要有的时钟偏移样本数（最小平滤波靠样本收敛）。 */
+const MIN_CLOCK_SAMPLES = 6
+/**
+ * 开闸前偏移估计必须已稳定这么久。
+ * 最小值滤波只在遇到更小样本时下降，停止下降即说明收敛 ——
+ * 否则开闸第一帧会带着 -400ms 级的偏差（实测过），再靠速率修正慢慢拉回来。
+ */
+const CLOCK_SETTLE_SEC = 0.8
 
 export function newClientId(): string {
   const rand = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)
@@ -107,6 +124,14 @@ export const useRoomStore = defineStore('room', () => {
   const chunkErrors = ref(0)
   const bufferedAhead = ref(0)
   const videoEl = shallowRef<HTMLVideoElement | null>(null)
+
+  /** 启动门控状态（观众侧）：true = 正在加载，不播放、不响应播放控制。 */
+  const gated = ref(false)
+  const gateReason = ref('')
+  const gateBufferedSec = ref(0)
+  const gateThresholdSec = ref(STARTUP_BUFFER_SEC)
+  const gateWaitedSec = ref(0)
+  let gateStartedAt = 0
 
   /** 计时纪元：主播页面每次加载生成一个，随进度下发（C13）。 */
   const clockEpoch = ref(newClockEpoch())
@@ -460,6 +485,58 @@ export const useRoomStore = defineStore('room', () => {
     send: (peerId, data) => rtc.send(peerId, data),
   })
 
+  /** 进入加载门控：暂停播放，等到缓冲达标再起播。 */
+  function enterGate(reason: string, thresholdSec = STARTUP_BUFFER_SEC) {
+    if (isHost.value) return
+    if (!gated.value) {
+      gateStartedAt = performance.now()
+    }
+    gated.value = true
+    gateReason.value = reason
+    gateThresholdSec.value = thresholdSec
+    syncMode.value = 'gated'
+    player.video.value?.pause()
+  }
+
+  /**
+   * 门控检查：缓冲够了就起播，不够就继续等。
+   *
+   * 永不超时是刻意的：宁可一直显示"加载中"，也不要在薄缓冲下起播 ——
+   * 后者会立刻触发大幅漂移矫正，把"同步偏差"从几十毫秒放大到几百毫秒。
+   */
+  async function evaluateGate() {
+    const video = player.video.value
+    const index = mediaIndex.value
+    if (!video || !index) return
+
+    const anchor = clock.ready.value ? (clock.expectedAt() ?? 0) : clock.playback.value.currentTime
+    gateBufferedSec.value = player.bufferedAhead(anchor)
+    gateWaitedSec.value = (performance.now() - gateStartedAt) / 1000
+
+    const anchorSeg = segmentIndexAt(index, anchor)
+    const appended = nextAppend >= anchorSeg + STARTUP_BUFFER_SEGMENTS
+    // 时钟样本不够就再等：开闸瞬间的偏差尖峰全部来自还没收敛的偏移估计
+    //（实测起播后 0.2s 的偏差 -387ms，随后被速率修正逐秒拉回）。
+    const clockReady = clock.sampleCount() >= MIN_CLOCK_SAMPLES && clock.settledSeconds() >= CLOCK_SETTLE_SEC
+    if (!appended || gateBufferedSec.value < gateThresholdSec.value || !clockReady) {
+      syncMode.value = 'gated'
+      return
+    }
+
+    gated.value = false
+    gateReason.value = ''
+    // 数据已经在缓冲里：直接定位到权威位置，不清缓冲。
+    noteLifecycle(
+      `开闸 anchor=${anchor.toFixed(2)} before=${(video.currentTime ?? 0).toFixed(2)} ` +
+        `offset=${Math.round(clock.offsetMs.value)} samples=${clock.sampleCount()}`,
+    )
+    player.seekTo(anchor)
+    noteLifecycle(`开闸后 video=${(video.currentTime ?? 0).toFixed(2)} expected=${(clock.expectedAt() ?? 0).toFixed(2)}`)
+    if (!clock.playback.value.paused) {
+      await tryPlay()
+    }
+  }
+
   async function pumpPrefetch() {
     const index = mediaIndex.value
     if (!index) return
@@ -489,8 +566,21 @@ export const useRoomStore = defineStore('room', () => {
       void fetchChunk(0)
     }
 
-    const time = player.video.value?.currentTime ?? 0
+    // 门控期间播放头还停在 0，必须按"权威目标位置"预取：
+    // 否则会从 0 开始拉一堆永远不会播的分片，而真正的起播位置一直没数据。
+    const gatedAnchor = gated.value && clock.ready.value ? (clock.expectedAt() ?? 0) : null
+    const time = gatedAnchor ?? player.video.value?.currentTime ?? 0
     const playheadSeg = chunkStore.hasInit() ? segmentIndexAt(index, time) : 1
+
+    // 追加游标也要跟着门控目标走，否则 flushOrdered 会一直等一个不会被取到的分片。
+    if (gatedAnchor !== null && nextAppend < playheadSeg) {
+      nextAppend = playheadSeg
+      // 只在这个位置确实还没数据时才"盯着它补取"；已经有缓冲就别再试，
+      // 否则每 200ms 就会向下一个父节点发一次注定失败的请求（实测能刷出几十次）。
+      requiredSegment = player.bufferedAhead(time) <= 0 ? playheadSeg : null
+    } else if (requiredSegment !== null && player.bufferedAhead(time) > 0) {
+      requiredSegment = null
+    }
     // 起点不能低于 nextAppend：否则会把已经 append 过、甚至已被淘汰的分片反复重取
     //（实测能刷出上千次无谓交付）。
     const start = Math.min(Math.max(playheadSeg, nextAppend), index.segments.length)
@@ -584,6 +674,10 @@ export const useRoomStore = defineStore('room', () => {
     const video = player.video.value
     if (!video || isHost.value) return
 
+    // 加载中只更新权威状态（时钟锚点由调用方写入），不动播放器：
+    // 没攒够缓冲就播，只会换来一轮同步振荡。
+    if (gated.value) return
+
     // 跳转必须立即生效，即使此刻是暂停状态：
     // 否则暂停中跳转的观众会一直停在旧位置，等房主再次播放才被纠正（SPEC §7.4）。
     if (action === Action.Seek) {
@@ -626,6 +720,12 @@ export const useRoomStore = defineStore('room', () => {
 
     bufferedAhead.value = player.bufferedAhead(video.currentTime)
     if (isHost.value) return
+
+    // 加载中：不矫正、不播放，只等缓冲够。
+    if (gated.value) {
+      await evaluateGate()
+      return
+    }
 
     const state = clock.playback.value
     if (!state.paused && video.paused && bufferedAhead.value > 0.3) {
@@ -704,6 +804,7 @@ export const useRoomStore = defineStore('room', () => {
     // 跳转后给 1.5s 稳定期：这段时间里缓冲还在重建，
     // 立刻按目标矫正只会在"seek → 追 → 再 seek"之间来回振荡，把偏差 spike 放大。
     correctionSettleUntil = performance.now() + 1500
+    enterGate('跳转后重建缓冲', RESEEK_BUFFER_SEC)
 
     const segIndex = segmentIndexAt(index, target)
     await player.clearBuffered()
@@ -746,8 +847,8 @@ export const useRoomStore = defineStore('room', () => {
    * 新节点起播那几秒的偏差 spike 主要来自这里。多发几次能让它迅速收敛。
    */
   function sendProgressBurst(peerId: string) {
-    for (let i = 0; i < 5; i += 1) {
-      window.setTimeout(() => sendProgressTo(peerId), i * 120)
+    for (let i = 0; i < 10; i += 1) {
+      window.setTimeout(() => sendProgressTo(peerId), i * 110)
     }
   }
 
@@ -871,6 +972,10 @@ export const useRoomStore = defineStore('room', () => {
     nextAppend = 1
     requiredSegment = null
     startLoops()
+
+    if (!isHost.value) {
+      enterGate('新节点接入，等待缓冲')
+    }
   }
 
   async function connectToHost(force = false) {
@@ -1068,6 +1173,11 @@ export const useRoomStore = defineStore('room', () => {
     peerCount,
     // 注意：必须是函数。Pinia setup store 返回对象里的普通值只在创建时求值一次，
     // 直接写 player.debugState() 会永远返回"刚创建时"的状态 —— 那会把人带偏。
+    gated,
+    gateReason,
+    gateBufferedSec,
+    gateThresholdSec,
+    gateWaitedSec,
     playerDebugState: () => player.debugState(),
     lifecycle: storeLifecycle,
     topologyAssignment: topology.assignment,
@@ -1083,6 +1193,7 @@ export const useRoomStore = defineStore('room', () => {
     uploadCapacityBps,
     delivered: requester.delivered,
     timedOut: requester.timedOut,
+    failedRequests: requester.failed,
     p95DeliveryMs: requester.p95DeliveryMs,
     rejectedProgress: clock.rejected,
     clockReady: clock.ready,

@@ -167,7 +167,15 @@ async function main() {
       const drifts = playing.map((s) => Math.abs(s.drift)).sort((a, b) => a - b)
       const firstPlaying = samples.find((s) => s.ct > 0.05 && !s.paused && s.ready >= 2 && s.be > s.ct)
 
+      // 最差样本出现在起播后第几秒：判断尖峰是启动瞬态还是运行中事件。
+      const firstAt = firstPlaying ? firstPlaying.t : 0
+      const worst = playing
+        .map((s) => ({ atSec: Number(((s.t - firstAt) / 1000).toFixed(1)), driftMs: s.drift, mode: s.mode }))
+        .sort((a, b) => Math.abs(b.driftMs) - Math.abs(a.driftMs))
+        .slice(0, 5)
+
       perNode.push({
+        worst,
         label: node.label,
         index: i,
         isHost: i === 0,
@@ -182,6 +190,8 @@ async function main() {
           medianMs: percentile(drifts, 0.5),
         },
         player: snapshot.player,
+        gate: snapshot.gate,
+        worst,
         storeLifecycle: snapshot.lifecycle,
         delivered: snapshot.p2p.delivered,
         timedOut: snapshot.p2p.timedOut,
@@ -268,6 +278,11 @@ async function main() {
       topologyOk &&
       (chainExpected ? hostChildren.length === 1 : hasMultiHop || NODES <= 3)
 
+    console.log('\n最差偏差样本（起播后秒数 / 偏差 / 矫正模式）：')
+    for (const node of perNode) {
+      console.log(`  ${node.label}: ${(node.worst ?? []).map((w) => `${w.atSec}s/${w.driftMs}ms/${w.mode}`).join('  ')}`)
+    }
+
     console.log('\n=== M3 验收结果 ===')
     console.log(JSON.stringify(result.summary, null, 2))
     console.log('\n每节点：')
@@ -278,7 +293,8 @@ async function main() {
           ` 子节点 ${(node.topology.children ?? []).length}` +
           ` 偏差 max ${node.drift.maxMs}ms / p95 ${node.drift.p95Ms}ms 交付 ${node.delivered} 失败 ${node.chunkErrors}` +
           ` 播放 ${node.playing ? '是' : '否'}` +
-          ` 播放器[${node.player?.mediaSourceState ?? '?'}/sb=${node.player?.sourceBufferCount ?? '?'}/attached=${node.player?.attached ?? '?'}]`,
+          ` 播放器[${node.player?.mediaSourceState ?? '?'}/sb=${node.player?.sourceBufferCount ?? '?'}/attached=${node.player?.attached ?? '?'}]` +
+          (node.gate ? ` 门控[阈值${node.gate.thresholdSec}s/等待${node.gate.waitedSec}s]` : ''),
       )
     }
     if (throttleResult) {

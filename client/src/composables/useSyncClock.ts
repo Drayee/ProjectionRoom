@@ -40,6 +40,20 @@ export function useSyncClock() {
 
   const samples: number[] = []
   let lastSeq = -1
+  /** 偏移最小值最后一次下降的时刻：最小值只在更小样本到来时下降，停止下降即说明已收敛。 */
+  let lastMinDropAt = 0
+
+  function acceptSample(sample: number, now: number) {
+    const previous = samples.length > 0 ? Math.min(...samples) : Number.POSITIVE_INFINITY
+    samples.push(sample)
+    if (samples.length > FILTER_WINDOW) {
+      samples.shift()
+    }
+    offsetMs.value = Math.min(...samples)
+    if (offsetMs.value < previous) {
+      lastMinDropAt = now
+    }
+  }
 
   function resetEpoch(next: string) {
     epoch.value = next
@@ -61,11 +75,7 @@ export function useSyncClock() {
     }
     lastSeq = msg.seq
 
-    samples.push(now - msg.hostClockMs)
-    if (samples.length > FILTER_WINDOW) {
-      samples.shift()
-    }
-    offsetMs.value = Math.min(...samples)
+    acceptSample(now - msg.hostClockMs, now)
     ready.value = true
     playback.value = {
       paused: msg.paused,
@@ -92,11 +102,7 @@ export function useSyncClock() {
       resetEpoch(msgEpoch)
     }
 
-    samples.push(now - msg.hostClockMs)
-    if (samples.length > FILTER_WINDOW) {
-      samples.shift()
-    }
-    offsetMs.value = Math.min(...samples)
+    acceptSample(now - msg.hostClockMs, now)
     ready.value = true
     playback.value = {
       paused: msg.paused,
@@ -145,5 +151,32 @@ export function useSyncClock() {
     drift.value = 0
   }
 
-  return { playback, offsetMs, epoch, ready, drift, rejected, onProgress, onAnchor, expectedAt, correction, setPaused }
+  /** 已经积累的偏移样本数：样本太少时估计不可信，门控要等它收敛。 */
+  function sampleCount(): number {
+    return samples.length
+  }
+
+  /** 偏移估计已经稳定了多久（秒）：最小值一段时间内没再下降 = 已收敛。 */
+  function settledSeconds(now = performance.now()): number {
+    if (lastMinDropAt === 0) {
+      return 0
+    }
+    return (now - lastMinDropAt) / 1000
+  }
+
+  return {
+    playback,
+    offsetMs,
+    epoch,
+    ready,
+    drift,
+    rejected,
+    sampleCount,
+    settledSeconds,
+    onProgress,
+    onAnchor,
+    expectedAt,
+    correction,
+    setPaused,
+  }
 }

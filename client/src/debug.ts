@@ -63,6 +63,13 @@ export interface DebugSnapshot {
     reason: string
     lastDistributorChange: string
   }
+  gate: {
+    gated: boolean
+    reason: string
+    bufferedSec: number
+    thresholdSec: number
+    waitedSec: number
+  }
   lifecycle: string[]
   player: {
     attached: boolean
@@ -137,6 +144,13 @@ export function installDebugHook(): void {
           hostChildSlots: store.capacity?.hostChildSlots ?? 0,
           maxMembers: store.capacity?.maxMembers ?? 0,
           chatCount: store.chat.length,
+        },
+        gate: {
+          gated: store.gated,
+          reason: store.gateReason,
+          bufferedSec: Number(store.gateBufferedSec.toFixed(2)),
+          thresholdSec: store.gateThresholdSec,
+          waitedSec: Number(store.gateWaitedSec.toFixed(1)),
         },
         lifecycle: store.lifecycle,
         player: store.playerDebugState(),
