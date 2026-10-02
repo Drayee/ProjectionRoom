@@ -12,6 +12,7 @@ import (
 	"github.com/coder/websocket"
 
 	"ProjectionRoom/internal/config"
+	"ProjectionRoom/internal/usecase"
 )
 
 var (
@@ -141,6 +142,12 @@ func NewHub(cfg *config.Config) (*Hub, func(), error) {
 	}
 	return h, h.Close, nil
 }
+
+// NewBroadcaster 把 Hub 投影成用例层声明的能力接口。
+//
+// 用普通构造函数而不是 wire.Bind：依赖链在 cmd/wire.go 里是一列可读的 NewXxx，
+// 装配关系不依赖 wire 的接口绑定语义。Hub 是适配器，接口由 usecase 定义。
+func NewBroadcaster(h *Hub) usecase.Broadcaster { return h }
 
 // Close 关闭所有写协程与连接。
 func (h *Hub) Close() {

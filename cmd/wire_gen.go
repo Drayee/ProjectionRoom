@@ -15,26 +15,24 @@ import (
 
 // Injectors from wire.go:
 
-// InitializeApp 组装整个应用。
+// InitializeApp 声明整条依赖链：cmd 里没有业务，只有装配与启动。
 //
-// 约定：
-//   - 每个依赖都由它所在层的 NewXxx 提供，这里只声明装配关系；
-//   - 生成结果 cmd/wire_gen.go **由 `go tool wire ./cmd` 产出，不要手写**；
-//   - 依赖方向固定为 handler → usecase → model，基础设施（service）经 wire.Bind 绑到用例的接口上。
-func InitializeApp(cfg *config.Config) (*Init, func(), error) {
+// 每个依赖都由它所在层的 NewXxx 提供，这里只列装配关系；
+// 生成结果 cmd/wire_gen.go 由 `go tool wire ./cmd` 产出，不要手写。
+func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	hub, cleanup, err := service.NewHub(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	manager := usecase.NewManager(cfg, hub)
+	broadcaster := service.NewBroadcaster(hub)
+	manager := usecase.NewManager(cfg, broadcaster)
 	engine := handler.NewRouter(cfg, hub, manager)
 	server, err := service.NewServer(cfg, engine)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
-	init := NewInit(server)
-	return init, func() {
+	return server, func() {
 		cleanup()
 	}, nil
 }
