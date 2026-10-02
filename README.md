@@ -71,6 +71,16 @@ curl -o part1.zip http://127.0.0.1:8080/api/v1/segment/jobs/<jobId>/parts/1
 产物保留 30 分钟（TTL 清理）。全部可用 `PR_SEGMENT_*` 覆盖，ffmpeg 路径用 `PR_FFMPEG`。
 不想上传也行：`docs/SEGMENT.md` 里有本地 ffmpeg / `cmd/segmenter` 的完整教程。
 
+主播页有对应入口：选片区下方的「**本机没有 ffmpeg？交给服务器切片**」展开后可上传视频、
+看排队位次与切片进度，切完可以下载 zip，或者直接**写进一个本地目录并立即开播**
+（`showDirectoryPicker()` + File System Access API；浏览器不支持时退化为"下载 zip 手动解压后再选目录"）。
+服务器连不上或没装 ffmpeg 时，面板会直接说明原因，内嵌的本地切片教程始终可用。
+
+```bash
+# 界面验收：真实 Chrome 里展开入口、确认面板/探测徽标/教程，并留一张截图
+node tools/verify-segment-ui.mjs
+```
+
 ### M2 已交付
 
 - **`cmd/segmenter`**：把本地视频切成 `init.mp4` + `c00001.m4s…` + `index.json`。
@@ -156,6 +166,21 @@ go test ./...                      # 8 个包
 
 cd client && npm run typecheck && npm run build
 ```
+
+### 竞态检测（-race）
+
+Windows 上 Go 的 `-race` 需要 gcc 兼容驱动（mingw-w64），MSVC/clang 都不行；
+本机没有 mingw 时用容器跑（Docker Desktop 即可，不动主机）：
+
+```bash
+docker run --rm -v "D:/IT/program/go-program/ProjectionRoom:/app" -v pr-gomod:/go/pkg/mod \
+  -w /app -e GOPROXY=https://goproxy.cn,direct -e GOSUMDB=off -e GOTOOLCHAIN=local \
+  golang:1.26 sh -c "go test -race ./..."
+```
+
+`GOPROXY` 必须指到能通的源（容器里直连 `proxy.golang.org` 会被拒）。
+最后一次全绿：`config / handler / model / service/mp4 / service/segment / usecase` 全部 ok。
+容器里没有 ffmpeg，正好顺带覆盖"服务器缺 ffmpeg"这条分支。
 
 ### 真实浏览器实测（M2 验收脚本）
 

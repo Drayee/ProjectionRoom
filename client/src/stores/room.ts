@@ -1198,8 +1198,8 @@ export const useRoomStore = defineStore('room', () => {
     mediaIndex.value = null
   }
 
-  /** 主播选择分片目录并开播。 */
-  async function publishMediaDirectory(files: FileList) {
+  /** 加载一份分片文件集合并开播（"选目录"与"服务端切片写回"两条路径共用）。 */
+  async function publishLoadedMedia(files: FileList | File[]) {
     mediaError.value = ''
     try {
       const loaded = await media.loadDirectory(files)
@@ -1209,6 +1209,21 @@ export const useRoomStore = defineStore('room', () => {
     } catch (err) {
       mediaError.value = (err as Error).message
     }
+  }
+
+  /** 主播选择分片目录并开播。 */
+  async function publishMediaDirectory(files: FileList) {
+    await publishLoadedMedia(files)
+  }
+
+  /**
+   * 主播用**已经拿到的文件列表**开播。
+   *
+   * 给「服务端切片」面板用：产物已经写进本地目录、文件名与索引都是已知的，
+   * 不应该再要求用户选一次目录。行为与 publishMediaDirectory 完全一致。
+   */
+  async function publishMediaFiles(files: File[]) {
+    await publishLoadedMedia(files)
   }
 
   function setVideoElement(el: HTMLVideoElement | null) {
@@ -1375,6 +1390,7 @@ export const useRoomStore = defineStore('room', () => {
     enterRoom,
     leaveRoom,
     publishMediaDirectory,
+    publishMediaFiles,
     setVideoElement,
     setIceServers,
     sendChat,

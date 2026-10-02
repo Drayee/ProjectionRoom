@@ -1,4 +1,4 @@
-﻿# ---- Go ----
+# ---- Go ----
 /bin/
 /dist/
 *.exe
@@ -35,4 +35,9 @@ pnpm-debug.log*
 # ---- 本地配置与日志 ----
 *.local.toml
 *.log
+
+# ---- 本地工具产物 ----
+# 视觉/验收工具的运行期产物与截图，不入库
+.dsh-vision-router/
+/segment-ui.png
 

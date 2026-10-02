@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import SegmentUpload from './SegmentUpload.vue'
 import { useRoomStore } from '../stores/room'
 
 const store = useRoomStore()
 const seekTarget = ref('')
 const dirInput = ref<HTMLInputElement | null>(null)
+/** 服务端切片面板默认收起：不选它就不占地方，也不影响原有的"选择分片目录"流程。 */
+const segmentOpen = ref(false)
 
 const canControl = computed(() => store.isHost && store.joined)
 
@@ -79,6 +82,14 @@ function changeRate(event: Event) {
     </div>
 
     <p class="error-text" v-if="store.mediaError">{{ store.mediaError }}</p>
+
+    <!-- 本机没有 ffmpeg 的兜底入口：默认收起，展开后是上传 + 服务端切片面板。 -->
+    <div class="segment-entry">
+      <button class="segment-toggle" @click="segmentOpen = !segmentOpen">
+        {{ segmentOpen ? '收起服务端切片' : '本机没有 ffmpeg？交给服务器切片' }}
+      </button>
+      <SegmentUpload v-if="segmentOpen" />
+    </div>
 
     <div class="controls">
       <button v-if="store.playback.paused" class="primary" :disabled="!canControl || !store.mediaIndex" @click="store.play()">
@@ -157,6 +168,18 @@ header .muted {
   color: var(--danger);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.segment-entry {
+  margin-bottom: 10px;
+}
+
+button.segment-toggle {
+  width: 100%;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 6px 10px;
 }
 
 .controls {
