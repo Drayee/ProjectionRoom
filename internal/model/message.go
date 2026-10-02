@@ -1,4 +1,4 @@
-// Package protocol 定义客户端与服务端之间的 WebSocket 文本消息契约（SPEC §5.1）。
+// Package model 定义客户端与服务端之间的 WebSocket 消息契约（SPEC §5.1）。
 //
 // M1 阶段消息种类少、字段扁平，因此统一使用一个 Envelope 承载，
 // 保证前后端字段名只有一处定义。二进制分片帧不在本包定义：
@@ -8,12 +8,10 @@
 //   - 客户端上行（join / room-control / metrics）使用 Envelope 的扁平字段；
 //   - 服务端下行的播放权威信息统一放在 Playback 里，
 //     避免"上行扁平、下行嵌套"两套字段名并存。
-package protocol
+package model
 
 import (
 	"encoding/json"
-
-	"ProjectionRoom/internal/media"
 )
 
 // 注意：本文件的 json tag 现在只作为"字段名说明"保留 ——
@@ -79,7 +77,7 @@ const (
 )
 
 // ModePending 表示尚未拿到实测上行、容量未定（SPEC §6.1、§6.2）。
-// M3 之后由 internal/topology 给出 fanout / chain。
+// M3 之后由 usecase 的分配算法给出 fanout / chain。
 const ModePending = "pending"
 
 // Envelope 是所有 WebSocket 文本消息的统一封装。
@@ -136,10 +134,10 @@ type Envelope struct {
 	Complete bool   `json:"complete,omitempty"`
 
 	// 房间元信息与错误
-	MediaIndex *media.Index `json:"mediaIndex,omitempty"`
-	Capacity   *Capacity    `json:"capacity,omitempty"`
-	Code       string       `json:"code,omitempty"`
-	Message    string       `json:"message,omitempty"`
+	MediaIndex *Index    `json:"mediaIndex,omitempty"`
+	Capacity   *Capacity `json:"capacity,omitempty"`
+	Code       string    `json:"code,omitempty"`
+	Message    string    `json:"message,omitempty"`
 	// Reason 说明请求或通知的缘由（如 topology-request 的 "stalled"）。
 	Reason string `json:"reason,omitempty"`
 }

@@ -1,7 +1,8 @@
-package topology
+package usecase
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -551,34 +552,12 @@ func (p Plan) Describe() string {
 		b.WriteString(p.DistributorID)
 	}
 	b.WriteString(" 已安置=")
-	b.WriteString(itoa(len(p.Assignments)))
+	b.WriteString(strconv.Itoa(len(p.Assignments)))
 	b.WriteString(" 空位=")
-	b.WriteString(itoa(p.FreeSlots))
+	b.WriteString(strconv.Itoa(p.FreeSlots))
 	if len(p.Unassigned) > 0 {
 		b.WriteString(" 未安置=")
 		b.WriteString(strings.Join(p.Unassigned, ","))
 	}
 	return b.String()
-}
-
-func itoa(v int) string {
-	if v == 0 {
-		return "0"
-	}
-	neg := v < 0
-	if neg {
-		v = -v
-	}
-	var buf [20]byte
-	i := len(buf)
-	for v > 0 {
-		i--
-		buf[i] = byte('0' + v%10)
-		v /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }

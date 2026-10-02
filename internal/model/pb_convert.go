@@ -1,4 +1,4 @@
-package protocol
+package model
 
 import (
 	"encoding/json"
@@ -6,7 +6,6 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"ProjectionRoom/internal/media"
 	"ProjectionRoom/internal/pb"
 )
 
@@ -267,7 +266,7 @@ func memberFromPB(m *pb.MemberInfo) MemberInfo {
 }
 
 // IndexToPB 把分片索引转成 protobuf 表示。
-func IndexToPB(index *media.Index) *pb.MediaIndex {
+func IndexToPB(index *Index) *pb.MediaIndex {
 	if index == nil {
 		return nil
 	}
@@ -297,12 +296,12 @@ func IndexToPB(index *media.Index) *pb.MediaIndex {
 }
 
 // IndexFromPB 还原分片索引。
-func IndexFromPB(msg *pb.MediaIndex) *media.Index {
+func IndexFromPB(msg *pb.MediaIndex) *Index {
 	if msg == nil {
 		return nil
 	}
 
-	out := &media.Index{
+	out := &Index{
 		Version:       int(msg.GetVersion()),
 		InitFile:      msg.GetInitFile(),
 		MimeType:      msg.GetMimeType(),
@@ -312,7 +311,7 @@ func IndexFromPB(msg *pb.MediaIndex) *media.Index {
 		TotalBytes:    msg.GetTotalBytes(),
 	}
 	for _, seg := range msg.GetSegments() {
-		out.Segments = append(out.Segments, media.Segment{
+		out.Segments = append(out.Segments, Segment{
 			Index:    int(seg.GetIndex()),
 			File:     seg.GetFile(),
 			Offset:   seg.GetOffset(),
@@ -327,7 +326,7 @@ func IndexFromPB(msg *pb.MediaIndex) *media.Index {
 }
 
 // SameIndex 判断两份分片索引是否等价（用于"索引已锁定"的幂等校验）。
-func SameIndex(a, b *media.Index) bool {
+func SameIndex(a, b *Index) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}

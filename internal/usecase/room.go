@@ -1,18 +1,16 @@
-// Package room 管理房间生命周期、成员表、房主控制与聊天广播，
+// Package usecase 管理房间生命周期、成员表、房主控制与聊天广播，
 // 是"谁是成员、谁是主播、当前播放状态与容量"的唯一权威（SPEC §3 职责边界）。
 //
 // 本包不接触 WebSocket 连接，只通过 Broadcaster 接口投递消息，
 // 因此可以脱离网络单独测试。
-package room
+package usecase
 
 import (
 	"errors"
 	"sync"
 	"time"
 
-	"ProjectionRoom/internal/media"
-	"ProjectionRoom/internal/protocol"
-	"ProjectionRoom/internal/topology"
+	"ProjectionRoom/internal/model"
 )
 
 var (
@@ -65,11 +63,11 @@ type Member struct {
 	Complete bool
 }
 
-func (m *Member) info() protocol.MemberInfo {
+func (m *Member) info() model.MemberInfo {
 	backups := make([]string, len(m.BackupIDs))
 	copy(backups, m.BackupIDs)
 
-	return protocol.MemberInfo{
+	return model.MemberInfo{
 		ID:          m.ID,
 		DisplayName: m.DisplayName,
 		Role:        m.Role,
@@ -94,28 +92,28 @@ type Room struct {
 	// StreamBps 是容量模型的码率输入：主播发布索引前用配置估计值，之后用索引里的实测码率。
 	StreamBps int64
 	// MediaIndex 是主播发布的分片索引，一经设定即锁定（SPEC §8.1）。
-	MediaIndex *media.Index
+	MediaIndex *model.Index
 
 	Seq          int64
-	lastPlayback protocol.PlaybackState
+	lastPlayback model.PlaybackState
 
 	members map[string]*Member
 	order   []string
 
 	// plan 是最近一次拓扑计算；lastSent 记录已下发给每个成员的分配指纹，避免重复广播（SPEC §6.3）。
-	plan         topology.Plan
+	plan         Plan
 	lastSent     map[string]string
 	lastAssignAt time.Time
 }
 
 // Info 返回某个成员的信息。
-func (r *Room) Info(memberID string) (protocol.MemberInfo, bool) {
+func (r *Room) Info(memberID string) (model.MemberInfo, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	m, ok := r.members[memberID]
 	if !ok {
-		return protocol.MemberInfo{}, false
+		return model.MemberInfo{}, false
 	}
 	return m.info(), true
 }
@@ -131,7 +129,7 @@ func (r *Room) IsMember(memberID string) bool {
 }
 
 // MemberInfos 返回按加入顺序排列的成员表。
-func (r *Room) MemberInfos() []protocol.MemberInfo {
+func (r *Room) MemberInfos() []model.MemberInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -142,10 +140,10 @@ func (r *Room) MemberInfos() []protocol.MemberInfo {
 // 包含当前播放状态与分片索引，让后进房的人立刻与房主对齐（SPEC §7.1）。
 func (r *Room) Snapshot(maxMembers int) (
 	hostID string,
-	members []protocol.MemberInfo,
-	playback protocol.PlaybackState,
-	capacity protocol.Capacity,
-	mediaIndex *media.Index,
+	members []model.MemberInfo,
+	playback model.PlaybackState,
+	capacity model.Capacity,
+	mediaIndex *model.Index,
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -154,7 +152,7 @@ func (r *Room) Snapshot(maxMembers int) (
 }
 
 // Capacity 返回当前容量判断。
-func (r *Room) Capacity(maxMembers int) protocol.Capacity {
+func (r *Room) Capacity(maxMembers int) model.Capacity {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -164,9 +162,9 @@ func (r *Room) Capacity(maxMembers int) protocol.Capacity {
 // capacityLocked 计算容量判断。
 // 口径全部来自最近一次拓扑计算：K0 是主播能直连的人数，空位数决定还能进几个人。
 // 还没算过拓扑时模式是 pending —— 容量未知就如实说未知，不能拿一个默认值假装知道（SPEC §6.2）。
-func (r *Room) capacityLocked(maxMembers int) protocol.Capacity {
-	capacity := protocol.Capacity{
-		Mode:       protocol.ModePending,
+func (r *Room) capacityLocked(maxMembers int) model.Capacity {
+	capacity := model.Capacity{
+		Mode:       model.ModePending,
 		MaxMembers: r.joinLimitLocked(maxMembers),
 		StreamBps:  r.StreamBps,
 	}
@@ -202,17 +200,17 @@ func (r *Room) joinLimitLocked(maxMembers int) int {
 }
 
 // participantsLocked 把当前成员整理成拓扑算法的输入。
-func (r *Room) participantsLocked() []topology.Participant {
-	out := make([]topology.Participant, 0, len(r.order))
+func (r *Room) participantsLocked() []Participant {
+	out := make([]Participant, 0, len(r.order))
 	for i, id := range r.order {
 		member, ok := r.members[id]
 		if !ok {
 			continue
 		}
 
-		p := topology.Participant{
+		p := Participant{
 			ID:        member.ID,
-			IsHost:    member.Role == protocol.RoleHost,
+			IsHost:    member.Role == model.RoleHost,
 			UploadBps: member.UploadCapacityBps,
 			RTTMs:     member.RTTMs,
 			// 稳定性暂时按 1 处理：重连计数属于 M4 的监控指标。
@@ -229,12 +227,12 @@ func (r *Room) participantsLocked() []topology.Participant {
 }
 
 // topologyLocked 生成某个成员的拓扑下发内容（调用方需持锁）。
-func (r *Room) topologyLocked(peerID string) *protocol.TopologyAssignment {
+func (r *Room) topologyLocked(peerID string) *model.TopologyAssignment {
 	a, ok := r.plan.Assignments[peerID]
 	if !ok {
 		return nil
 	}
-	return &protocol.TopologyAssignment{
+	return &model.TopologyAssignment{
 		PeerID:        a.PeerID,
 		PrimaryID:     a.PrimaryID,
 		BackupIDs:     a.BackupIDs,
@@ -243,20 +241,20 @@ func (r *Room) topologyLocked(peerID string) *protocol.TopologyAssignment {
 		Mode:          string(r.plan.Mode),
 		DistributorID: r.plan.DistributorID,
 		Reason:        r.plan.Reason,
-		MaxDepth:      topology.DefaultMaxDepth,
+		MaxDepth:      DefaultMaxDepth,
 	}
 }
 
 // TopologyFor 返回某个成员当前的拓扑位置。
-func (r *Room) TopologyFor(peerID string) *protocol.TopologyAssignment {
+func (r *Room) TopologyFor(peerID string) *model.TopologyAssignment {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	return r.topologyLocked(peerID)
 }
 
-func (r *Room) memberInfosLocked() []protocol.MemberInfo {
-	out := make([]protocol.MemberInfo, 0, len(r.order))
+func (r *Room) memberInfosLocked() []model.MemberInfo {
+	out := make([]model.MemberInfo, 0, len(r.order))
 	for _, id := range r.order {
 		if m, ok := r.members[id]; ok {
 			out = append(out, m.info())

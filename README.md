@@ -29,7 +29,7 @@ WebRTC DataChannel 直接分发给其他节点（P2P 树状分发 + 多父条带
 
 ### M3 已落地（部分验证）
 
-- **`internal/topology`**：拓扑分配引擎。先按深度择父（树越浅越好）、同深度再比余量/RTT/稳定性；
+- **`internal/usecase`**：拓扑分配引擎。先按深度择父（树越浅越好）、同深度再比余量/RTT/稳定性；
   单链模式按实测上行选举分发节点，并带 1.5 倍换防滞回（避免两个差不多的节点来回抢位）；
   排布容量与**准入容量**分开算 —— 未实测的节点只能参与排布，不能凭猜测开闸。
 - **客户端中继**：转发节点从自己的分片仓库应答子节点；进度与时钟锚点沿主父路径逐跳转发
@@ -151,20 +151,26 @@ node tools/verify-m3.mjs --media ./room-media --nodes 4 --host-uplink 800000 --u
 ## 项目结构
 
 ```
-cmd/                    服务端入口 + wire 依赖注入
+cmd/                    入口：main.go 只有 加载配置 → InitializeApp → Run
+cmd/init.go             Init 聚合根与 Run()（wire 图与 main 的唯一交点）
+cmd/wire.go             wire.Build 依赖声明（inject 侧，勿手写 wire_gen.go）
+cmd/wire_gen.go         `go tool wire ./cmd` 生成的装配代码（提交，不手改）
 cmd/segmenter/          视频分片工具（moof 边界切片 + index.json）
 internal/config/        配置结构与加载（环境变量覆盖）
-internal/protocol/      WebSocket 消息契约（与 client/src/types/protocol.ts 一一对应）
-internal/media/         分片索引模型与自洽性校验
-internal/mp4/           fragmented MP4 解析与按 moof 边界切分
-internal/signal/        WebSocket 信令层：连接注册、定向转发、房间广播
-internal/room/          房间/成员/房主控制/聊天的唯一权威（不碰网络，可单测）
-internal/topology/      模式判定与容量模型（fanout / chain、K0）
-internal/httpapi/       gin 路由、/ws 处理与错误映射
+internal/handler/       gin 路由、/ws 处理与错误映射（HTTP/协议适配层）
+internal/usecase/       业务用例：房间生命周期、拓扑分配、模式判定、换防（唯一状态权威）
+internal/model/         数据契约：消息模型、分片索引、protobuf 转换
+internal/service/       WebSocket 信令层（Hub）与 HTTP 服务器生命周期
+internal/service/mp4/   fragmented MP4 解析与按 moof 边界切分
+internal/utils/         与业务无关的小工具（随机码、切片比较）
+internal/pb/            protoc 生成的 protobuf 代码
 client/                 Vue 3 + TS + Vite 前端（播放链路在 src/composables/）
 tools/verify-m2.mjs     真实浏览器验收脚本
 docs/SPEC.md            设计文档（协议、拓扑、同步算法、里程碑与验收标准）
 ```
+
+**依赖方向**：`handler → usecase → model`；基础设施（`service*`）只通过接口被用例引用
+（`wire.Bind(new(usecase.Broadcaster), new(*service.Hub))`），`utils`/`model` 不反向依赖任何层。
 
 **不变量**：`internal/` 下任何代码都不得读写视频数据；服务器的职责边界在 SPEC §3 有明确表格。
 
@@ -172,7 +178,8 @@ docs/SPEC.md            设计文档（协议、拓扑、同步算法、里程�
 
 ## 开发约定
 
-- 消息字段在 `internal/protocol/message.go` 与 `client/src/types/protocol.ts` 各有一份，
-  改动必须同步 —— 它们是同一个协议的两份投影。
-- 分片索引在 `internal/media/index.go` 与 `client/src/types/media.ts` 同理。
+- 消息字段在 `internal/model/message.go` 与 `client/src/types/protocol.ts` 各有一份，
+  改动必须同步 —— 它们是同一个协议的两份投影；线上编码为 protobuf
+  （`proto/projection_room.proto` 是唯一源，转换点见 `internal/model/pb_convert.go` 与 `client/src/types/codec.ts`）。
+- 分片索引在 `internal/model/index.go` 与 `client/src/types/media.ts` 同理。
 - 前端改动期间建议先停掉 Vite：Windows 上文件写入的原子替换会与它的 watcher 抢锁（EBUSY）。

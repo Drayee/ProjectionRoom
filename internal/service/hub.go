@@ -1,6 +1,6 @@
-// Package signal 实现 WebSocket 信令层：连接注册、定向转发与房间广播。
+// Package service 实现 WebSocket 信令层：连接注册、定向转发与房间广播。
 // 它只转发元数据，不传输任何视频字节（SPEC §1.1 目标 7）。
-package signal
+package service
 
 import (
 	"context"

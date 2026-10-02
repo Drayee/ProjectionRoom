@@ -17,8 +17,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"ProjectionRoom/internal/mp4"
-	"ProjectionRoom/internal/topology"
+	"ProjectionRoom/internal/service/mp4"
+	"ProjectionRoom/internal/usecase"
 )
 
 func main() {
@@ -121,11 +121,11 @@ func run(in, out, transcode string, fragment bool, fragSec, uplinkMbps float64) 
 // printCapacityHint 把"这个码率下主播能带几个人"直接告诉主播（SPEC §6.1、§6.2）。
 func printCapacityHint(streamBps int64, uplinkMbps float64) {
 	uplinkBps := int64(uplinkMbps * 1_000_000)
-	slots := topology.HostChildSlots(uplinkBps, streamBps)
+	slots := usecase.HostChildSlots(uplinkBps, streamBps)
 
 	fmt.Printf("\n容量提示（按主播上行 %.1f Mbps 估计）:\n", uplinkMbps)
-	switch topology.SelectMode(slots) {
-	case topology.ModeChain:
+	switch usecase.SelectMode(slots) {
+	case usecase.ModeChain:
 		if slots == 0 {
 			fmt.Printf("  当前码率下连 1 个观众都带不动。请降低码率，例如：\n")
 			fmt.Printf("    segmenter -in <视频> -out %s -transcode 1200k\n", "./room-media")

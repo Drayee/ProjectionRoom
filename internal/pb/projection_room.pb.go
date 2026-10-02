@@ -30,7 +30,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// MediaSegment 是一个媒体分片（与 internal/media.Segment 一一对应）。
+// MediaSegment 是一个媒体分片（与 internal/model.Segment 一一对应）。
 type MediaSegment struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Index         int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"` // 从 1 开始；0 保留给 init 段

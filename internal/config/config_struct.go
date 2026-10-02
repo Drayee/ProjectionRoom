@@ -15,7 +15,7 @@ type Config struct {
 // RoomConfig 控制房间规模与生命周期。
 type RoomConfig struct {
 	// MaxMembers 是房间成员上限的硬约束（含主播）。
-	// P2P 分发的真实容量上限由 internal/topology 依据实测上行计算（SPEC §6.2），
+	// P2P 分发的真实容量上限由 internal/usecase 依据实测上行计算（SPEC §6.2），
 	// 这里是最后一道防线，避免房间被挂爆。
 	MaxMembers int
 	// DefaultStreamBps 是尚未拿到 mediaIndex 时的码率估计（bit/s），

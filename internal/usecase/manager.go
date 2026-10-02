@@ -1,7 +1,6 @@
-package room
+package usecase
 
 import (
-	"crypto/rand"
 	"log"
 	"strconv"
 	"strings"
@@ -9,24 +8,22 @@ import (
 	"time"
 
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/media"
-	"ProjectionRoom/internal/protocol"
-	"ProjectionRoom/internal/topology"
+	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/utils"
 )
 
 const (
-	// 去掉 I/O/0/1，避免口头传房间码时听错。
-	roomCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	roomCodeLen      = 6
-	maxDisplayName   = 24
+	// roomCodeLen 房间码长度；字符表见 utils.RoomCodeAlphabet（已去掉易听错的字符）。
+	roomCodeLen    = 6
+	maxDisplayName = 24
 
 	// reassignMinInterval 限制拓扑重算频率：度量每 5s 上报一次，
 	// 没有节流的话一次网络抖动就会引发一串无谓的重挂载（SPEC §6.3 要求换防平滑）。
 	reassignMinInterval = 1500 * time.Millisecond
 )
 
-// Broadcaster 由 signal.Hub 实现。
-// 接口定义在 room 包内，使依赖方向保持 httpapi → room → Broadcaster ← signal，不产生环。
+// Broadcaster 由 service.Hub 实现。
+// 接口定义在 usecase 包内，使依赖方向保持 handler → usecase → Broadcaster ← service，不产生环。
 type Broadcaster interface {
 	SendTo(id string, msg []byte) error
 	BroadcastToRoom(roomID string, msg []byte, except string) int
@@ -75,7 +72,7 @@ func (m *Manager) Create(roomID, password string, streamBps int64) (*Room, error
 		StreamBps:    streamBps,
 		CreatedAt:    time.Now(),
 		members:      make(map[string]*Member),
-		lastPlayback: protocol.PlaybackState{Paused: true, Rate: 1},
+		lastPlayback: model.PlaybackState{Paused: true, Rate: 1},
 	}
 	m.rooms[roomID] = r
 	log.Printf("room %s: 已创建（密码保护=%t，码率估计=%d bps）", roomID, password != "", streamBps)
@@ -98,7 +95,7 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 	if !validDisplayName(displayName) {
 		return ErrBadName
 	}
-	if role != protocol.RoleHost && role != protocol.RoleViewer {
+	if role != model.RoleHost && role != model.RoleViewer {
 		return ErrBadInput
 	}
 
@@ -115,11 +112,11 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 		r.mu.Unlock()
 		return ErrAlreadyJoined
 	}
-	if role == protocol.RoleHost && r.HostID != "" {
+	if role == model.RoleHost && r.HostID != "" {
 		r.mu.Unlock()
 		return ErrHostTaken
 	}
-	if role == protocol.RoleViewer {
+	if role == model.RoleViewer {
 		if r.HostID == "" {
 			r.mu.Unlock()
 			return ErrNotReady
@@ -133,14 +130,14 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 	}
 
 	// M2 是星形占位拓扑：主播深度 0，观众深度 1 直连主播。
-	// 多父/多层树的真实分配由 M3 的 internal/topology 接管（SPEC §6.1、§6.4）。
+	// 多父/多层树的真实分配由 M3 的 assign.go 接管（SPEC §6.1、§6.4）。
 	member := &Member{
 		ID:          clientID,
 		DisplayName: displayName,
 		Role:        role,
 		JoinedAt:    time.Now(),
 	}
-	if role == protocol.RoleHost {
+	if role == model.RoleHost {
 		member.Depth = 0
 		r.HostID = clientID
 	} else {
@@ -160,8 +157,8 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 	r.mu.Unlock()
 
 	// joined 只发给本人：带完整成员表、容量判断、当前播放状态与分片索引。
-	_ = m.bus.SendTo(clientID, protocol.MustEnvelope(protocol.Envelope{
-		Type:       protocol.TypeJoined,
+	_ = m.bus.SendTo(clientID, model.MustEnvelope(model.Envelope{
+		Type:       model.TypeJoined,
 		RoomID:     roomID,
 		SelfID:     clientID,
 		HostID:     hostID,
@@ -174,8 +171,8 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 	}))
 
 	// member-joined 广播给其他人，让他们的成员列表刷新。
-	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-		Type:    protocol.TypeMemberJoined,
+	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+		Type:    model.TypeMemberJoined,
 		RoomID:  roomID,
 		Member:  &info,
 		Members: infos,
@@ -204,9 +201,9 @@ func (m *Manager) Leave(roomID, clientID string) {
 		return
 	}
 	delete(r.members, clientID)
-	r.order = removeString(r.order, clientID)
+	r.order = utils.RemoveString(r.order, clientID)
 
-	wasHost := member.Role == protocol.RoleHost || r.HostID == clientID
+	wasHost := member.Role == model.RoleHost || r.HostID == clientID
 	if wasHost {
 		r.HostID = ""
 	}
@@ -214,8 +211,8 @@ func (m *Manager) Leave(roomID, clientID string) {
 	remaining := len(infos)
 	r.mu.Unlock()
 
-	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-		Type:     protocol.TypeMemberLeft,
+	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+		Type:     model.TypeMemberLeft,
 		RoomID:   roomID,
 		ClientID: clientID,
 		Members:  infos,
@@ -257,8 +254,8 @@ func (m *Manager) HandleChat(roomID, clientID, text string) error {
 		return ErrNotJoined
 	}
 
-	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-		Type:        protocol.TypeChat,
+	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+		Type:        model.TypeChat,
 		RoomID:      roomID,
 		From:        member.ID,
 		DisplayName: member.DisplayName,
@@ -272,7 +269,7 @@ func (m *Manager) HandleChat(roomID, clientID, text string) error {
 // SetMediaIndex 由主播发布分片索引：校验、锁定、广播（SPEC §4.3、§5.1）。
 //
 // 服务端必须校验：一个畸形索引会让整个房间算错容量，或者让播放器拿到 appendBuffer 一定失败的 mimeType。
-func (m *Manager) SetMediaIndex(roomID, clientID string, index *media.Index) error {
+func (m *Manager) SetMediaIndex(roomID, clientID string, index *model.Index) error {
 	r, ok := m.Get(roomID)
 	if !ok {
 		return ErrNotFound
@@ -291,12 +288,12 @@ func (m *Manager) SetMediaIndex(roomID, clientID string, index *media.Index) err
 		r.mu.Unlock()
 		return ErrNotJoined
 	}
-	if member.Role != protocol.RoleHost {
+	if member.Role != model.RoleHost {
 		r.mu.Unlock()
 		return ErrNotHost
 	}
 	// 索引一经设定即锁定；重复发布同一份是幂等的（SPEC §8.1）。
-	if r.MediaIndex != nil && !protocol.SameIndex(r.MediaIndex, index) {
+	if r.MediaIndex != nil && !model.SameIndex(r.MediaIndex, index) {
 		r.mu.Unlock()
 		return ErrMediaLocked
 	}
@@ -307,8 +304,8 @@ func (m *Manager) SetMediaIndex(roomID, clientID string, index *media.Index) err
 	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
 	r.mu.Unlock()
 
-	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-		Type:       protocol.TypeMediaIndex,
+	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+		Type:       model.TypeMediaIndex,
 		RoomID:     roomID,
 		From:       clientID,
 		MediaIndex: index,
@@ -326,7 +323,7 @@ func (m *Manager) SetMediaIndex(roomID, clientID string, index *media.Index) err
 
 // UpdateMetrics 记录成员上报的实测度量。
 // 主播的上行会直接改变房间容量，所以这里要立刻重算并广播（SPEC §6.2）。
-func (m *Manager) UpdateMetrics(roomID, clientID string, metrics protocol.Metrics) error {
+func (m *Manager) UpdateMetrics(roomID, clientID string, metrics model.Metrics) error {
 	r, ok := m.Get(roomID)
 	if !ok {
 		return ErrNotFound
@@ -370,14 +367,14 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 	}
 
 	previous := r.plan
-	plan := topology.Assign(r.HostID, r.participantsLocked(), topology.Options{
+	plan := Assign(r.HostID, r.participantsLocked(), Options{
 		StreamBps:           r.StreamBps,
 		PreviousDistributor: previous.DistributorID,
 	})
 	r.plan = plan
 	r.lastAssignAt = time.Now()
 
-	var outbound []protocol.Envelope
+	var outbound []model.Envelope
 	for _, a := range plan.Assignments {
 		fingerprint := assignmentFingerprint(a, plan.Mode, plan.DistributorID)
 		if r.lastSent[a.PeerID] == fingerprint {
@@ -388,7 +385,7 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 		}
 		r.lastSent[a.PeerID] = fingerprint
 
-		topologyInfo := protocol.TopologyAssignment{
+		topologyInfo := model.TopologyAssignment{
 			PeerID:        a.PeerID,
 			PrimaryID:     a.PrimaryID,
 			BackupIDs:     a.BackupIDs,
@@ -397,23 +394,23 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 			Mode:          string(plan.Mode),
 			DistributorID: plan.DistributorID,
 			Reason:        plan.Reason,
-			MaxDepth:      topology.DefaultMaxDepth,
+			MaxDepth:      DefaultMaxDepth,
 		}
-		outbound = append(outbound, protocol.Envelope{
-			Type:     protocol.TypeParentAssignment,
+		outbound = append(outbound, model.Envelope{
+			Type:     model.TypeParentAssignment,
 			RoomID:   roomID,
 			Topology: &topologyInfo,
 		})
 	}
 
 	// 把拓扑写回成员信息：成员列表与监控面板显示的应当就是真实的父子关系。
-	var updatedMembers []protocol.MemberInfo
+	var updatedMembers []model.MemberInfo
 	for id, a := range plan.Assignments {
 		member, ok := r.members[id]
 		if !ok {
 			continue
 		}
-		if member.PrimaryID == a.PrimaryID && member.Depth == a.Depth && sameStrings(member.BackupIDs, a.BackupIDs) {
+		if member.PrimaryID == a.PrimaryID && member.Depth == a.Depth && utils.SameStrings(member.BackupIDs, a.BackupIDs) {
 			continue
 		}
 		member.PrimaryID = a.PrimaryID
@@ -425,7 +422,7 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 	}
 
 	capacity := r.capacityLocked(m.cfg.Room.MaxMembers)
-	distributorChanged := previous.Mode == topology.ModeChain && plan.DistributorID != previous.DistributorID
+	distributorChanged := previous.Mode == ModeChain && plan.DistributorID != previous.DistributorID
 	fromID := previous.DistributorID
 	toID := plan.DistributorID
 	reason := plan.Reason
@@ -437,16 +434,16 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 		if env.Topology == nil {
 			continue
 		}
-		if err := m.bus.SendTo(env.Topology.PeerID, protocol.MustEnvelope(env)); err != nil {
+		if err := m.bus.SendTo(env.Topology.PeerID, model.MustEnvelope(env)); err != nil {
 			log.Printf("room %s: 下发拓扑给 %s 失败: %v", roomID, env.Topology.PeerID, err)
 		}
 	}
 
 	if distributorChanged {
-		m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-			Type:        protocol.TypeDistributorChange,
+		m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+			Type:        model.TypeDistributorChange,
 			RoomID:      roomID,
-			Distributor: &protocol.DistributorChange{FromID: fromID, ToID: toID, Reason: reason},
+			Distributor: &model.DistributorChange{FromID: fromID, ToID: toID, Reason: reason},
 		}), "")
 		log.Printf("room %s: 分发节点换防 %s → %s", roomID, fromID, toID)
 	}
@@ -454,8 +451,8 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 	m.broadcastCapacity(roomID, capacity)
 
 	if updatedMembers != nil {
-		m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-			Type:    protocol.TypeMemberList,
+		m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+			Type:    model.TypeMemberList,
 			RoomID:  roomID,
 			Members: updatedMembers,
 		}), "")
@@ -474,25 +471,9 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 // 必须把 mode 与 distributorId 也算进去：单链模式下换防时，
 // 各节点的父子关系可能完全没变（主播仍然只连一个子节点），但分发节点换了 ——
 // 漏掉它们就会出现"换防了却没通知任何人"。
-func assignmentFingerprint(a topology.Assignment, mode topology.Mode, distributorID string) string {
+func assignmentFingerprint(a Assignment, mode Mode, distributorID string) string {
 	return string(mode) + "|" + distributorID + "|" + a.PrimaryID + "|" +
-		strings.Join(a.BackupIDs, ",") + "|" + strings.Join(a.Children, ",") + "|" + itoa(a.Depth)
-}
-
-func itoa(v int) string {
-	return strconv.Itoa(v)
-}
-
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+		strings.Join(a.BackupIDs, ",") + "|" + strings.Join(a.Children, ",") + "|" + strconv.Itoa(a.Depth)
 }
 
 // SetChunkReport 记录成员上报的分片拥有情况。
@@ -528,8 +509,8 @@ func (m *Manager) SendTopology(roomID, clientID string) error {
 		return ErrNotJoined
 	}
 
-	return m.bus.SendTo(clientID, protocol.MustEnvelope(protocol.Envelope{
-		Type:     protocol.TypeTopology,
+	return m.bus.SendTo(clientID, model.MustEnvelope(model.Envelope{
+		Type:     model.TypeTopology,
 		RoomID:   roomID,
 		Topology: topologyInfo,
 	}))
@@ -538,14 +519,14 @@ func (m *Manager) SendTopology(roomID, clientID string) error {
 // HandleControl 处理房主控制。
 // 只有主播可以下发；服务端负责分配单调递增的 seq 并记录最新播放状态，
 // 供后进房的人立即对齐（SPEC §5.3、§7.1）。
-func (m *Manager) HandleControl(roomID, clientID string, in protocol.Envelope) error {
+func (m *Manager) HandleControl(roomID, clientID string, in model.Envelope) error {
 	r, ok := m.Get(roomID)
 	if !ok {
 		return ErrNotFound
 	}
 
 	switch in.Action {
-	case protocol.ActionPlay, protocol.ActionPause, protocol.ActionSeek, protocol.ActionRate:
+	case model.ActionPlay, model.ActionPause, model.ActionSeek, model.ActionRate:
 	default:
 		return ErrBadInput
 	}
@@ -556,7 +537,7 @@ func (m *Manager) HandleControl(roomID, clientID string, in protocol.Envelope) e
 		r.mu.Unlock()
 		return ErrNotJoined
 	}
-	if member.Role != protocol.RoleHost {
+	if member.Role != model.RoleHost {
 		r.mu.Unlock()
 		return ErrNotHost
 	}
@@ -571,15 +552,15 @@ func (m *Manager) HandleControl(roomID, clientID string, in protocol.Envelope) e
 	// seek / rate 不改变播放状态，沿用主播显式给出的值。
 	paused := in.Paused
 	switch in.Action {
-	case protocol.ActionPlay:
+	case model.ActionPlay:
 		paused = false
-	case protocol.ActionPause:
+	case model.ActionPause:
 		paused = true
-	case protocol.ActionSeek, protocol.ActionRate:
+	case model.ActionSeek, model.ActionRate:
 	}
 
 	r.Seq++
-	r.lastPlayback = protocol.PlaybackState{
+	r.lastPlayback = model.PlaybackState{
 		Paused:      paused,
 		CurrentTime: in.CurrentTime,
 		HostClockMs: in.HostClockMs,
@@ -591,8 +572,8 @@ func (m *Manager) HandleControl(roomID, clientID string, in protocol.Envelope) e
 	r.mu.Unlock()
 
 	// 广播给除主播外的所有人：主播本地已应用，回显只会造成重复处理。
-	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-		Type:     protocol.TypeRoomControl,
+	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+		Type:     model.TypeRoomControl,
 		RoomID:   roomID,
 		From:     clientID,
 		Action:   in.Action,
@@ -622,15 +603,15 @@ func (m *Manager) CloseRoomIfEmpty(roomID string) {
 	}
 }
 
-func (m *Manager) broadcastCapacity(roomID string, capacity protocol.Capacity) {
-	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-		Type:     protocol.TypeCapacity,
+func (m *Manager) broadcastCapacity(roomID string, capacity model.Capacity) {
+	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+		Type:     model.TypeCapacity,
 		RoomID:   roomID,
 		Capacity: &capacity,
 	}), "")
 }
 
-// closeRoom 销毁房间：先广播原因，再关闭连接（关闭留出投递时间，见 signal.closeGrace）。
+// closeRoom 销毁房间：先广播原因，再关闭连接（关闭留出投递时间，见 service.closeGrace）。
 func (m *Manager) closeRoom(roomID, reason string) {
 	m.mu.Lock()
 	if _, ok := m.rooms[roomID]; !ok {
@@ -640,10 +621,10 @@ func (m *Manager) closeRoom(roomID, reason string) {
 	delete(m.rooms, roomID)
 	m.mu.Unlock()
 
-	m.bus.BroadcastToRoom(roomID, protocol.MustEnvelope(protocol.Envelope{
-		Type:    protocol.TypeRoomClosed,
+	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
+		Type:    model.TypeRoomClosed,
 		RoomID:  roomID,
-		Code:    protocol.CodeRoomClosed,
+		Code:    model.CodeRoomClosed,
 		Message: reason,
 	}), "")
 	m.bus.CloseRoom(roomID)
@@ -651,17 +632,13 @@ func (m *Manager) closeRoom(roomID, reason string) {
 	log.Printf("room %s: 已关闭（%s）", roomID, reason)
 }
 
+// newRoomIDLocked 生成一个当前未被占用的房间码；调用方需持有 m.mu。
 func (m *Manager) newRoomIDLocked() (string, error) {
-	// 字母表长度 32 整除 256，因此取模不引入偏差。
-	buf := make([]byte, roomCodeLen)
 	for attempt := 0; attempt < 16; attempt++ {
-		if _, err := rand.Read(buf); err != nil {
+		id, err := utils.RandomCode(utils.RoomCodeAlphabet, roomCodeLen)
+		if err != nil {
 			return "", err
 		}
-		for i := range buf {
-			buf[i] = roomCodeAlphabet[int(buf[i])%len(roomCodeAlphabet)]
-		}
-		id := string(buf)
 		if _, exists := m.rooms[id]; !exists {
 			return id, nil
 		}
@@ -675,14 +652,4 @@ func validDisplayName(name string) bool {
 		return false
 	}
 	return len([]rune(name)) <= maxDisplayName
-}
-
-func removeString(list []string, target string) []string {
-	out := make([]string, 0, len(list))
-	for _, item := range list {
-		if item != target {
-			out = append(out, item)
-		}
-	}
-	return out
 }

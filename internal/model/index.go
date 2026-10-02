@@ -1,10 +1,10 @@
-// Package media 定义分片索引的数据模型（SPEC §4.3）。
+// 分片索引的数据模型（SPEC §4.3）。
 //
 // 它是三个地方共用的契约：
 //   - cmd/segmenter 生成 index.json；
 //   - 服务端校验主播发布的索引并读取 BitrateBps 做容量判定；
-//   - 前端 client/src/types/media.ts 是它的投影。
-package media
+//   - 前端 client/src/types/ts 是它的投影。
+package model
 
 import (
 	"errors"

@@ -1,33 +1,39 @@
-# 从 proto/projection_room.proto 生成 Go 与 TypeScript 代码。
+# Generate Go and TypeScript code from proto/projection_room.proto.
 #
-# 生成的代码**入库**：构建与部署都不需要 protoc —— 只有改了 .proto 才需要跑这个脚本。
+# Generated code is committed: builds and deploys never need protoc -- only run
+# this script after editing the .proto file.
 #
-# 前置：
-#   - protoc（本机已装）
-#   - protoc-gen-go（在 GOPATH/bin）
-#   - client/node_modules/.bin/protoc-gen-es（npm install 时随 @bufbuild/protoc-gen-es 安装）
+# Requirements:
+#   - protoc (installed locally)
+#   - protoc-gen-go (in GOPATH/bin)
+#   - client/node_modules/.bin/protoc-gen-es (installed with @bufbuild/protoc-gen-es)
 #
-# 用法：pwsh scripts/gen-proto.ps1
+# Usage: pwsh scripts/gen-proto.ps1
+#
+# NOTE: keep this file ASCII-only. Chinese characters in .ps1 comments have broken
+# the PowerShell parser on this host before.
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $protoFile = Join-Path $root 'proto/projection_room.proto'
-$goOut = Join-Path $root 'internal'
+# go_out must be the module root: with '--go_opt=module=ProjectionRoom' protoc-gen-go
+# emits paths like 'internal/pb/x.pb.go', already relative to the module.
+$goOut = $root
 $tsOut = Join-Path $root 'client/src/gen'
 
-Write-Host '生成 Go 代码 -> internal/pb'
+Write-Host 'gen go -> internal/pb'
 New-Item -ItemType Directory -Force -Path (Join-Path $goOut 'pb') | Out-Null
 protoc "--proto_path=$root/proto" "--go_out=$goOut" '--go_opt=module=ProjectionRoom' $protoFile
-if ($LASTEXITCODE -ne 0) { throw "protoc (go) 失败: $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "protoc (go) failed: $LASTEXITCODE" }
 
-Write-Host '生成 TypeScript 代码 -> client/src/gen'
+Write-Host 'gen ts -> client/src/gen'
 New-Item -ItemType Directory -Force -Path $tsOut | Out-Null
 $esPlugin = Join-Path $root 'client/node_modules/.bin/protoc-gen-es.cmd'
-if (-not (Test-Path $esPlugin)) { throw '找不到 protoc-gen-es：请先在 client/ 执行 npm install' }
+if (-not (Test-Path $esPlugin)) { throw 'protoc-gen-es not found: run npm install in client/ first' }
 protoc "--proto_path=$root/proto" "--plugin=protoc-gen-es=$esPlugin" "--es_out=$tsOut" '--es_opt=target=ts,import_extension=none' $protoFile
-if ($LASTEXITCODE -ne 0) { throw "protoc (es) 失败: $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "protoc (es) failed: $LASTEXITCODE" }
 
-Write-Host '完成。生成的文件：'
-Get-ChildItem -Recurse -File (Join-Path $goOut 'pb'), $tsOut | Select-Object -ExpandProperty FullName
+Write-Host 'done. generated files:'
+Get-ChildItem -Recurse -File (Join-Path $goOut 'internal/pb'), $tsOut | Select-Object -ExpandProperty FullName

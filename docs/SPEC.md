@@ -99,15 +99,20 @@
 └───────────────────────────────────────────────────────────────┘
 ```
 
+> **目录分层现状（重构后）**：`internal/signal` → `internal/service`（Hub + Server），
+> `internal/room` + `internal/topology` + `internal/tracker` → `internal/usecase`，
+> `internal/httpapi` → `internal/handler`，`internal/media` + `internal/protocol` → `internal/model`，
+> `internal/mp4` → `internal/service/mp4`。下文出现的旧路径均按此对应。
+
 **职责边界（单一权威）**
 
 | 关注点 | 唯一权威 | 说明 |
 | :--- | :--- | :--- |
 | 播放时间 | 主播 | 观众只跟随，不反向影响 |
 | 房间控制权 | 主播 | 服务端只做权限校验与广播 |
-| 成员/在线状态 | 服务端 `internal/room` | 断线由服务端判定并广播 |
-| 拓扑模式与分配 | 服务端 `internal/topology` | 客户端只提交度量，不自行挂载、不自我提升 |
-| 分片拥有情况 | 各节点自报，服务端 `internal/tracker` 聚合 | 用于推荐，不用于传输 |
+| 成员/在线状态 | 服务端 `internal/usecase` | 断线由服务端判定并广播 |
+| 拓扑模式与分配 | 服务端 `internal/usecase` | 客户端只提交度量，不自行挂载、不自我提升 |
+| 分片拥有情况 | 各节点自报，服务端 `internal/usecase` 聚合 | 用于推荐，不用于传输 |
 | 分片数据 | 各 peer 本地 | 服务器不持有、不转发 |
 
 ---

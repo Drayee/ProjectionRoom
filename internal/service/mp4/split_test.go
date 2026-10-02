@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"ProjectionRoom/internal/media"
+	"ProjectionRoom/internal/model"
 )
 
 // ---------- 合成 fixture：不依赖 ffmpeg，保证解析逻辑有确定性覆盖 ----------
@@ -126,7 +126,7 @@ func readFileBytes(t *testing.T, path string) []byte {
 
 // assertRoundTrip 是切片正确性的核心断言：
 // init + 全部分片按序拼接必须与原文件逐字节相同，且每个分片都以 moof 开头。
-func assertRoundTrip(t *testing.T, original []byte, outDir string, index *media.Index) {
+func assertRoundTrip(t *testing.T, original []byte, outDir string, index *model.Index) {
 	t.Helper()
 
 	initData := readFileBytes(t, filepath.Join(outDir, index.InitFile))

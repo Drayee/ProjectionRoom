@@ -1,4 +1,4 @@
-package httpapi
+package handler
 
 import (
 	"log"
@@ -9,16 +9,16 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/protocol"
-	"ProjectionRoom/internal/room"
-	"ProjectionRoom/internal/signal"
+	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/usecase"
 )
 
 // wsHandler 是唯一的 WebSocket 入口：/ws?roomId=..&clientId=..
 //
 // 连接建立时只把连接登记进 Hub（用于信令投递），
 // 真正的"进入房间"由第一条 join 消息完成 —— 那时才校验密码与成员上限（SPEC §5.1）。
-func wsHandler(cfg *config.Config, hub *signal.Hub, rooms *room.Manager) gin.HandlerFunc {
+func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		roomID := strings.ToUpper(strings.TrimSpace(c.Query("roomId")))
 		clientID := strings.TrimSpace(c.Query("clientId"))
@@ -65,9 +65,9 @@ func wsHandler(cfg *config.Config, hub *signal.Hub, rooms *room.Manager) gin.Han
 				continue
 			}
 
-			env, err := protocol.Unmarshal(data)
+			env, err := model.Unmarshal(data)
 			if err != nil {
-				_ = client.Send(protocol.ErrorEnvelope(protocol.CodeBadRequest, "报文不是合法的 protobuf 信封"))
+				_ = client.Send(model.ErrorEnvelope(model.CodeBadRequest, "报文不是合法的 protobuf 信封"))
 				continue
 			}
 			handleMessage(hub, rooms, client, roomID, clientID, *env)
@@ -75,92 +75,92 @@ func wsHandler(cfg *config.Config, hub *signal.Hub, rooms *room.Manager) gin.Han
 	}
 }
 
-func handleMessage(hub *signal.Hub, rooms *room.Manager, client *signal.Client, roomID, clientID string, env protocol.Envelope) {
+func handleMessage(hub *service.Hub, rooms *usecase.Manager, client *service.Client, roomID, clientID string, env model.Envelope) {
 	switch env.Type {
-	case protocol.TypeJoin:
+	case model.TypeJoin:
 		if err := rooms.Join(roomID, clientID, env.DisplayName, env.Role, env.Password); err != nil {
 			_, code, message := roomErrorResponse(err)
-			_ = client.Send(protocol.ErrorEnvelope(code, message))
+			_ = client.Send(model.ErrorEnvelope(code, message))
 			log.Printf("ws: %s 加入 %s 被拒绝: %s", clientID, roomID, message)
 		}
 
-	case protocol.TypeChat:
+	case model.TypeChat:
 		if err := rooms.HandleChat(roomID, clientID, env.Text); err != nil {
 			_, code, message := roomErrorResponse(err)
-			_ = client.Send(protocol.ErrorEnvelope(code, message))
+			_ = client.Send(model.ErrorEnvelope(code, message))
 		}
 
-	case protocol.TypeRoomControl:
+	case model.TypeRoomControl:
 		if err := rooms.HandleControl(roomID, clientID, env); err != nil {
 			_, code, message := roomErrorResponse(err)
-			_ = client.Send(protocol.ErrorEnvelope(code, message))
+			_ = client.Send(model.ErrorEnvelope(code, message))
 		}
 
-	case protocol.TypeSignal:
+	case model.TypeSignal:
 		forwardSignal(hub, rooms, client, roomID, clientID, env)
 
-	case protocol.TypeMediaIndex:
+	case model.TypeMediaIndex:
 		if err := rooms.SetMediaIndex(roomID, clientID, env.MediaIndex); err != nil {
 			_, code, message := roomErrorResponse(err)
-			_ = client.Send(protocol.ErrorEnvelope(code, message))
+			_ = client.Send(model.ErrorEnvelope(code, message))
 		}
 
-	case protocol.TypeMetrics:
+	case model.TypeMetrics:
 		if env.Metrics == nil {
-			_ = client.Send(protocol.ErrorEnvelope(protocol.CodeBadRequest, "metrics 缺少 metrics 字段"))
+			_ = client.Send(model.ErrorEnvelope(model.CodeBadRequest, "metrics 缺少 metrics 字段"))
 			break
 		}
 		if err := rooms.UpdateMetrics(roomID, clientID, *env.Metrics); err != nil {
 			_, code, message := roomErrorResponse(err)
-			_ = client.Send(protocol.ErrorEnvelope(code, message))
+			_ = client.Send(model.ErrorEnvelope(code, message))
 		}
 
-	case protocol.TypeChunksReport:
+	case model.TypeChunksReport:
 		if err := rooms.SetChunkReport(roomID, clientID, env.Have, env.Complete); err != nil {
 			_, code, message := roomErrorResponse(err)
-			_ = client.Send(protocol.ErrorEnvelope(code, message))
+			_ = client.Send(model.ErrorEnvelope(code, message))
 		}
 
-	case protocol.TypeTopologyRequest:
+	case model.TypeTopologyRequest:
 		if err := rooms.SendTopology(roomID, clientID); err != nil {
 			_, code, message := roomErrorResponse(err)
-			_ = client.Send(protocol.ErrorEnvelope(code, message))
+			_ = client.Send(model.ErrorEnvelope(code, message))
 		}
 
-	case protocol.TypeLeave:
+	case model.TypeLeave:
 		rooms.Leave(roomID, clientID)
 
 	default:
-		_ = client.Send(protocol.ErrorEnvelope(protocol.CodeBadRequest, "未知消息类型: "+env.Type))
+		_ = client.Send(model.ErrorEnvelope(model.CodeBadRequest, "未知消息类型: "+env.Type))
 	}
 }
 
 // forwardSignal 把 SDP/ICE 原样转发给同房间的目标连接。
 // 两道校验：发送者必须是房间成员，目标也必须是同一房间成员 —— 防止跨房注入（SPEC §5.1）。
-func forwardSignal(hub *signal.Hub, rooms *room.Manager, client *signal.Client, roomID, clientID string, env protocol.Envelope) {
+func forwardSignal(hub *service.Hub, rooms *usecase.Manager, client *service.Client, roomID, clientID string, env model.Envelope) {
 	if env.To == "" || env.To == clientID {
-		_ = client.Send(protocol.ErrorEnvelope(protocol.CodeBadRequest, "signal 需要合法的 to"))
+		_ = client.Send(model.ErrorEnvelope(model.CodeBadRequest, "signal 需要合法的 to"))
 		return
 	}
 
 	r, ok := rooms.Get(roomID)
 	if !ok || !r.IsMember(clientID) {
-		_ = client.Send(protocol.ErrorEnvelope(protocol.CodeNotJoined, "尚未加入房间"))
+		_ = client.Send(model.ErrorEnvelope(model.CodeNotJoined, "尚未加入房间"))
 		return
 	}
 	if !r.IsMember(env.To) {
-		_ = client.Send(protocol.ErrorEnvelope(protocol.CodeCrossRoom, "目标不在同一房间"))
+		_ = client.Send(model.ErrorEnvelope(model.CodeCrossRoom, "目标不在同一房间"))
 		return
 	}
 
-	out := protocol.Envelope{
-		Type:    protocol.TypeSignal,
+	out := model.Envelope{
+		Type:    model.TypeSignal,
 		RoomID:  roomID,
 		From:    clientID,
 		To:      env.To,
 		Payload: env.Payload,
 	}
-	if err := hub.SendTo(env.To, protocol.MustEnvelope(out)); err != nil {
-		_ = client.Send(protocol.ErrorEnvelope(protocol.CodeInternalError, "目标已离线"))
+	if err := hub.SendTo(env.To, model.MustEnvelope(out)); err != nil {
+		_ = client.Send(model.ErrorEnvelope(model.CodeInternalError, "目标已离线"))
 	}
 }

@@ -1,4 +1,4 @@
-package httpapi
+package handler
 
 import (
 	"bytes"
@@ -14,15 +14,14 @@ import (
 	"github.com/coder/websocket"
 
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/media"
-	"ProjectionRoom/internal/protocol"
-	"ProjectionRoom/internal/room"
-	"ProjectionRoom/internal/signal"
+	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/usecase"
 )
 
 // sampleIndex 是 M2 用的自洽索引，覆盖索引发布与容量计算两条链路。
-func sampleIndex(bitrateBps int64) media.Index {
-	return media.Index{
+func sampleIndex(bitrateBps int64) model.Index {
+	return model.Index{
 		Version:       1,
 		InitFile:      "init.mp4",
 		MimeType:      `video/mp4; codecs="avc1.64001f,mp4a.40.2"`,
@@ -30,7 +29,7 @@ func sampleIndex(bitrateBps int64) media.Index {
 		SegmentSec:    2,
 		BitrateBps:    bitrateBps,
 		TotalBytes:    bitrateBps / 2,
-		Segments: []media.Segment{
+		Segments: []model.Segment{
 			{Index: 1, File: "c00001.m4s", Size: 1000, Duration: 2, StartPTS: 0, Keyframe: true},
 			{Index: 2, File: "c00002.m4s", Size: 1000, Duration: 2, StartPTS: 2, Keyframe: true},
 		},
@@ -39,16 +38,16 @@ func sampleIndex(bitrateBps int64) media.Index {
 
 const testTimeout = 5 * time.Second
 
-// newTestServer 起一个真实的 gin + WebSocket 服务，走完整链路（REST → Hub → room.Manager）。
+// newTestServer 起一个真实的 gin + WebSocket 服务，走完整链路（REST → Hub → usecase.Manager）。
 func newTestServer(t *testing.T) (*httptest.Server, *config.Config) {
 	t.Helper()
 
 	cfg := config.Default()
-	hub, cleanup, err := signal.NewHub(cfg)
+	hub, cleanup, err := service.NewHub(cfg)
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := room.NewManager(cfg, hub)
+	rooms := usecase.NewManager(cfg, hub)
 
 	srv := httptest.NewServer(NewRouter(cfg, hub, rooms))
 	t.Cleanup(func() {
@@ -116,10 +115,10 @@ func dial(t *testing.T, srv *httptest.Server, roomID, clientID string) *wsClient
 	return &wsClient{t: t, conn: conn}
 }
 
-func (c *wsClient) send(env protocol.Envelope) {
+func (c *wsClient) send(env model.Envelope) {
 	c.t.Helper()
 
-	payload, err := protocol.Marshal(&env)
+	payload, err := model.Marshal(&env)
 	if err != nil {
 		c.t.Fatalf("编码 protobuf 消息失败: %v", err)
 	}
@@ -132,7 +131,7 @@ func (c *wsClient) send(env protocol.Envelope) {
 }
 
 // readUntil 读出第一条指定类型的消息，跳过其它类型；超时或断连即失败。
-func (c *wsClient) readUntil(types ...string) protocol.Envelope {
+func (c *wsClient) readUntil(types ...string) model.Envelope {
 	c.t.Helper()
 
 	deadline := time.Now().Add(testTimeout)
@@ -147,7 +146,7 @@ func (c *wsClient) readUntil(types ...string) protocol.Envelope {
 			continue
 		}
 
-		env, err := protocol.Unmarshal(data)
+		env, err := model.Unmarshal(data)
 		if err != nil {
 			c.t.Fatalf("解析 protobuf 消息失败: %v", err)
 		}
@@ -159,13 +158,13 @@ func (c *wsClient) readUntil(types ...string) protocol.Envelope {
 	}
 
 	c.t.Fatalf("等待消息超时: %v", types)
-	return protocol.Envelope{}
+	return model.Envelope{}
 }
 
 func (c *wsClient) join(displayName, role, password string) {
 	c.t.Helper()
-	c.send(protocol.Envelope{
-		Type:        protocol.TypeJoin,
+	c.send(model.Envelope{
+		Type:        model.TypeJoin,
 		DisplayName: displayName,
 		Role:        role,
 		Password:    password,
@@ -179,9 +178,9 @@ func TestCreateRoomAPI(t *testing.T) {
 	defer resp.Body.Close()
 
 	var body struct {
-		RoomID     string            `json:"roomId"`
-		Capacity   protocol.Capacity `json:"capacity"`
-		ICEServers []map[string]any  `json:"iceServers"`
+		RoomID     string           `json:"roomId"`
+		Capacity   model.Capacity   `json:"capacity"`
+		ICEServers []map[string]any `json:"iceServers"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("解析响应失败: %v", err)
@@ -189,7 +188,7 @@ func TestCreateRoomAPI(t *testing.T) {
 	if len(body.RoomID) != 6 {
 		t.Fatalf("房间码应为 6 位，实际 %q", body.RoomID)
 	}
-	if body.Capacity.Mode != protocol.ModePending {
+	if body.Capacity.Mode != model.ModePending {
 		t.Fatalf("M1 阶段容量模式应为 pending，实际 %q", body.Capacity.Mode)
 	}
 	if len(body.ICEServers) == 0 {
@@ -234,8 +233,8 @@ func TestRoomChatControlAndLeave(t *testing.T) {
 	roomID := createRoom(t, srv.URL, "pw")
 
 	host := dial(t, srv, roomID, "host-1")
-	host.join("主播", protocol.RoleHost, "pw")
-	hostJoined := host.readUntil(protocol.TypeJoined)
+	host.join("主播", model.RoleHost, "pw")
+	hostJoined := host.readUntil(model.TypeJoined)
 	if hostJoined.SelfID != "host-1" || hostJoined.HostID != "host-1" {
 		t.Fatalf("主播入房快照不正确: %+v", hostJoined)
 	}
@@ -244,53 +243,53 @@ func TestRoomChatControlAndLeave(t *testing.T) {
 	}
 
 	viewer := dial(t, srv, roomID, "viewer-1")
-	viewer.join("观众", protocol.RoleViewer, "wrong")
-	if errEnv := viewer.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeBadPassword {
+	viewer.join("观众", model.RoleViewer, "wrong")
+	if errEnv := viewer.readUntil(model.TypeError); errEnv.Code != model.CodeBadPassword {
 		t.Fatalf("密码错误应返回 BAD_PASSWORD，实际 %q", errEnv.Code)
 	}
 
-	viewer.join("观众", protocol.RoleViewer, "pw")
-	viewerJoined := viewer.readUntil(protocol.TypeJoined)
+	viewer.join("观众", model.RoleViewer, "pw")
+	viewerJoined := viewer.readUntil(model.TypeJoined)
 	if len(viewerJoined.Members) != 2 {
 		t.Fatalf("观众入房时应看到 2 人: %+v", viewerJoined.Members)
 	}
 
-	memberJoined := host.readUntil(protocol.TypeMemberJoined)
+	memberJoined := host.readUntil(model.TypeMemberJoined)
 	if memberJoined.Member == nil || memberJoined.Member.ID != "viewer-1" || memberJoined.Member.Depth != 1 {
 		t.Fatalf("主播应收到 member-joined: %+v", memberJoined)
 	}
 
 	// 聊天由服务端定序：发送者自己也会收到这条广播。
-	viewer.send(protocol.Envelope{Type: protocol.TypeChat, Text: "一起看"})
-	if chat := host.readUntil(protocol.TypeChat); chat.Text != "一起看" || chat.From != "viewer-1" || chat.DisplayName != "观众" {
+	viewer.send(model.Envelope{Type: model.TypeChat, Text: "一起看"})
+	if chat := host.readUntil(model.TypeChat); chat.Text != "一起看" || chat.From != "viewer-1" || chat.DisplayName != "观众" {
 		t.Fatalf("主播收到的聊天不正确: %+v", chat)
 	}
-	if chat := viewer.readUntil(protocol.TypeChat); chat.From != "viewer-1" {
+	if chat := viewer.readUntil(model.TypeChat); chat.From != "viewer-1" {
 		t.Fatalf("发送者应收到服务端定序后的同一条消息: %+v", chat)
 	}
 
 	// 观众不能控制播放。
-	viewer.send(protocol.Envelope{Type: protocol.TypeRoomControl, Action: protocol.ActionPlay, CurrentTime: 5})
-	if errEnv := viewer.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeNotHost {
+	viewer.send(model.Envelope{Type: model.TypeRoomControl, Action: model.ActionPlay, CurrentTime: 5})
+	if errEnv := viewer.readUntil(model.TypeError); errEnv.Code != model.CodeNotHost {
 		t.Fatalf("观众控制应返回 NOT_HOST，实际 %q", errEnv.Code)
 	}
 
 	// 主播可以控制，且服务端加盖单调 seq。
-	host.send(protocol.Envelope{
-		Type:        protocol.TypeRoomControl,
-		Action:      protocol.ActionPlay,
+	host.send(model.Envelope{
+		Type:        model.TypeRoomControl,
+		Action:      model.ActionPlay,
 		CurrentTime: 5,
 		Rate:        1,
 	})
-	control := viewer.readUntil(protocol.TypeRoomControl)
+	control := viewer.readUntil(model.TypeRoomControl)
 	if control.Playback == nil || control.Playback.Seq != 1 || control.Playback.CurrentTime != 5 || control.Playback.Paused {
 		t.Fatalf("room-control 播放状态不正确: %+v", control.Playback)
 	}
 
 	// 迟到的人必须立刻对齐到当前播放位置（SPEC §7.1）。
 	late := dial(t, srv, roomID, "viewer-2")
-	late.join("迟到观众", protocol.RoleViewer, "pw")
-	lateJoined := late.readUntil(protocol.TypeJoined)
+	late.join("迟到观众", model.RoleViewer, "pw")
+	lateJoined := late.readUntil(model.TypeJoined)
 	if lateJoined.Playback == nil || lateJoined.Playback.Seq != 1 || lateJoined.Playback.CurrentTime != 5 {
 		t.Fatalf("入房快照应携带最新播放状态: %+v", lateJoined.Playback)
 	}
@@ -298,31 +297,31 @@ func TestRoomChatControlAndLeave(t *testing.T) {
 	// 跨房信令必须被拒（防止 A 房间连接给 B 房间的人发信令）。
 	otherRoom := createRoom(t, srv.URL, "")
 	otherHost := dial(t, srv, otherRoom, "other-host")
-	otherHost.join("别的主播", protocol.RoleHost, "")
-	otherHost.readUntil(protocol.TypeJoined)
-	otherHost.send(protocol.Envelope{
-		Type:    protocol.TypeSignal,
+	otherHost.join("别的主播", model.RoleHost, "")
+	otherHost.readUntil(model.TypeJoined)
+	otherHost.send(model.Envelope{
+		Type:    model.TypeSignal,
 		To:      "viewer-1",
 		Payload: json.RawMessage(`{"sdp":"x"}`),
 	})
-	if errEnv := otherHost.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeCrossRoom {
+	if errEnv := otherHost.readUntil(model.TypeError); errEnv.Code != model.CodeCrossRoom {
 		t.Fatalf("跨房信令应返回 CROSS_ROOM_SIGNAL，实际 %q", errEnv.Code)
 	}
 
 	// 同房信令可以透传，且带上来源。
-	viewer.send(protocol.Envelope{
-		Type:    protocol.TypeSignal,
+	viewer.send(model.Envelope{
+		Type:    model.TypeSignal,
 		To:      "host-1",
 		Payload: json.RawMessage(`{"type":"offer","sdp":"v=0"}`),
 	})
-	forwarded := host.readUntil(protocol.TypeSignal)
+	forwarded := host.readUntil(model.TypeSignal)
 	if forwarded.From != "viewer-1" || !bytes.Contains(forwarded.Payload, []byte("v=0")) {
 		t.Fatalf("信令透传不正确: %+v", forwarded)
 	}
 
 	// 观众主动离开：其他人收到 member-left。
-	late.send(protocol.Envelope{Type: protocol.TypeLeave})
-	if left := viewer.readUntil(protocol.TypeMemberLeft); left.ClientID != "viewer-2" {
+	late.send(model.Envelope{Type: model.TypeLeave})
+	if left := viewer.readUntil(model.TypeMemberLeft); left.ClientID != "viewer-2" {
 		t.Fatalf("应广播 member-left: %+v", left)
 	}
 
@@ -330,7 +329,7 @@ func TestRoomChatControlAndLeave(t *testing.T) {
 	if err := host.conn.Close(websocket.StatusNormalClosure, "host left"); err != nil {
 		t.Fatalf("关闭主播连接失败: %v", err)
 	}
-	if closed := viewer.readUntil(protocol.TypeRoomClosed); closed.Code != protocol.CodeRoomClosed {
+	if closed := viewer.readUntil(model.TypeRoomClosed); closed.Code != model.CodeRoomClosed {
 		t.Fatalf("主播离开应广播 room-closed: %+v", closed)
 	}
 }
@@ -340,8 +339,8 @@ func TestJoinViewerBeforeHostIsRejected(t *testing.T) {
 	roomID := createRoom(t, srv.URL, "")
 
 	viewer := dial(t, srv, roomID, "early-bird")
-	viewer.join("抢跑观众", protocol.RoleViewer, "")
-	if errEnv := viewer.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeRoomNotReady {
+	viewer.join("抢跑观众", model.RoleViewer, "")
+	if errEnv := viewer.readUntil(model.TypeError); errEnv.Code != model.CodeRoomNotReady {
 		t.Fatalf("主播未到时观众进房应返回 ROOM_NOT_READY，实际 %q", errEnv.Code)
 	}
 }
@@ -350,8 +349,8 @@ func TestJoinUnknownRoomIsRejected(t *testing.T) {
 	srv, _ := newTestServer(t)
 
 	client := dial(t, srv, "NOSUCH", "lost")
-	client.join("迷路观众", protocol.RoleViewer, "")
-	if errEnv := client.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeRoomNotFound {
+	client.join("迷路观众", model.RoleViewer, "")
+	if errEnv := client.readUntil(model.TypeError); errEnv.Code != model.CodeRoomNotFound {
 		t.Fatalf("不存在的房间应返回 ROOM_NOT_FOUND，实际 %q", errEnv.Code)
 	}
 }
@@ -361,8 +360,8 @@ func TestDuplicateClientIDIsRejected(t *testing.T) {
 	roomID := createRoom(t, srv.URL, "")
 
 	first := dial(t, srv, roomID, "dup-id")
-	first.join("第一个", protocol.RoleHost, "")
-	first.readUntil(protocol.TypeJoined)
+	first.join("第一个", model.RoleHost, "")
+	first.readUntil(model.TypeJoined)
 
 	second := dial(t, srv, roomID, "dup-id")
 
@@ -411,18 +410,18 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 	roomID := createRoom(t, srv.URL, "")
 
 	host := dial(t, srv, roomID, "host-1")
-	host.join("主播", protocol.RoleHost, "")
-	host.readUntil(protocol.TypeJoined)
+	host.join("主播", model.RoleHost, "")
+	host.readUntil(model.TypeJoined)
 
 	viewer := dial(t, srv, roomID, "viewer-1")
-	viewer.join("观众", protocol.RoleViewer, "")
-	viewer.readUntil(protocol.TypeJoined)
+	viewer.join("观众", model.RoleViewer, "")
+	viewer.readUntil(model.TypeJoined)
 
 	index := sampleIndex(2_000_000)
 
-	host.send(protocol.Envelope{Type: protocol.TypeMediaIndex, MediaIndex: &index})
+	host.send(model.Envelope{Type: model.TypeMediaIndex, MediaIndex: &index})
 
-	forwarded := viewer.readUntil(protocol.TypeMediaIndex)
+	forwarded := viewer.readUntil(model.TypeMediaIndex)
 	if forwarded.MediaIndex == nil || len(forwarded.MediaIndex.Segments) != 2 {
 		t.Fatalf("观众必须拿到完整分片索引，实际 %+v", forwarded.MediaIndex)
 	}
@@ -431,8 +430,8 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 	}
 
 	// 索引发布时还没有实测上行：容量必须报 pending，而不是编一个数字。
-	pending := viewer.readUntil(protocol.TypeCapacity)
-	if pending.Capacity == nil || pending.Capacity.Mode != protocol.ModePending {
+	pending := viewer.readUntil(model.TypeCapacity)
+	if pending.Capacity == nil || pending.Capacity.Mode != model.ModePending {
 		t.Fatalf("未实测上行的容量应为 pending: %+v", pending.Capacity)
 	}
 	if pending.Capacity.StreamBps != 2_000_000 {
@@ -440,23 +439,23 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 	}
 
 	// 观众无权发布索引。
-	viewer.send(protocol.Envelope{Type: protocol.TypeMediaIndex, MediaIndex: &index})
-	if errEnv := viewer.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeNotHost {
+	viewer.send(model.Envelope{Type: model.TypeMediaIndex, MediaIndex: &index})
+	if errEnv := viewer.readUntil(model.TypeError); errEnv.Code != model.CodeNotHost {
 		t.Fatalf("观众发布索引应返回 NOT_HOST，实际 %q", errEnv.Code)
 	}
 
 	// metrics 缺字段要明确报错，而不是静默忽略。
-	viewer.send(protocol.Envelope{Type: protocol.TypeMetrics})
-	if errEnv := viewer.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeBadRequest {
+	viewer.send(model.Envelope{Type: model.TypeMetrics})
+	if errEnv := viewer.readUntil(model.TypeError); errEnv.Code != model.CodeBadRequest {
 		t.Fatalf("缺少 metrics 字段应返回 BAD_REQUEST，实际 %q", errEnv.Code)
 	}
 
 	// 主播上报 12 Mbps 上行、码率 2 Mbps → K0 = 4 → 扇出模式。
-	host.send(protocol.Envelope{
-		Type:    protocol.TypeMetrics,
-		Metrics: &protocol.Metrics{UploadCapacityBps: 12_000_000, RTTMs: 15},
+	host.send(model.Envelope{
+		Type:    model.TypeMetrics,
+		Metrics: &model.Metrics{UploadCapacityBps: 12_000_000, RTTMs: 15},
 	})
-	measured := viewer.readUntil(protocol.TypeCapacity)
+	measured := viewer.readUntil(model.TypeCapacity)
 	if measured.Capacity == nil {
 		t.Fatal("实测上行变化后必须广播容量")
 	}
@@ -468,24 +467,24 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 	}
 
 	// 上行降到 4 Mbps → K0 = 1 → 上限 2 人；房间已有 2 人，新观众必须被拒。
-	host.send(protocol.Envelope{
-		Type:    protocol.TypeMetrics,
-		Metrics: &protocol.Metrics{UploadCapacityBps: 4_000_000, RTTMs: 18},
+	host.send(model.Envelope{
+		Type:    model.TypeMetrics,
+		Metrics: &model.Metrics{UploadCapacityBps: 4_000_000, RTTMs: 18},
 	})
-	degraded := viewer.readUntil(protocol.TypeCapacity)
+	degraded := viewer.readUntil(model.TypeCapacity)
 	if degraded.Capacity == nil || degraded.Capacity.HostChildSlots != 1 || degraded.Capacity.Mode != "chain" {
 		t.Fatalf("容量应降为 chain/K0=1，实际 %+v", degraded.Capacity)
 	}
 
 	extra := dial(t, srv, roomID, "viewer-2")
-	extra.join("挤不进来的人", protocol.RoleViewer, "")
-	if errEnv := extra.readUntil(protocol.TypeError); errEnv.Code != protocol.CodeRoomFull {
+	extra.join("挤不进来的人", model.RoleViewer, "")
+	if errEnv := extra.readUntil(model.TypeError); errEnv.Code != model.CodeRoomFull {
 		t.Fatalf("超出 1+K0 应返回 ROOM_FULL，实际 %q", errEnv.Code)
 	}
 
 	// 已经在房里的人不受影响：容量收缩只拦新加入，不踢人（用一次聊天往返证明连接还活着）。
-	viewer.send(protocol.Envelope{Type: protocol.TypeChat, Text: "我还在"})
-	if chat := viewer.readUntil(protocol.TypeChat); chat.Text != "我还在" {
+	viewer.send(model.Envelope{Type: model.TypeChat, Text: "我还在"})
+	if chat := viewer.readUntil(model.TypeChat); chat.Text != "我还在" {
 		t.Fatalf("容量收缩不应影响既有成员: %+v", chat)
 	}
 }

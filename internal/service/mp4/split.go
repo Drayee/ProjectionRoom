@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"ProjectionRoom/internal/media"
+	"ProjectionRoom/internal/model"
 )
 
 // IndexVersion 是 index.json 的格式版本。
@@ -51,7 +51,7 @@ type byteRange struct {
 // 切分规则：init 段 = 第一个 moof 之前的全部字节（ftyp+moov）；
 // 每个分片 = 一个 moof 到下一个 moof 之前；最后一段延伸到文件末尾（含 mfra 等尾部 box）。
 // 这条规则保证 init + 全部分片按序拼接后与原文件逐字节相同。
-func SplitFile(inPath string, opts SplitOptions) (*media.Index, error) {
+func SplitFile(inPath string, opts SplitOptions) (*model.Index, error) {
 	opts.applyDefaults()
 
 	f, err := os.Open(inPath)
@@ -109,7 +109,7 @@ func SplitFile(inPath string, opts SplitOptions) (*media.Index, error) {
 		return nil, fmt.Errorf("mp4: 创建输出目录失败: %w", err)
 	}
 
-	index := &media.Index{
+	index := &model.Index{
 		Version:    IndexVersion,
 		InitFile:   opts.InitName,
 		MimeType:   movie.MimeType,
@@ -137,7 +137,7 @@ func SplitFile(inPath string, opts SplitOptions) (*media.Index, error) {
 			return nil, err
 		}
 
-		index.Segments = append(index.Segments, media.Segment{
+		index.Segments = append(index.Segments, model.Segment{
 			Index:    i + 1,
 			File:     name,
 			Offset:   r.start,
@@ -382,7 +382,7 @@ func parseTraf(payload []byte) (trafInfo, error) {
 	return info, nil
 }
 
-func fillDurations(index *media.Index, movieDuration float64) {
+func fillDurations(index *model.Index, movieDuration float64) {
 	n := len(index.Segments)
 	for i := range index.Segments {
 		if index.Segments[i].Duration > 0 {

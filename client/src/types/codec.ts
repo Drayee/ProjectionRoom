@@ -1,4 +1,4 @@
-// 线上 protobuf 与进程内可读结构之间的唯一转换点（与 Go 侧 internal/protocol/pb.go 对称）。
+// 线上 protobuf 与进程内可读结构之间的唯一转换点（与 Go 侧 internal/model/pb_convert.go 对称）。
 //
 // 为什么不让业务代码直接用生成的结构体：pb 的 int64 在 TS 里是 bigint，
 // 而同步环、聊天时间戳、索引计算都习惯普通数值；把差异收在这里，

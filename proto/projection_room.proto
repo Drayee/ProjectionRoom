@@ -12,7 +12,7 @@ package projection_room.v1;
 
 option go_package = "ProjectionRoom/internal/pb;pb";
 
-// MediaSegment 是一个媒体分片（与 internal/media.Segment 一一对应）。
+// MediaSegment 是一个媒体分片（与 internal/model.Segment 一一对应）。
 message MediaSegment {
   int32 index = 1;      // 从 1 开始；0 保留给 init 段
   string file = 2;

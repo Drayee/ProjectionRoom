@@ -1,5 +1,5 @@
-// Package httpapi 暴露 gin 路由：健康检查、房间管理与 WebSocket 信令端点。
-package httpapi
+// Package handler 暴露 gin 路由：健康检查、房间管理与 WebSocket 信令端点。
+package handler
 
 import (
 	"net/http"
@@ -8,13 +8,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/room"
-	"ProjectionRoom/internal/signal"
+	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/usecase"
 )
 
 // NewRouter 组装 HTTP 路由。
 // 返回 *gin.Engine 让 wire 能直接把它注入 main 的 http.Server。
-func NewRouter(cfg *config.Config, hub *signal.Hub, rooms *room.Manager) *gin.Engine {
+func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
@@ -44,7 +44,7 @@ type createRoomRequest struct {
 	StreamBps int64  `json:"streamBps"`
 }
 
-func createRoomHandler(cfg *config.Config, rooms *room.Manager) gin.HandlerFunc {
+func createRoomHandler(cfg *config.Config, rooms *usecase.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req createRoomRequest
 		// 允许空 body：等价于"自动生成房间码、无密码、用默认码率估计"。
@@ -70,7 +70,7 @@ func createRoomHandler(cfg *config.Config, rooms *room.Manager) gin.HandlerFunc 
 	}
 }
 
-func roomInfoHandler(cfg *config.Config, rooms *room.Manager) gin.HandlerFunc {
+func roomInfoHandler(cfg *config.Config, rooms *usecase.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		r, ok := rooms.Get(strings.ToUpper(strings.TrimSpace(c.Param("roomId"))))
 		if !ok {

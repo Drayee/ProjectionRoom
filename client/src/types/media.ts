@@ -1,4 +1,4 @@
-// 与 Go 端 internal/media/index.go 一一对应的分片索引模型（SPEC §4.3）。
+// 与 Go 端 internal/model/index.go 一一对应的分片索引模型（SPEC §4.3）。
 // 这份数据由 cmd/segmenter 生成，主播发布后经服务端校验并广播给全房。
 
 export interface MediaSegment {
