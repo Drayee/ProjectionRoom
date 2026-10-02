@@ -1,6 +1,7 @@
 package segment
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -329,6 +330,19 @@ func (q *Queue) Submit(filename string, src io.Reader, declaredSize int64) (*Vie
 	if declaredSize > q.cfg.MaxSourceBytes {
 		return nil, fmt.Errorf("%w（上限 %s）", ErrSourceTooLarge, HumanBytes(q.cfg.MaxSourceBytes))
 	}
+
+	// 先探一个字节再排队：空上传是**客户端**错误，与服务器装没装 ffmpeg 无关。
+	// 这一步必须排在"缺 ffmpeg 就直接失败"之前 —— 否则没有 ffmpeg 的机器上，
+	// 空文件会拿到 202 + 一个失败的作业，而不是 422（在容器里跑 -race 时暴露的）。
+	head := make([]byte, 1)
+	n, readErr := io.ReadFull(src, head)
+	if n == 0 {
+		return nil, ErrSourceEmpty
+	}
+	if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		return nil, fmt.Errorf("segment: 读取上传失败: %w", readErr)
+	}
+	src = io.MultiReader(bytes.NewReader(head[:n]), src)
 
 	job, err := q.reserve()
 	if err != nil {
