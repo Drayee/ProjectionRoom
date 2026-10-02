@@ -155,6 +155,17 @@ export const useRoomStore = defineStore('room', () => {
   const lagNotice = ref('')
   let lastLagJumpAt = 0
 
+  /**
+   * 逐跳中继的取证计数（调试与验收用）。
+   *
+   * forwarded：我作为中继转发出去的进度条数；
+   * relayed：我收到的进度里带中继戳（parentClockMs > 0）的条数；
+   * direct：不带中继戳的条数（主播直发或服务端转发）；
+   * nonPrimary：来自非主父而被丢弃的条数。
+   * 这几个数能一眼区分"中继没转发"和"转发了但字段没生效"。
+   */
+  const relayStats = { forwarded: 0, relayed: 0, direct: 0, nonPrimary: 0 }
+
   /** 计时纪元：主播页面每次加载生成一个，随进度下发（C13）。 */
   const clockEpoch = ref(newClockEpoch())
 
@@ -255,6 +266,8 @@ export const useRoomStore = defineStore('room', () => {
     pendingFor: (peerId) => requester.pendingFor(peerId),
     onPrimaryChanged: () => {
       resetFetchState()
+      // 换父之后本跳时钟样本作废：它们是相对旧父节点时钟测的（见 useSyncClock.resetHop）。
+      clock.resetHop()
       broadcastHaveState()
       // 卡顿/换路之后（SPEC §7.5）：新父节点上的缓冲可能已经断档，
       // 因此只要当前处于不健康状态，就按"连续 n 片"重新开闸，而不是拿残缓冲继续播。
@@ -399,10 +412,16 @@ export const useRoomStore = defineStore('room', () => {
     }
     if (msg.t === 'progress' || msg.t === 'time-sync') {
       if (isHost.value) return
-      // 只有主父的进度是权威的：备用父也会转发同一份进度，混用会让时钟来回跳。
-      const fromPrimary = peerId === topology.primaryId.value
+      // 只有主父的进度是权威的：备用父、以及**换防前遗留的直连**都会送来同一份进度，
+      // 混着用会让偏移估计在两套基准之间来回跳。
+      // 实测：链式拓扑收敛后，主播与深度 2 节点之间的旧直连仍在，节点收到的是
+      // "主播直发（parentOffsetMs=0，偏移按整条路径算）"与"中继转发（按一跳算）"
+      // 两套样本，最终偏移退回路径口径 —— 这正是 P1 要修掉的偏差。
+      // primaryId 还没下发时先接受（入房引导期），否则时钟永远收敛不了。
+      const primary = topology.primaryId.value
+      const authoritative = primary === '' || peerId === primary
       let accepted = false
-      if (typeof msg.currentTime === 'number' && typeof msg.hostClockMs === 'number') {
+      if (authoritative && typeof msg.currentTime === 'number' && typeof msg.hostClockMs === 'number') {
         accepted = clock.onProgress({
           currentTime: msg.currentTime,
           hostClockMs: msg.hostClockMs,
@@ -413,11 +432,21 @@ export const useRoomStore = defineStore('room', () => {
           rate: msg.rate ?? 1,
           seq: msg.seq ?? 0,
         })
-        if (accepted) void applyPlayback(clock.playback.value)
+        if (accepted) {
+          if (msg.parentClockMs && msg.parentClockMs > 0) {
+            relayStats.relayed += 1
+          } else {
+            relayStats.direct += 1
+          }
+          void applyPlayback(clock.playback.value)
+        }
+      }
+      if (!authoritative) {
+        relayStats.nonPrimary += 1
       }
       // 中继职责：只把主父来的、刚被接受的样本往下传，并且带上**更新后**的偏移估计，
       // 这样子节点拿到的是"这一跳之后"的时钟锚点（顺序颠倒会让子节点永远慢一个样本）。
-      if (fromPrimary && accepted) forwardToChildren(msg)
+      if (authoritative && accepted) forwardToChildren(msg)
     }
   }
 
@@ -508,6 +537,7 @@ export const useRoomStore = defineStore('room', () => {
       parentClockMs: Math.round(performance.now()),
       parentOffsetMs: Math.round(clock.offsetMs.value),
     }
+    relayStats.forwarded += 1
     for (const childId of topology.children.value) {
       rtc.send(childId, encodeControl(relayed))
     }
@@ -1297,6 +1327,8 @@ export const useRoomStore = defineStore('room', () => {
     lagNotice,
     hopOffsetMs: clock.hopOffsetMs,
     parentOffsetMs: clock.parentOffsetMs,
+    // 必须是函数：普通对象只在创建时求值一次，验收会永远读到 0。
+    relayStats: () => ({ ...relayStats }),
     playerDebugState: () => player.debugState(),
     lifecycle: storeLifecycle,
     topologyAssignment: topology.assignment,

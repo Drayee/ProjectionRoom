@@ -101,12 +101,26 @@ export function useSyncClock() {
 
   function resetEpoch(next: string) {
     epoch.value = next
-    samples.length = 0
+    resetHop()
     offsetMs.value = 0
-    hopOffsetMs.value = 0
     parentOffsetMs.value = 0
-    ready.value = false
     lastSeq = -1
+  }
+
+  /**
+   * 父节点换了：本跳样本全部作废。
+   *
+   * 本跳样本是相对**某一个父节点**的时钟测出来的，换父之后它们不再可比 ——
+   * 最小值滤波会把"对旧父节点测得的最小值"一直留着，于是总偏移恒定偏掉
+   * 两个父节点时钟原点之差（实测链式树里每层 ~1.1s）。
+   * 清空的同时把 ready 置 false：在新父节点的第一条进度到达前，
+   * 偏移估计不可信，宁可不矫正也不要按错的锚点跳。
+   */
+  function resetHop() {
+    samples.length = 0
+    hopOffsetMs.value = 0
+    lastMinDropAt = 0
+    ready.value = false
   }
 
   /** 收到一条权威进度。返回 false 表示被丢弃（乱序/重复）。 */
@@ -239,5 +253,6 @@ export function useSyncClock() {
     expectedAt,
     correction,
     setPaused,
+    resetHop,
   }
 }

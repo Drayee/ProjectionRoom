@@ -130,24 +130,29 @@ progress { currentTime, hostClockMs, clockEpoch, seq, paused, rate }
 ```
 
 - `hostClockMs` 是**主播的单调时钟读数**，逐跳原样转发，任何中继都不得改写（I2）。
+- `parentClockMs` / `parentOffsetMs` 由**中继自己改写**：前者是它发出这条进度时的本地时钟，
+  后者是它当时"我到主播"的偏移估计。主播直接发时 `parentClockMs = hostClockMs`、`parentOffsetMs = 0`；
+  经服务端转发的 room-control 没有这两个字段（读到 0），接收方退回按 `hostClockMs` 计算。
 - `clockEpoch` 是主播页面的随机纪元：主播一刷新页面 `performance.now()` 归零，
   观众必须**丢弃并重置滤波**，否则全房间一起跳到错误位置。
 - `seq` 单调递增：乱序/重复的进度一律丢弃。
 
-观众用**最小滤波**估计"我与主播时钟的偏移"：
+观众用**最小滤波**估计"我与父节点时钟的偏移"，再与父节点上报的偏移**两级相加**：
 
 ```
-每个样本  sample = localNow - hostClockMs     // 含正向延迟，恒 ≥ 真实偏移
-offset = min(窗口内最近 30 个样本)             // 延迟最小的那次最接近真值
-expected = playback.currentTime + (localNow - offset - hostClockMs) / 1000
+本跳样本  hop     = localNow - parentClockMs        // 只含这一跳的正向延迟
+hopOffset = min(窗口内最近 30 个样本)
+offset    = parentOffsetMs + hopOffset             // 我到主播
+expected  = playback.currentTime + (localNow - offset - hostClockMs) / 1000
 ```
 
-**已知偏差（重要）**：最小滤波的估计误差 = 路径上观测到的**最小单向延迟**，
-因此观众会稳定地比主播滞后这么多。直连时只有几毫秒；多一跳就多一份转发延迟，
+**为什么必须逐跳（已落地的 P1 修复）**：如果让每个节点都直接对 `hostClockMs` 取最小滤波，
+估计误差就等于"整条路径上观测到的最小单向延迟" —— 多一跳就多累加一份转发延迟，
 实测深度 2 的叶子稳定滞后约 **350ms**（p95 327ms）。
-正解是**逐跳时钟中继**：每个中继在转发的消息里带上"自己的本地时钟 + 自己到主播的偏移"，
-子节点据此把"到父的偏移"与"父到主播的偏移"相加，误差从"整条路径的单向延迟"
-降到"各跳半 RTT 之和"。这是下一步要落地的改动（见 §4）。
+逐跳中继把误差从"整条路径"降到"各跳半 RTT 之和"：中继发出前用**自己**的时钟与偏移改写这两个字段，
+子节点只需要测"它到父"这一跳。
+中继只转发**主父来的、且刚被自己接受**的样本，并且先更新自己的估计再转发 ——
+顺序颠倒会让子节点永远慢一个样本。
 
 ### 2.2 三级漂移矫正
 

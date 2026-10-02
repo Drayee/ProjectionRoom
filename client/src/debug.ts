@@ -37,6 +37,8 @@ export interface DebugSnapshot {
     hopOffsetMs: number
     /** 逐跳中继：父节点上报的"它到主播"的偏移。 */
     parentOffsetMs: number
+    /** 逐跳中继取证：转发/收到带戳/收到不带戳/非主父 的条数。 */
+    relayStats: { forwarded: number; relayed: number; direct: number; nonPrimary: number }
     /** 落后主播的秒数（正数 = 落后）。 */
     lagSec: number
     lagNotice: string
@@ -137,6 +139,7 @@ export function installDebugHook(): void {
           offsetMs: Math.round(store.offsetMs),
           hopOffsetMs: Math.round(store.hopOffsetMs),
           parentOffsetMs: Math.round(store.parentOffsetMs),
+          relayStats: store.relayStats(),
           lagSec: Number(store.lagSec.toFixed(2)),
           lagNotice: store.lagNotice,
           bufferedAhead: Number(store.bufferedAhead.toFixed(2)),

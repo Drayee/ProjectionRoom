@@ -92,7 +92,7 @@ async function main() {
       await node.cdp.evaluate(
         `window.__samples = []; window.__sampler = setInterval(() => {
            const s = window.__pr.snapshot();
-           window.__samples.push({ t: performance.now(), ct: s.video.currentTime, drift: s.sync.driftMs, ready: s.video.readyState, be: s.video.bufferedEnd, paused: s.video.paused, depth: s.topology.depth, primary: s.topology.primaryId, children: s.topology.children.length, delivered: s.p2p.delivered, timedOut: s.p2p.timedOut });
+           window.__samples.push({ t: performance.now(), ct: s.video.currentTime, drift: s.sync.driftMs, ready: s.video.readyState, be: s.video.bufferedEnd, paused: s.video.paused, depth: s.topology.depth, primary: s.topology.primaryId, children: s.topology.children.length, delivered: s.p2p.delivered, timedOut: s.p2p.timedOut, mode: s.sync.mode, hop: s.sync.hopOffsetMs, parent: s.sync.parentOffsetMs, off: s.sync.offsetMs, gated: s.gate.gated, segs: s.gate.bufferedSegments, thr: s.gate.thresholdSegments, lag: s.sync.lagSec, notice: s.sync.lagNotice });
          }, 200); 'ok'`,
       )
       node.joinAt = await node.cdp.evaluate('performance.now()')
@@ -174,11 +174,31 @@ async function main() {
         .sort((a, b) => Math.abs(b.driftMs) - Math.abs(a.driftMs))
         .slice(0, 5)
 
+      // 逐跳中继验收数据：本跳偏移、父节点偏移、两级相加的总偏移。
+      const relay = {
+        hopMs: snapshot.sync.hopOffsetMs,
+        parentMs: snapshot.sync.parentOffsetMs,
+        offsetMs: snapshot.sync.offsetMs,
+        stats: snapshot.sync.relayStats,
+        // 两级相加必须自洽：否则说明某条路径上的字段没有被正确改写/读取。
+        sumOk: Math.abs(snapshot.sync.offsetMs - (snapshot.sync.hopOffsetMs + snapshot.sync.parentOffsetMs)) <= 2,
+        maxLagSec: samples.length ? Math.max(...samples.map((s) => s.lag ?? 0)) : 0,
+        lagNoticeSeen: samples.some((s) => (s.notice ?? '') !== ''),
+      }
+
+      // 开闸瞬间的连续分片数：门控判据是否真的按"主播时间戳所在分片 + n 片"生效。
+      const firstOpen = samples.find((s) => s.gated === false && (s.thr ?? 0) > 0)
+      const gateOpen = firstOpen
+        ? { thresholdSegments: firstOpen.thr, bufferedSegments: firstOpen.segs, atSec: Number(((firstOpen.t - (samples[0]?.t ?? firstOpen.t)) / 1000).toFixed(1)) }
+        : null
+
       perNode.push({
         worst,
         label: node.label,
         index: i,
         isHost: i === 0,
+        relay,
+        gateOpen,
         topology: snapshot.topology,
         capacityMode: snapshot.room.capacityMode,
         hostChildSlots: snapshot.room.hostChildSlots,
@@ -252,6 +272,36 @@ async function main() {
       ? perNode.every((n) => n.topology.mode === 'chain') && hostChildren.length === 1
       : true
 
+    // 逐跳中继验收（ALGORITHM P1）：偏移必须"两级相加自洽"，
+    // 且多跳节点的本跳偏移只是一跳的排队延迟（不该再看到整条路径累加的几百毫秒）。
+    const relayChecks = perNode
+      .filter((n) => !n.isHost)
+      .map((n) => ({
+        label: n.label,
+        depth: n.topology.depth,
+        hopMs: n.relay.hopMs,
+        parentMs: n.relay.parentMs,
+        offsetMs: n.relay.offsetMs,
+        stats: n.relay.stats,
+        sumOk: n.relay.sumOk,
+        // 深度 ≥2 的节点必须真的收到"带中继戳"的进度：否则说明中继没转发，
+        // 偏移仍然按整条路径累加（这正是 P1 要修的那个偏差）。
+        relayedOk: n.topology.depth < 2 || (n.relay.stats?.relayed ?? 0) > 0,
+        driftP95Ms: n.drift.p95Ms,
+      }))
+    const relayOk = relayChecks.every((c) => c.sumOk && c.relayedOk)
+
+    // 门控验收：阈值必须是 n 片，且开闸那一刻的连续分片数确实达标。
+    const gateChecks = perNode
+      .filter((n) => !n.isHost)
+      .map((n) => ({
+        label: n.label,
+        thresholdSegments: n.gateOpen?.thresholdSegments ?? null,
+        bufferedSegments: n.gateOpen?.bufferedSegments ?? null,
+        ok: Boolean(n.gateOpen) && n.gateOpen.bufferedSegments >= n.gateOpen.thresholdSegments,
+      }))
+    const gateOk = gateChecks.every((c) => c.ok)
+
     const result = {
       room: roomId,
       nodes: NODES,
@@ -264,6 +314,10 @@ async function main() {
         depths,
         multiHop: hasMultiHop,
         relays: relays.map((r) => ({ label: r.label, children: r.topology.children })),
+        relayClock: relayChecks,
+        relayOk,
+        gate: gateChecks,
+        gateOk,
         hostChildren,
         chainMode: perNode[0].topology.mode === 'chain',
       },
@@ -276,6 +330,8 @@ async function main() {
       maxDrift >= 0 &&
       maxDrift < 500 &&
       topologyOk &&
+      relayOk &&
+      gateOk &&
       (chainExpected ? hostChildren.length === 1 : hasMultiHop || NODES <= 3)
 
     console.log('\n最差偏差样本（起播后秒数 / 偏差 / 矫正模式）：')
@@ -294,7 +350,14 @@ async function main() {
           ` 偏差 max ${node.drift.maxMs}ms / p95 ${node.drift.p95Ms}ms 交付 ${node.delivered} 失败 ${node.chunkErrors}` +
           ` 播放 ${node.playing ? '是' : '否'}` +
           ` 播放器[${node.player?.mediaSourceState ?? '?'}/sb=${node.player?.sourceBufferCount ?? '?'}/attached=${node.player?.attached ?? '?'}]` +
-          (node.gate ? ` 门控[阈值${node.gate.thresholdSec}s/等待${node.gate.waitedSec}s]` : ''),
+          (node.gate ? ` 门控[阈值${node.gate.thresholdSegments}片/等待${node.gate.waitedSec}s]` : '') +
+          (node.isHost
+            ? ''
+            : ` 中继[hop=${node.relay.hopMs}ms + parent=${node.relay.parentMs}ms =${node.relay.offsetMs}ms` +
+              `${node.relay.sumOk ? '' : ' ✗不自洽'}]` +
+              (node.gateOpen
+                ? ` 开闸[${node.gateOpen.bufferedSegments}/${node.gateOpen.thresholdSegments}片]`
+                : ' 开闸[未采到]')),
       )
     }
     if (throttleResult) {
