@@ -25,6 +25,10 @@ function formatTime(seconds: number): string {
 const statusText = computed(() => {
   if (store.playerError) return store.playerError
   if (!store.mediaIndex) return store.isHost ? '等待选择分片目录' : '等待主播开播'
+  // 断线恢复的三态优先于常规状态：它们是用户此刻唯一需要知道的事。
+  if (store.roomUnrecoverable) return '房间已失效'
+  if (store.hostOffline) return '主播掉线，等待重连'
+  if (store.resumeNotice) return '等待主播重建房间'
   if (store.gated) return `加载中 ${store.gateBufferedSec.toFixed(1)}s`
   if (store.needsGesture) return '需要一次点击才能播放'
   if (state.value.paused) return '已暂停'
@@ -71,6 +75,30 @@ const signalingText = computed(() => {
         当前与服务端的信令未就绪：{{ signalingText }}。重连成功后会自动进房，不需要刷新页面。
       </p>
       <p class="muted hint" v-else-if="!store.joined">正在加入房间…</p>
+    </div>
+
+    <!-- 不可自动恢复：明确告诉用户下一步做什么（刷新过页面就没有分片句柄了） -->
+    <div class="overlay offline" v-else-if="store.roomUnrecoverable" data-testid="stage-unrecoverable">
+      <p class="big">房间已失效</p>
+      <p class="muted">{{ store.roomUnrecoverable }}</p>
+    </div>
+
+    <!--
+      主播离线等待态：画面停住，而不是继续"假播放"。
+      倒计时只是预期管理；服务端的 room-closed 才是唯一权威。
+    -->
+    <div class="overlay offline" v-else-if="store.hostOffline" data-testid="stage-host-offline">
+      <p class="big">{{ store.hostOfflineText }}</p>
+      <p class="muted">
+        主播与服务端的连接断了（网络抖动、刷新、服务端重启都可能）。房间、成员与播放状态会被服务端保留；
+        主播回来之后这里会自动重新缓冲并继续跟随，不需要刷新页面。
+      </p>
+    </div>
+
+    <!-- 观众：房间被销毁后等主播用同一个房间码重建（有界重试，最多 60s） -->
+    <div class="overlay offline" v-else-if="store.resumeNotice" data-testid="stage-room-resume">
+      <p class="big">{{ store.resumeNotice }}</p>
+      <p class="muted">正在重试加入同一个房间码；超过 60 秒主播仍未重建就会明确提示失效。</p>
     </div>
 
     <!-- 启动门控：从主播时间戳所在分片起攒够连续 n 片才起播，且不设超时上限 -->
@@ -152,6 +180,15 @@ const signalingText = computed(() => {
 
 .overlay.gate .hint {
   color: var(--accent);
+}
+
+/* 断线等待：用等待色而不是错误色 —— 这不是失败，是"正在恢复"。 */
+.overlay.offline {
+  background: rgba(20, 14, 4, 0.82);
+}
+
+.overlay.offline .big {
+  color: rgba(240, 178, 60, 0.95);
 }
 
 .overlay.gesture {

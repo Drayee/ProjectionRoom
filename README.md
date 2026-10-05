@@ -135,6 +135,10 @@ segmenter -out <输出目录>                # 双击 exe 后按提示粘贴路�
 > Go 版不再做"引号 / `$` 符号校验"：参数是用 exec 数组直接传给 ffmpeg 的，不经过 shell，
 > 不再有旧 `.ps1` 那种"路径里有引号就会被打断"的问题。
 
+> ⚠️ **不要把 `-out` 指到 `client/dist` 里面**（包括 `client/dist/room-media`）：`client/dist` 是
+> 静态托管根，产物会被当成静态资源公开发布，`/downloads/room-media/...` 任何人可下 ——
+> 直播分片就绕过了 WebRTC 直连链路。输出到仓库外的目录，或至少放在 `client/dist` 之外的路径。
+
 ```bash
 # 界面验收：真实 Chrome 里展开入口、确认面板/探测徽标/教程/切片工具清单，并留一张截图
 node test/script/verify-segment-ui.mjs

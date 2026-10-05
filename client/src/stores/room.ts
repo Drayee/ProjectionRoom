@@ -95,6 +95,44 @@ const MIN_CLOCK_SAMPLES = 6
  */
 const CLOCK_SETTLE_SEC = 0.8
 
+/**
+ * 主播断线后服务端的宽限期（秒）。
+ *
+ * 服务端契约（已冻结，客户端不改它）：主播的 WS 断掉后，房间、成员表、MediaIndex、
+ * 播放状态都保留这么久，期间只广播 member-left（离开者是主播），**不**广播 room-closed；
+ * 主播在宽限期内重新 join(role=host) 即恢复。这里只用来做本地倒计时文案 ——
+ * **权威始终是服务端的 room-closed**，收到它就以它给的原因收场。
+ */
+export const HOST_GRACE_SECONDS = 60
+/** 观众等主播重建房间：每 2s 重试一次，最多 60s（房间没了就只能等主播重建）。 */
+const RESUME_RETRY_INTERVAL_MS = 2000
+const RESUME_RETRY_MAX_MS = HOST_GRACE_SECONDS * 1000
+/**
+ * 主播自动重建房间的退避序列（毫秒）。
+ *
+ * 收到 ROOM_NOT_FOUND 说明房间真的没了（宽限期过后，或服务端重启过）：
+ * 用**同一个房间码** POST /api/rooms 重建，200 与 409（ErrRoomExists）都算"房间已就绪"。
+ * 打服务端必须有限度：用完这几次仍失败就停下来给明确文案，不允许无限重试。
+ */
+const REBUILD_BACKOFF_MS = [0, 1000, 2000, 4000, 8000]
+/** 同一个页面会话内最多连续换几次 clientId（CLIENT_ID_TAKEN 兜底，防止互相顶号打成死循环）。 */
+const MAX_CLIENT_ID_ROTATIONS = 4
+/** 服务端会先下发这个错误码再关闭连接：旧连接可能是半开，客户端不能干等它被收尸。 */
+const CODE_CLIENT_ID_TAKEN = 'CLIENT_ID_TAKEN'
+const CODE_ROOM_NOT_FOUND = 'ROOM_NOT_FOUND'
+const CODE_ROOM_NOT_READY = 'ROOM_NOT_READY'
+const CODE_HOST_TAKEN = 'HOST_TAKEN'
+/**
+ * HOST_TAKEN 的退避序列（毫秒）。
+ *
+ * 场景：上一连接是**半开**的 —— 服务端此刻仍认为它是成员且 HostID 非空，
+ * 要等 ping/写超时（20s + 10s ≈ ≤30s）才会收尸并进入宽限期。
+ * 所以"主播身份被占"是**预期内的中间态**，不是错误：必须退避重试到旧连接被回收。
+ * 8s 封顶 × 覆盖 ~90s，足够跨过那 30s 的收尸窗口。
+ */
+const HOST_REJOIN_BACKOFF_MS = [1000, 2000, 4000, 8000]
+const HOST_REJOIN_MAX_MS = 90_000
+
 export function newClientId(): string {
   const rand = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)
   return `c_${rand.replace(/-/g, '').slice(0, 16)}`
@@ -116,6 +154,34 @@ export const useRoomStore = defineStore('room', () => {
   const roomClosed = ref('')
   const iceServers = ref<RTCIceServer[]>([])
   const needsGesture = ref(false)
+
+  // ---------- 断线恢复（缺陷 1：主播断线不再等于房间永久销毁）----------
+  /** 主播离线等待态（观众侧）：已进房、且成员表里没有 role==='host' 的成员。 */
+  const hostOffline = ref(false)
+  /** 本地倒计时（秒），以宽限期为基准；到 0 之后仍等服务端的权威 room-closed。 */
+  const hostOfflineSecondsLeft = ref(0)
+  /** 观众侧：等主播重建房间的有界重试提示（ROOM_NOT_FOUND 后出现）。 */
+  const resumeNotice = ref('')
+  /** 不可自动恢复时的明确文案（媒体已不在内存 / 重建失败 / 等待主播超时）。 */
+  const roomUnrecoverable = ref('')
+  /** 主播自动重建房间的进度。 */
+  const rebuildState = ref<'idle' | 'rebuilding' | 'failed'>('idle')
+  /** 本页面会话已经换过几次 clientId（给排障与验收观察）。 */
+  const clientIdRotations = ref(0)
+
+  let hostOfflineTimer: number | undefined
+  let hostOfflineUntil = 0
+  let resumeWaitTimer: number | undefined
+  let resumeWaitDeadline = 0
+  let rebuildInFlight = false
+  let rebuildAttempt = 0
+  let hostRejoinTimer: number | undefined
+  let hostRejoinStartedAt = 0
+  let hostRejoinAttempt = 0
+  /** 连续换号次数（进房成功后清零）：用于给"换号"设置上限，避免互相顶号打成死循环。 */
+  let clientIdRotationStreak = 0
+  /** 本页面会话已经成功进过房（用来区分"首次进房"与"恢复进房"）。 */
+  let hostJoinedOnce = false
 
   let chatKey = 0
   /** 房间生命周期日志（调试与验收用）。 */
@@ -207,6 +273,12 @@ export const useRoomStore = defineStore('room', () => {
     onClose: (reason) => {
       joined.value = false
       if (!roomClosed.value) lastError.value = reason
+      // 观众：自己的信令一断，本机时钟就失去了外部锚点，再"按外推时间播"就是假播放
+      //（画面会继续走几秒，然后被一次大跳转拽回来）。立刻停住并进门控，
+      // 等重新进房、主播进度恢复后再由 evaluateGate 自动开闸。
+      if (!isHost.value && mediaIndex.value) {
+        freezePlayback('与服务端的信令断开，等待重连')
+      }
     },
   })
 
@@ -294,15 +366,42 @@ export const useRoomStore = defineStore('room', () => {
         joined.value = true
         roomClosed.value = ''
         lastError.value = ''
+        // 进房成功即撤销所有"恢复中"的状态：换 id、重建房间都算过关。
+        // 注意 clientIdRotations 是**累计计数**（给排障/验收看"到底换过号没有"），
+        // 只在这里清零 streak（连续换号上限用），累计值留到离开房间/重新进房。
+        clientIdRotationStreak = 0
+        rebuildAttempt = 0
+        roomUnrecoverable.value = ''
+        if (rebuildState.value === 'rebuilding' || rebuildState.value === 'failed') rebuildState.value = 'idle'
+        stopResumeWait()
+        cancelHostRejoin()
+        // 重新进房后循环可能已经被停掉（换 id 会拆掉整条链路），这里补上。
+        if (player.attached.value) startLoops()
         hostId.value = env.hostId ?? ''
         members.value = env.members ?? []
         capacity.value = env.capacity ?? null
+        clearHostOfflineIfPresent()
         if (env.playback) {
           clock.onAnchor(toSample(env.playback))
         }
-        if (env.mediaIndex) {
+        // 主播重新进房（宽限期内回到同一房间 / 重建之后）：分片索引必须重新发布，
+        // 否则服务端手里没有索引，后来的观众会一直"等待主播开播"。
+        // 重复发布同一份是幂等的（服务端 SameIndex 才允许；内容不同会被 MEDIA_LOCKED 拒）。
+        if (isHost.value) {
+          // C13：**恢复进房**时换一个时钟纪元。服务端只原样透传 ClockEpoch，
+          // 复用旧纪元会让观众端保留旧的偏移滤波结果 → 恢复瞬间全房跳位。
+          // 首次进房不需要（还没有任何观众拿到过这个纪元）。
+          if (hostJoinedOnce) {
+            clockEpoch.value = newClockEpoch()
+            noteLifecycle(`主播重新进房，重置时钟纪元 ${clockEpoch.value}`)
+          }
+          hostJoinedOnce = true
+          if (mediaIndex.value) {
+            signaling.send({ type: T.MediaIndex, mediaIndex: mediaIndex.value })
+          }
+        } else if (env.mediaIndex) {
           safe('应用媒体索引', applyRemoteMediaIndex(env.mediaIndex))
-        } else if (!isHost.value && hostId.value) {
+        } else if (hostId.value) {
           safe('连接主播', connectToHost())
         }
         if (env.topology) {
@@ -314,6 +413,13 @@ export const useRoomStore = defineStore('room', () => {
       case T.MemberLeft:
       case T.MemberList:
         if (env.members) members.value = env.members
+        // 契约 2：joined 且成员表里没有 host ⇒ 主播离线（掉线等待态）。
+        // 主播回来（member-joined 带 host）时自动消失。
+        if (env.type === T.MemberJoined && containsHost(env.members)) {
+          clearHostOffline()
+        } else {
+          noteHostOfflineIfMissing()
+        }
         break
 
       case T.MediaIndex:
@@ -363,18 +469,58 @@ export const useRoomStore = defineStore('room', () => {
         break
 
       case T.RoomClosed:
+        // 服务端是唯一权威：收到它就以它给的原因收场，本地的倒计时/重试全部作废。
         joined.value = false
         roomClosed.value = env.message ?? '房间已关闭'
+        clearHostOffline()
+        stopResumeWait()
+        rebuildState.value = 'idle'
+        freezePlayback('房间已关闭')
         stopLoops()
         break
 
       case T.Error:
-        lastError.value = ERROR_TEXT[env.code ?? ''] ?? env.message ?? '未知错误'
+        handleErrorEnvelope(env)
         break
 
       default:
         break
     }
+  }
+
+  /**
+   * 错误信封的分诊。
+   *
+   * 以前所有错误都只是往 lastError 里塞一行文案，于是 ROOM_NOT_FOUND 表现为
+   * "房间不存在"然后永远停在那里；CLIENT_ID_TAKEN / HOST_TAKEN / ROOM_NOT_READY
+   * 这三个"恢复路径上的中间态"完全没有处理。
+   */
+  function handleErrorEnvelope(env: Envelope) {
+    const code = env.code ?? ''
+    if (code === CODE_CLIENT_ID_TAKEN) {
+      rotateClientId()
+      return
+    }
+    if (code === CODE_ROOM_NOT_FOUND) {
+      handleRoomNotFound()
+      return
+    }
+    if (code === CODE_HOST_TAKEN) {
+      // 预期内的中间态：旧连接可能还是半开，服务端仍认为它是主播（HostID 非空），
+      // 要等 ping/写超时收尸（≤30s）才会空出主播位。这里退避重试，绝不报错给用户。
+      if (isHost.value) {
+        scheduleHostRejoin()
+        return
+      }
+    }
+    if (code === CODE_ROOM_NOT_READY) {
+      // 观众在同一房间里等主播进房：同样是有界重试的中间态，不弹错误。
+      if (!isHost.value) {
+        startResumeWait('not-ready')
+        return
+      }
+    }
+    lastError.value = ERROR_TEXT[code] ?? env.message ?? '未知错误'
   }
 
   function toSample(state: PlaybackState) {
@@ -399,6 +545,323 @@ export const useRoomStore = defineStore('room', () => {
       role: creds.role,
       password: creds.password,
     })
+  }
+
+  // ---------- 断线恢复（缺陷 1）----------
+  /**
+   * 信令 WS 的地址。
+   *
+   * clientId 是 URL 上的查询参数（服务端用连接上的 clientId 认身份，**不看** join 报文里的），
+   * 所以换 clientId 必须重建 URL 重连，只改 join 信封是不够的。
+   */
+  function signalUrl(creds: JoinCredentials): string {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    return (
+      `${proto}://${window.location.host}/ws?roomId=${encodeURIComponent(creds.roomId)}` +
+      `&clientId=${encodeURIComponent(creds.clientId)}`
+    )
+  }
+
+  /** 立刻重新进房：能发就发 join；发不出去就**不等退避**直接重连（用于错误恢复路径）。 */
+  function rejoinNow() {
+    const creds = credentials.value
+    if (!creds) return
+    if (signaling.status.value === 'open') {
+      sendJoin()
+      return
+    }
+    // 正在连（上一次 connect 还没出结果）时不要另开一条：onopen 里本来就会 sendJoin。
+    if (signaling.status.value === 'connecting') return
+    // 退避最长 8s：恢复路径上（重建房间 / 换 id）干等 8s 是纯粹的浪费。
+    signaling.connect(signalUrl(creds))
+  }
+
+  function containsHost(list?: MemberInfo[]): boolean {
+    return (list ?? []).some((m) => m.role === 'host')
+  }
+
+  /** 观众侧：成员表里没有 host ⇒ 主播离线（契约 2），进入等待态并停住画面。 */
+  function noteHostOfflineIfMissing() {
+    if (isHost.value || roomClosed.value || !joined.value) return
+    if (members.value.length === 0) return
+    if (containsHost(members.value)) {
+      clearHostOffline()
+      return
+    }
+    noteHostOffline()
+  }
+
+  /** T.Joined 快照里带回 host 就说明主播已经回来了。 */
+  function clearHostOfflineIfPresent() {
+    if (containsHost(members.value)) clearHostOffline()
+  }
+
+  function noteHostOffline() {
+    if (hostOffline.value) return
+    hostOffline.value = true
+    hostOfflineUntil = performance.now() + HOST_GRACE_SECONDS * 1000
+    hostOfflineSecondsLeft.value = HOST_GRACE_SECONDS
+    if (hostOfflineTimer !== undefined) window.clearInterval(hostOfflineTimer)
+    hostOfflineTimer = window.setInterval(() => {
+      hostOfflineSecondsLeft.value = Math.max(
+        0,
+        Math.ceil((hostOfflineUntil - performance.now()) / 1000),
+      )
+    }, 1000)
+    noteLifecycle('检测到主播离线（成员表里没有 host），进入等待态')
+    // 主播不在，进度就不再来：继续播只是拿外推时间"假播放"，停住并进门控，
+    // 等主播回来 + 新锚点到达后由 evaluateGate 自动开闸。
+    freezePlayback('主播离线，等待重连')
+  }
+
+  function clearHostOffline() {
+    if (!hostOffline.value) return
+    hostOffline.value = false
+    hostOfflineSecondsLeft.value = 0
+    if (hostOfflineTimer !== undefined) {
+      window.clearInterval(hostOfflineTimer)
+      hostOfflineTimer = undefined
+    }
+    noteLifecycle('主播已回到房间，退出等待态')
+  }
+
+  /** 停住画面但保留缓冲：门控 + pause。房间关闭、主播离线、信令断开都走它。 */
+  function freezePlayback(reason: string) {
+    player.video.value?.pause()
+    enterGate(reason)
+  }
+
+  /**
+   * 是否处于"不该继续播"的等待态。
+   *
+   * 断线等待期间**必须压住门控**：主播的进度不再来，但本地缓冲与时钟样本还在，
+   * evaluateGate 会因为"连续 n 片 + 时钟已收敛"直接把闸门打开 —— 那就是拿外推时钟假播放
+   *（实测只掐线 0.75s，画面自己就走了 0.77s，等于把等待说成了正常播放）。
+   * 恢复进房 / 主播回来后这些条件自然消失，门控随即按正常判据开闸。
+   */
+  function holdPlayback(): boolean {
+    return (
+      hostOffline.value ||
+      resumeNotice.value !== '' ||
+      roomClosed.value !== '' ||
+      signaling.status.value !== 'open'
+    )
+  }
+
+  /** 观众倒计时文案（UI 与验收脚本共用同一份措辞，避免两边各写一套词）。 */
+  const hostOfflineText = computed(() => {
+    if (!hostOffline.value) return ''
+    if (hostOfflineSecondsLeft.value > 0) {
+      return `主播掉线，等待重连（剩余约 ${hostOfflineSecondsLeft.value} 秒）`
+    }
+    return '主播掉线，等待服务端确认（本地宽限期已到，以服务端关闭通知为准）'
+  })
+
+  /**
+   * 收到 ROOM_NOT_FOUND（房间真的没了）。
+   *
+   * 主播：媒体还在内存里就自动重建（同一个房间码）→ 重新 join → 重新发布分片索引；
+   * 观众：不重建房间，改为有界重试等主播把房间建回来。
+   *
+   * 已经收到过 room-closed 也照样走这条路：那是服务端给的**权威原因**（保留在 roomClosed 里
+   * 继续展示），但宽限期过后主播仍可用同一个房间码重建（服务端契约 4），
+   * 所以观众继续有界重试、主播继续重建，成功进房后 roomClosed 会被清掉。
+   */
+  function handleRoomNotFound() {
+    if (isHost.value) {
+      // 刷新过页面 / 已经换过片子：本地没有分片句柄，重建出来的房间也喂不了数据。
+      // 这时必须说清楚要做什么，而不是停在"房间不存在"上让用户干等。
+      if (!mediaIndex.value || media.segmentCount() === 0) {
+        roomUnrecoverable.value = '房间已失效：请重新创建房间并重新选择分片目录'
+        noteLifecycle('收到 ROOM_NOT_FOUND，但本地已无分片数据，无法自动重建')
+        return
+      }
+      // 重连时服务端可能连着回几条 ROOM_NOT_FOUND（同一次重连的多条尝试/残留队列），
+      // 重建只做一次：这里挡掉重复进入，日志也只记一条。
+      if (rebuildInFlight) return
+      noteLifecycle('收到 ROOM_NOT_FOUND，开始自动重建房间')
+      void rebuildRoom()
+      return
+    }
+    startResumeWait()
+  }
+
+  /**
+   * 主播重建房间：用同一个房间码 POST /api/rooms。
+   *
+   * 200（新建成功）与 409（ErrRoomExists：房间其实还在）都视为"房间已就绪"，
+   * 随后立刻重新 join 并由 T.Joined 分支重新发布分片索引。
+   * 失败按 REBUILD_BACKOFF_MS 退避重试，用完次数就停下来给明确文案（绝不无限打服务端）。
+   */
+  async function rebuildRoom(): Promise<void> {
+    if (rebuildInFlight) return
+    rebuildInFlight = true
+    rebuildState.value = 'rebuilding'
+    try {
+      while (rebuildAttempt < REBUILD_BACKOFF_MS.length) {
+        const delay = REBUILD_BACKOFF_MS[rebuildAttempt]
+        rebuildAttempt += 1
+        if (delay > 0) await new Promise((resolve) => window.setTimeout(resolve, delay))
+
+        const creds = credentials.value
+        if (!creds) return
+        if (!isHost.value) return
+
+        try {
+          const resp = await fetch('/api/rooms', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              roomId: creds.roomId,
+              password: creds.password,
+              // 码率估计交给已知的分片索引：省略也行，服务端会退回默认值。
+              streamBps: mediaIndex.value?.bitrateBps ?? 0,
+            }),
+          })
+          if (resp.ok || resp.status === 409) {
+            // 409 = 房间已存在（ErrRoomExists），与 200 等价地视为"房间已就绪"。
+            noteLifecycle(`房间 ${creds.roomId} 已就绪（HTTP ${resp.status}），重新进房`)
+            rebuildState.value = 'idle'
+            const data = (await resp.json().catch(() => null)) as
+              | { iceServers?: RTCIceServer[] }
+              | null
+            // 新房间的响应里有 ICE 配置（409 时没有）：拿到就更新，拿不到沿用旧的。
+            if (data?.iceServers?.length) setIceServers(data.iceServers)
+            rejoinNow()
+            return
+          }
+          noteLifecycle(`重建房间失败：HTTP ${resp.status}`)
+        } catch (err) {
+          noteLifecycle(`重建房间失败：${(err as Error).message}`)
+        }
+      }
+      rebuildState.value = 'failed'
+      roomUnrecoverable.value = '房间重建失败：无法在同一个房间码下恢复，请重新创建房间'
+      noteLifecycle('重建房间重试次数用尽')
+    } finally {
+      rebuildInFlight = false
+    }
+  }
+
+  /** 观众：有界重试等主播重建房间 / 等主播进房（每 2s 一次，最多 60s）。 */
+  function startResumeWait(kind: 'not-found' | 'not-ready' = 'not-found') {
+    if (isHost.value) return
+    roomUnrecoverable.value = ''
+    if (kind === 'not-ready') {
+      // 房间还在、只是没有主播：不喊"房间不存在"，也不催用户做任何事。
+      resumeNotice.value = '等待主播进房…'
+    } else {
+      // 已经收到过权威的 room-closed 时把原因一并说清楚，不要看起来像"什么都没发生"。
+      resumeNotice.value = roomClosed.value
+        ? '房间已被服务端关闭，等待主播重建房间…'
+        : '等待主播重建房间…'
+    }
+    // 主播不在，先停住画面（避免拿外推时间假播放）。
+    freezePlayback(kind === 'not-ready' ? '等待主播进房' : '等待主播重建房间')
+    // 已经在等待里：只刷新文案，不重复开定时器、也不重复记日志（重试是每 2s 一次的）。
+    if (resumeWaitTimer !== undefined) return
+    noteLifecycle(
+      kind === 'not-ready'
+        ? '收到 ROOM_NOT_READY：等待主播进房（每 2s 重试，最多 60s）'
+        : '收到 ROOM_NOT_FOUND：等待主播重建（每 2s 重试，最多 60s）',
+    )
+    resumeWaitDeadline = performance.now() + RESUME_RETRY_MAX_MS
+    resumeWaitTimer = window.setInterval(() => {
+      if (performance.now() >= resumeWaitDeadline) {
+        stopResumeWait()
+        roomUnrecoverable.value =
+          kind === 'not-ready'
+            ? '房间已失效：主播长时间未进房，请返回首页重新加入'
+            : '房间已失效：等待主播重建超时，请返回首页重新加入'
+        noteLifecycle('等待主播超时（60s）')
+        return
+      }
+      rejoinNow()
+    }, RESUME_RETRY_INTERVAL_MS)
+    rejoinNow()
+  }
+
+  function stopResumeWait() {
+    resumeNotice.value = ''
+    if (resumeWaitTimer === undefined) return
+    window.clearInterval(resumeWaitTimer)
+    resumeWaitTimer = undefined
+  }
+
+  /**
+   * HOST_TAKEN → 退避重试主播 join。
+   *
+   * 旧连接是半开时，服务端仍把它当成员（HostID 非空），要等 ping/写超时才会收尸；
+   * 这段时间里 join(role=host) 必然被拒。这是预期内的中间态：
+   * 退避重试到旧连接被回收（1s→2s→4s→8s…，8s 封顶，总时长覆盖 ~90s），
+   * 期间只显示一句进度，不把错误抛给用户。旧连接被收尸后服务端会进入宽限期
+   *（HostID 清空），下一次重试就能进房。
+   */
+  function scheduleHostRejoin() {
+    if (!isHost.value || roomClosed.value) return
+    if (hostRejoinStartedAt === 0) hostRejoinStartedAt = performance.now()
+    if (performance.now() - hostRejoinStartedAt > HOST_REJOIN_MAX_MS) {
+      roomUnrecoverable.value = '无法回到房间：旧连接仍占用主播身份，请刷新页面重试'
+      noteLifecycle('HOST_TAKEN 重试超时（90s）')
+      return
+    }
+    const delay = HOST_REJOIN_BACKOFF_MS[Math.min(hostRejoinAttempt, HOST_REJOIN_BACKOFF_MS.length - 1)]
+    hostRejoinAttempt += 1
+    resumeNotice.value = '上一连接尚未被服务端回收，正在重试进入房间…'
+    noteLifecycle(`HOST_TAKEN：第 ${hostRejoinAttempt} 次退避重试（${delay}ms）`)
+    if (hostRejoinTimer !== undefined) window.clearTimeout(hostRejoinTimer)
+    hostRejoinTimer = window.setTimeout(() => {
+      hostRejoinTimer = undefined
+      rejoinNow()
+    }, delay)
+  }
+
+  function cancelHostRejoin() {
+    if (hostRejoinTimer !== undefined) {
+      window.clearTimeout(hostRejoinTimer)
+      hostRejoinTimer = undefined
+    }
+    hostRejoinAttempt = 0
+    hostRejoinStartedAt = 0
+  }
+
+  /**
+   * CLIENT_ID_TAKEN：服务端会先下发这个错误码再关闭连接。
+   *
+   * 旧连接可能是半开（要等约 30s 才被服务端收尸），所以不能干等它断开：
+   * 立刻换一个新 clientId（它同时就是成员身份）→ 拆掉旧 peer → 用新 URL 立刻重连，
+   * 不走 8s 的退避。换 id 等于重新进房，成员表/拓扑/请求队列都必须按 leaveRoom 的语义清掉。
+   */
+  function rotateClientId() {
+    if (roomClosed.value) return
+    if (clientIdRotationStreak >= MAX_CLIENT_ID_ROTATIONS) {
+      roomUnrecoverable.value = '无法进入房间：本机标识被反复占用，请刷新页面重试'
+      noteLifecycle('clientId 连续被占用，放弃自动换号')
+      return
+    }
+    const creds = credentials.value
+    if (!creds) return
+
+    clientIdRotationStreak += 1
+    clientIdRotations.value += 1
+    const next = newClientId()
+    noteLifecycle(`clientId ${creds.clientId} 被占用，换新身份 ${next}`)
+    credentials.value = { ...creds, clientId: next }
+
+    // 旧身份的一切都作废：成员表、播放器连接、在途请求、拓扑分配。
+    joined.value = false
+    hostId.value = ''
+    members.value = []
+    requester.reset()
+    rtc.closeAll()
+    topology.reset()
+    if (!isHost.value && mediaIndex.value) {
+      // 观众：换 id 后要从头建立 P2P 与时钟，先停住画面免得拿旧锚点假播放。
+      freezePlayback('身份变更，等待重新进房')
+    }
+    signaling.close()
+    // 上一次 clientId 触发的重连退避不能留着：它还会去开一条旧 id 的连接。
+    signaling.connect(signalUrl(credentials.value))
   }
 
   // ---------- Peer 消息 ----------
@@ -694,6 +1157,11 @@ export const useRoomStore = defineStore('room', () => {
     const anchorSeg = segmentIndexAt(index, anchor)
     const contiguous = player.bufferedSegmentsFrom(index, anchorSeg)
     gateBufferedSegments.value = contiguous
+    // 断线等待期间即使缓冲已经够了也不开闸：那不是"缓冲不足"，是"没有权威进度"。
+    if (holdPlayback()) {
+      syncMode.value = 'gated'
+      return
+    }
     // 时钟样本不够就再等：开闸瞬间的偏差尖峰全部来自还没收敛的偏移估计
     //（实测起播后 0.2s 的偏差 -387ms，随后被速率修正逐秒拉回）。
     const clockReady = clock.sampleCount() >= MIN_CLOCK_SAMPLES && clock.settledSeconds() >= CLOCK_SETTLE_SEC
@@ -1314,19 +1782,30 @@ export const useRoomStore = defineStore('room', () => {
     roomClosed.value = ''
     lastError.value = ''
     needsGesture.value = false
+    roomUnrecoverable.value = ''
+    clientIdRotations.value = 0
+    clientIdRotationStreak = 0
+    rebuildAttempt = 0
+    hostJoinedOnce = false
 
     // 先把 ICE 配置拿到手再连：PC 是在 connectTo 时构造的，晚拿到就白建了。
     safe('拉取 ICE 配置', loadIceServers())
 
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const url = `${proto}://${window.location.host}/ws?roomId=${encodeURIComponent(creds.roomId)}&clientId=${encodeURIComponent(creds.clientId)}`
-    signaling.connect(url)
+    signaling.connect(signalUrl(creds))
   }
 
   function leaveRoom() {
     noteLifecycle('leaveRoom')
     if (joined.value) signaling.send({ type: T.Leave })
     stopLoops()
+    // 恢复路径上的定时器与提示必须一起清掉，否则离开房间后还会继续打服务端。
+    stopResumeWait()
+    cancelHostRejoin()
+    clearHostOffline()
+    rebuildAttempt = 0
+    rebuildInFlight = false
+    rebuildState.value = 'idle'
+    roomUnrecoverable.value = ''
     requester.reset()
     rtc.closeAll()
     topology.reset()
@@ -1526,6 +2005,15 @@ export const useRoomStore = defineStore('room', () => {
     lastError,
     roomClosed,
     needsGesture,
+    // 断线恢复（缺陷 1）：主播离线等待态、观众等主播重建、不可恢复文案
+    hostGraceSeconds: HOST_GRACE_SECONDS,
+    hostOffline,
+    hostOfflineText,
+    hostOfflineSecondsLeft,
+    resumeNotice,
+    roomUnrecoverable,
+    rebuildState,
+    clientIdRotations,
     // 媒体
     mediaIndex,
     mediaError,
@@ -1592,6 +2080,23 @@ export const useRoomStore = defineStore('room', () => {
     setRate,
     resumeAfterGesture,
     reportMetrics,
+    /**
+     * 验收钩子（仅调试用）：强制掐断信令 WS，模拟网络抖动/刷新/服务端重启。
+     * 走的是真实的"断线 → 退避重连"路径，不做任何状态伪造。
+     */
+    dropSignaling: () => {
+      noteLifecycle('验收钩子：强制掐断信令连接')
+      signaling.drop()
+    },
+    /**
+     * 验收钩子（仅调试用）：按住/放开信令。
+     * 按住 = 断开当前连接 + 之后的连接尝试一律挡下（退避链照常推进），
+     * 等价于"这个页面连不上信令服务"，用于确定性复现"断线超过宽限期"。
+     */
+    holdSignaling: (hold: boolean) => {
+      noteLifecycle(`验收钩子：${hold ? '按住' : '放开'}信令`)
+      signaling.setHold(hold)
+    },
     setUploadThrottle: (bps: number) => {
       uploadThrottleBps = bps
       throttleAllowance = 0

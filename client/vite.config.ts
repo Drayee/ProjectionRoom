@@ -2,7 +2,9 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // Go 服务端地址。前后端分离开发（SPEC §1.3）：Vite 负责页面，Go 负责 /api 与 /ws。
-const server = 'http://127.0.0.1:8080'
+// PR_SERVER_URL 可覆盖：验收脚本要跑在**自己那份**测试服务端上（不同端口 + 短宽限期），
+// 没有这个覆盖就只能打到 8080，测的就不是被测对象了。
+const server = process.env.PR_SERVER_URL || 'http://127.0.0.1:8080'
 
 export default defineConfig({
   plugins: [vue()],

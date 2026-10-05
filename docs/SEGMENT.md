@@ -265,6 +265,9 @@ segmenter -in out_frag.mp4 -out ./room-media -pack 1
 | `-name` | 空 | 不给 `-in` 时按文件名在常见目录（桌面/下载/视频/文档/当前目录/exe 同级）里找 |
 | `-search-by-name` | `true` | 关掉后不再按文件名搜索，直接进入交互询问 |
 | `-out` | `./room-media` | 输出目录 |
+
+> `-out` **不要指到 `client/dist` 里面**：那是静态托管根，产物会被静态服务公开发布
+> （`/downloads/room-media/...` 任何人可下），直播分片就绕过了 WebRTC 直连链路。
 | `-transcode` | 空 | 低上行预设：转码到指定码率（如 `1200k`），优先于自动判定 |
 | `-fragment` | `false` | 强制无损重新封装（`-c copy`）；默认由探测结果自动决定 |
 | `-frag-sec` | `2` | 分片目标时长（秒） |
