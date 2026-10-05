@@ -76,6 +76,14 @@ curl -o part1.zip http://127.0.0.1:8080/api/v1/segment/jobs/<jobId>/parts/1
 （`showDirectoryPicker()` + File System Access API；浏览器不支持时退化为"下载 zip 手动解压后再选目录"）。
 服务器连不上或没装 ffmpeg 时，面板会直接说明原因，内嵌的本地切片教程始终可用。
 
+主播页还能**由浏览器直接生成一键切片脚本**（`.ps1` / `.sh`）：脚本先从
+`GET /api/downloads/segmenter` 发布的位置下载 `segmenter` 可执行文件并**校验 sha256**
+（校验不过立刻退出），再调它切片；下载不到或加 `-NoExe` 时退回内置的 **HLS-fMP4**
+路径（`-f hls -hls_segment_type fmp4`，单条 muxed 流）。两条路径都会用 ffprobe 断言
+`init.mp4` 的轨道数与 `index.json` 声明的编码一致，**不一致就报错退出**，
+不再静默产出"丢音轨 / 分片互相覆盖"的坏切片。二进制由 `scripts/build-segmenter.ps1`
+交叉编译到 `client/dist/downloads/`，下载目录可用 `PR_DOWNLOADS_DIR` 覆盖。
+
 ```bash
 # 界面验收：真实 Chrome 里展开入口、确认面板/探测徽标/教程，并留一张截图
 node test/script/verify-segment-ui.mjs

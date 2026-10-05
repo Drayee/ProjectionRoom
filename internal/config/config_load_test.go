@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -232,5 +233,47 @@ func TestStaticEnvRejectsInvalidSwitch(t *testing.T) {
 				t.Fatalf("PR_SERVE_STATIC=%q 应当报错", v)
 			}
 		})
+	}
+}
+
+// TestDownloadsDirFollowsStaticRoot 锁定默认形态：不配 PR_DOWNLOADS_DIR 时，
+// 切片器二进制的目录就是 <Static.Dir>/downloads —— URL /downloads/<file> 与磁盘布局一致。
+func TestDownloadsDirFollowsStaticRoot(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 不应失败: %v", err)
+	}
+	if cfg.Downloads.Dir != "" {
+		t.Fatalf("默认 Downloads.Dir 应留空（跟随静态根），实际 %q", cfg.Downloads.Dir)
+	}
+	if got, want := cfg.DownloadsDir(), filepath.Join("client/dist", "downloads"); got != want {
+		t.Fatalf("默认下载目录应为 %q，实际 %q", want, got)
+	}
+
+	// 跟随的含义是"静态根变了，下载目录跟着变"。
+	t.Setenv(envStaticDir, `D:\other\dist`)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() 不应失败: %v", err)
+	}
+	if got, want := cfg.DownloadsDir(), filepath.Join(`D:\other\dist`, "downloads"); got != want {
+		t.Fatalf("静态根覆盖后下载目录应为 %q，实际 %q", want, got)
+	}
+}
+
+// TestDownloadsEnvOverride 锁定 PR_DOWNLOADS_DIR：非空即以它为准，不再跟随静态根。
+func TestDownloadsEnvOverride(t *testing.T) {
+	t.Setenv(envDownloadsDir, `D:\pr-downloads`)
+	t.Setenv(envStaticDir, `D:\other\dist`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 不应失败: %v", err)
+	}
+	if cfg.Downloads.Dir != `D:\pr-downloads` {
+		t.Fatalf("下载目录覆盖失败: %q", cfg.Downloads.Dir)
+	}
+	if got := cfg.DownloadsDir(); got != `D:\pr-downloads` {
+		t.Fatalf("DownloadsDir() 应返回覆盖值 %q，实际 %q", `D:\pr-downloads`, got)
 	}
 }

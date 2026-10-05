@@ -39,6 +39,10 @@ func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, seg
 	// 服务端切片端点（一次性预处理，不参与直播链路，因此不违反不变量 I1）。
 	registerSegmentRoutes(api, seg)
 
+	// 客户端切片器二进制的只读清单：只回 JSON（平台/大小/sha256），
+	// 二进制本身由静态托管 /downloads/<file> 送出，所以这里先于 registerStatic 注册。
+	registerDownloadRoutes(api, cfg)
+
 	r.GET("/ws", wsHandler(cfg, hub, rooms))
 
 	// 静态资源与 SPA 回退必须放在最后：NoRoute 只兜住业务路由之外的请求，

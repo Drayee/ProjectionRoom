@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,9 @@ const (
 	// 单端口部署：静态资源托管（前端构建产物）。
 	envStaticDir   = "PR_STATIC_DIR"
 	envServeStatic = "PR_SERVE_STATIC"
+
+	// 客户端切片器二进制的发布目录；留空即跟随 <PR_STATIC_DIR>/downloads。
+	envDownloadsDir = "PR_DOWNLOADS_DIR"
 )
 
 // DefaultPackSize 是分片打包的默认粒度（每个 .bin 容纳多少片）。
@@ -56,8 +60,8 @@ func Default() *Config {
 			SafetyFactor:     0.8,
 		},
 		Signal: SignalConfig{
-			WriteTimeout:    10 * time.Second,
-			PingInterval:    20 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			PingInterval: 20 * time.Second,
 			// 单条信令上限：索引是**一条**消息，大小随分片数线性增长。
 			// 实测：142 分钟视频按 2s 切片 = 5087 片 → index.json 1.39MB；
 			// 原来的 256KiB 会让主播一发布索引就被 1009 掐断 → Leave → 房间销毁 →
@@ -94,7 +98,10 @@ func Default() *Config {
 			Serve: true,
 			Dir:   "client/dist",
 		},
-		LogLevel: "info",
+		// 留空 = 跟随静态根目录：切片器二进制与前端产物放在同一棵树里，
+		// 因此 /downloads/<file> 的 URL 与磁盘上的 client/dist/downloads/<file> 天然一致。
+		Downloads: DownloadsConfig{},
+		LogLevel:  "info",
 	}
 }
 
@@ -147,7 +154,24 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// 切片器二进制目录：与静态目录一样**不校验是否存在**，
+	// 没跑过 scripts/build-segmenter.ps1 时端点返回空清单（200），不是启动失败。
+	if v := os.Getenv(envDownloadsDir); v != "" {
+		cfg.Downloads.Dir = v
+	}
+
 	return cfg, nil
+}
+
+// DownloadsDir 返回切片器二进制的实际发布目录。
+//
+// Downloads.Dir 为空即「跟随静态根目录」：默认态下磁盘布局是 client/dist/downloads/，
+// 静态托管正好把它映射到 /downloads/*，因此清单里的 url 常量不需要任何额外配置。
+func (c *Config) DownloadsDir() string {
+	if c.Downloads.Dir != "" {
+		return c.Downloads.Dir
+	}
+	return filepath.Join(c.Static.Dir, "downloads")
 }
 
 // applyStaticEnv 应用 PR_STATIC_DIR / PR_SERVE_STATIC 覆盖。

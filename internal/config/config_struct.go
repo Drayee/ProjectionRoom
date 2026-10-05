@@ -5,13 +5,14 @@ import "time"
 // Config 是 ProjectionRoom 的运行时配置。
 // 默认值面向本机开发（SPEC §1.3：STUN/TURN/HTTPS 仅预留）。
 type Config struct {
-	Addr     string
-	Room     RoomConfig
-	Signal   SignalConfig
-	ICE      ICEConfig
-	Segment  SegmentConfig
-	Static   StaticConfig
-	LogLevel string
+	Addr      string
+	Room      RoomConfig
+	Signal    SignalConfig
+	ICE       ICEConfig
+	Segment   SegmentConfig
+	Static    StaticConfig
+	Downloads DownloadsConfig
+	LogLevel  string
 }
 
 // StaticConfig 控制「单端口部署」：由 Go 服务端在同一个端口上托管前端构建产物。
@@ -28,6 +29,15 @@ type StaticConfig struct {
 	Serve bool
 	// Dir 是前端构建产物目录，默认 client/dist（PR_STATIC_DIR）。
 	// 相对路径按进程工作目录解析，因此请在仓库根目录启动服务（go run ./cmd 即是）。
+	Dir string
+}
+
+// DownloadsConfig 控制「客户端切片器二进制」的发布目录。
+// 这些文件由 scripts/build-segmenter.ps1 交叉编译产出，端点只读地列出它们，
+// 真正的下载由静态托管（/downloads/*）负责，走的是同一个目录。
+type DownloadsConfig struct {
+	// Dir 是下载目录，默认等于 <Static.Dir>/downloads（PR_DOWNLOADS_DIR 可覆盖）。
+	// 为空即「跟随静态根目录」，这样 /downloads/<file> 的 URL 与磁盘布局天然一致。
 	Dir string
 }
 

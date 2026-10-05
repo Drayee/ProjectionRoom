@@ -1,17 +1,22 @@
 <script setup lang="ts">
-// 一键切片脚本面板：在浏览器里拼一个 .ps1 / .sh，用户在**自己机器**上跑 ffmpeg 切片。
+// 一键切片脚本面板：在浏览器里拼一个 .ps1 / .sh，用户在**自己机器**上跑它完成切片。
 //
-// 纯前端逻辑，不依赖任何 /api 接口：服务端连不上、没有 ffmpeg、甚至断网也能生成脚本。
-// 生成器本身在 api/segmentScript.ts（已真机验证，本组件不改它），这里只做三件事：
+// 脚本的主路线是「下载服务端发布的 segmenter 可执行文件（校验 sha256）→ 调它切片」，
+// 所以这个面板会在挂载时拉一次 GET /api/downloads/segmenter，把清单烘焙进脚本。
+// 拉不到**不影响生成**：脚本会自动退回内置的 HLS-fMP4 路径（同样带防呆断言），
+// 即"服务端连不上、断网也能生成一份能用的脚本"这条老规矩继续成立。
+//
+// 组件只做四件事：
 //   1. 收集参数并用 validateScriptParams 做即时校验（中文错误列表）；
-//   2. 给一个可折叠的只读预览（等宽、超高滚动）；
-//   3. 落盘 / 复制：Windows 版必须 UTF-8 **带 BOM**，否则 PowerShell 按 ANSI 解码，
+//   2. 拉 segmenter 清单（可选）；
+//   3. 给一个可折叠的只读预览（等宽、超高滚动）；
+//   4. 落盘 / 复制：Windows 版必须 UTF-8 **带 BOM**，否则 PowerShell 按 ANSI 解码，
 //      中文注释全乱码（已实测），这是本组件唯一"看起来多余但必须有"的细节。
 //
 // 为什么一直在强调"浏览器拿不到完整路径"：File 对象只有 name，
 // 而脚本要在用户自己的磁盘上找到那个文件，所以路径只能靠拖拽 / 粘贴 / 按文件名搜索。
 
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   DEFAULT_FFMPEG_URLS,
   baseNameOf,
@@ -21,6 +26,7 @@ import {
   validateScriptParams,
   type ScriptParams,
   type ScriptPlatform,
+  type SegmenterDownload,
 } from '../api/segmentScript'
 import { copyText } from '../utils/clipboard'
 
@@ -35,6 +41,9 @@ const packSize = ref(100)
 const transcodeBitrate = ref('')
 const ffmpegUrl = ref('')
 
+/** 服务端发布的 segmenter 清单；空数组 = 脚本会走内置 HLS-fMP4 兜底路径。 */
+const segmenterDownloads = ref<SegmenterDownload[]>([])
+
 const fileInput = ref<HTMLInputElement | null>(null)
 const previewEl = ref<HTMLDetailsElement | null>(null)
 const copyState = ref<'idle' | 'ok' | 'failed'>('idle')
@@ -42,6 +51,39 @@ let copyTimer: number | undefined
 
 /** 用户是否手改过文件名。没手改时，粘贴路径会自动带出文件名（三条路里的第 ③ 条要用它）。 */
 const nameManual = ref(false)
+
+/**
+ * 拉 segmenter 清单。**失败必须安静**：这个面板的核心承诺是"服务端不可达也能生成脚本"，
+ * 拿不到清单只会让脚本走兜底路径，不该在界面上报错。
+ */
+async function loadSegmenterDownloads() {
+  try {
+    const res = await fetch('/api/downloads/segmenter', { headers: { Accept: 'application/json' } })
+    if (!res.ok) return
+    const body = (await res.json()) as { platforms?: Partial<SegmenterDownload>[] }
+    const origin = window.location.origin
+    segmenterDownloads.value = (body.platforms ?? [])
+      .filter((p) => typeof p.url === 'string' && p.url !== '')
+      .map((p) => ({
+        os: String(p.os ?? ''),
+        arch: String(p.arch ?? ''),
+        file: String(p.file ?? ''),
+        // 服务端给的是 /downloads/xxx 这样的相对路径，烘焙进脚本前必须变成绝对地址。
+        url: new URL(String(p.url), origin).toString(),
+        sha256: String(p.sha256 ?? ''),
+      }))
+  } catch {
+    // 服务端不可达 / 返回不是 JSON：保持空清单，脚本自动兜底。
+  }
+}
+
+onMounted(loadSegmenterDownloads)
+
+/** 当前平台在清单里的条目（只用于界面提示，脚本自己在运行时选）。 */
+const currentEntry = computed(() => {
+  const os = platform.value === 'windows' ? 'windows' : 'linux'
+  return segmenterDownloads.value.find((d) => d.os === os) ?? null
+})
 
 function paramsFor(target: ScriptPlatform): ScriptParams {
   return {
@@ -53,6 +95,7 @@ function paramsFor(target: ScriptPlatform): ScriptParams {
     ffmpegUrl: ffmpegUrl.value.trim(),
     transcodeBitrate: transcodeBitrate.value.trim(),
     platform: target,
+    segmenterDownloads: segmenterDownloads.value,
   }
 }
 
@@ -181,8 +224,11 @@ onBeforeUnmount(() => {
     </header>
 
     <p class="muted small">
-      不需要服务器、不依赖 /api：脚本由这个页面直接拼出来，你在自己机器上运行它，
-      它会调 ffmpeg 把视频切成放映室要的目录。切完用上面的「选择分片目录」选中即可开播。
+      脚本由这个页面直接拼出来，你在自己机器上运行它。它会先从服务端
+      （<code class="mono">GET /api/downloads/segmenter</code> 发布的位置）下载 <b>segmenter</b>
+      可执行文件并<b>校验 sha256</b>（校验不过立刻退出，不会运行来路不明的程序），再调它切片；
+      下载不到（离线 / <code class="mono">-NoExe</code>）就自动退回内置的 HLS-fMP4 路径。
+      服务端连不上也照样能生成脚本。切完用上面的「选择分片目录」选中即可开播。
     </p>
 
     <div class="platforms" role="radiogroup" aria-label="脚本平台">
@@ -306,11 +352,24 @@ onBeforeUnmount(() => {
       <ul>
         <li>找输入视频：上面的三条路依次尝试（命令行参数 → 拖拽 → 粘贴/按文件名搜 → 询问）。</li>
         <li>找 ffmpeg / ffprobe；没有就提示 5 秒后用 curl 自动下一份放到脚本旁边（Ctrl+C 可取消）。</li>
-        <li>ffprobe 探测时长与编码；不是 H.264/AAC（或你填了转码码率）就先转码。</li>
-        <li>DASH 切片：每片约 {{ segmentSeconds || 2 }} 秒，产出 init.mp4 + 分片。</li>
         <li>
-          按每 {{ packSize || 1 }} 片拼包 + 逐片 sha256 + 写 index.json，最后打印产物容量与
-          "这个码率能带几个人"的容量提示。
+          <b>从服务器下载 segmenter 可执行文件</b>到脚本旁边，并<b>校验 sha256</b>（校验不过就删掉文件、
+          立刻退出，绝不运行来路不明的程序）；下载不到就改用内置的 HLS-fMP4 兜底路径。
+          <template v-if="currentEntry">
+            当前平台将下载 <code class="mono">{{ currentEntry.file }}</code>。
+          </template>
+          <template v-else>
+            现在没拉到二进制清单（服务端未发布或不可达），脚本会走兜底路径。
+          </template>
+        </li>
+        <li>ffprobe 探测时长与编码；不是 H.264/AAC/AV1/VP9（或你填了转码码率）就先转码。</li>
+        <li>切片：每片约 {{ segmentSeconds || 2 }} 秒，产出 init.mp4 + 分片（由 segmenter 完成，不再是 DASH）。</li>
+        <li>
+          用 ffprobe <b>断言 init.mp4 的轨道数与 index.json 声明的编码一致</b>，不一致就报错退出
+          —— 不会再静默产出"丢音轨"、浏览器无法播放的坏切片。
+        </li>
+        <li>
+          产物由 segmenter 拼包 + 逐片 sha256 + 写 index.json（每 {{ packSize || 1 }} 片一个包）。
         </li>
       </ul>
     </div>
