@@ -13,6 +13,7 @@ const (
 	envMaxMembers       = "PR_MAX_MEMBERS"
 	envDefaultStreamBps = "PR_DEFAULT_STREAM_BPS"
 	envSTUNURLs         = "PR_STUN_URLS"
+	envAllowedOrigins   = "PR_ALLOWED_ORIGINS"
 	envTURNURLs         = "PR_TURN_URLS"
 	envTURNUser         = "PR_TURN_USER"
 	envTURNPass         = "PR_TURN_PASS"
@@ -60,6 +61,9 @@ func Default() *Config {
 			MaxMessageBytes: 256 * 1024,
 			MaxChatLen:      500,
 			SendQueueSize:   32,
+			// 本机开发时页面在 Vite 5173、/ws 在 Go 8080（跨源）；
+			// 单端口部署与隧道域名天然同源，不需要在这里列。
+			AllowedOrigins: []string{"127.0.0.1:5173", "localhost:5173"},
 		},
 		ICE: ICEConfig{
 			STUNURLs: []string{"stun:stun.l.google.com:19302"},
@@ -112,6 +116,12 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv(envSTUNURLs); v != "" {
 		cfg.ICE.STUNURLs = splitList(v)
+	}
+	// 额外允许的 WebSocket 来源（逗号分隔，支持 *.example.com）。
+	// 同源（页面与 /ws 同端口）始终放行，所以这一项主要是给"前后端分离开发"或
+	// 需要从别的域名嵌页面进来的场景用。
+	if v := os.Getenv(envAllowedOrigins); v != "" {
+		cfg.Signal.AllowedOrigins = splitList(v)
 	}
 	if v := os.Getenv(envTURNURLs); v != "" {
 		cfg.ICE.TURNURLs = splitList(v)

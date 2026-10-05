@@ -28,10 +28,12 @@ func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager) gin
 		}
 
 		conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{
-			// 本机开发：Vite dev server 与 Go 不同端口，放开来源校验（SPEC §1.3）。
-			// 部署到公网时必须改为 OriginPatterns 白名单 + WSS。
-			InsecureSkipVerify: true,
-			CompressionMode:    websocket.CompressionDisabled,
+			// Origin 校验：单端口部署后页面与 /ws 同源，所以把**请求自身的 Host** 也加进
+			// 白名单 —— 隧道给的域名（http 或 https）零配置即可用，而跨站页面会被拒。
+			// 本机开发时页面在 Vite 5173、/ws 在 Go 8080，属于跨源，由 AllowedOrigins 覆盖。
+			// 注意：非浏览器客户端（curl/自动化）不发 Origin，coder/websocket 对这种情况放行。
+			OriginPatterns:  append(append([]string{}, cfg.Signal.AllowedOrigins...), c.Request.Host),
+			CompressionMode: websocket.CompressionDisabled,
 		})
 		if err != nil {
 			log.Printf("ws: 升级失败 room=%s client=%s: %v", roomID, clientID, err)

@@ -51,6 +51,13 @@ type SignalConfig struct {
 	MaxMessageBytes int64
 	MaxChatLen      int
 	SendQueueSize   int
+	// AllowedOrigins 是允许发起 WebSocket 的**额外**来源（host[:port]，支持 *.example.com）。
+	//
+	// 为什么需要它：单端口部署后页面与 /ws 同源，所以同源请求一律放行（见 ws.go 里把
+	// 请求自身的 Host 也加进白名单）；而本机开发时页面在 Vite 5173、/ws 在 Go 8080，
+	// 属于跨源，必须显式列出。默认值覆盖本机开发的两种情况。
+	// 公网 http 隧道域名无需配置 —— 它天然同源。
+	AllowedOrigins []string
 }
 
 // SegmentConfig 控制「服务端视频切片」的配额、校验与生命周期。
