@@ -26,7 +26,16 @@ export interface SegmentPart {
 
 export interface SegmentResult {
   bytes: number
+  /** 分片数（打包与否都指分片，不是文件数）。 */
   segments: number
+  /**
+   * 产物**文件**数（init.mp4 + index.json + 若干个 pack-*.bin）。
+   *
+   * 打包后文件数远小于分片数（578 片可能只有 8 个文件），写目录的进度必须用它，
+   * 否则进度条会一直卡在 2% 左右（分母是分片数、分子是文件数）。
+   * 老服务端不返回该字段时退化为 null，由调用方回退到分片数。
+   */
+  files: number | null
   /** true：GET /result 直接是 zip；false：GET /result 是 manifest，要逐份下载。 */
   singleResponse: boolean
   parts?: SegmentPart[]
@@ -201,6 +210,7 @@ function normalizeResult(raw: unknown): SegmentResult | undefined {
   return {
     bytes: result.bytes,
     segments: result.segments,
+    files: typeof result.files === 'number' && result.files > 0 ? result.files : null,
     // 服务端一定给 singleResponse；万一没给，就按"有没有 parts"推断。
     singleResponse:
       typeof result.singleResponse === 'boolean' ? result.singleResponse : parts.length === 0,

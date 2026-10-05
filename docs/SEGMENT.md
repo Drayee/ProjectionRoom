@@ -72,8 +72,10 @@ curl -OJ http://127.0.0.1:8080/api/v1/segment/jobs/7KQ2M9XR4T8A/result
 ```
 index.json          # 分片索引（SPEC §4.3）
 init.mp4            # ftyp + moov，MSE 的首个 appendBuffer
-c00001.m4s …        # 按 moof 边界切出的媒体分片
+pack-0001.bin …     # 每 100 片合成一个包（默认）；-pack 1 / PR_SEGMENT_PACK_SIZE=1 时是 c00001.m4s…
 ```
+
+> 打包格式见 §6：产物文件数因此从 ~1800 降到 ~18，下载与解压也一起变快。
 
 产物总大小 **> 1 GiB** → `200 application/json` 的 manifest：
 
@@ -154,6 +156,7 @@ unzip -o -d ./room-media part1.zip
 | 源视频时长上限 | `60m` | `PR_SEGMENT_MAX_DURATION` | 超限 422 |
 | 源文件大小上限 | `16GiB` | `PR_SEGMENT_MAX_SOURCE_BYTES` | 超限 413 |
 | 分片目标时长 | `2` 秒 | `PR_SEGMENT_SECONDS` | 与 `cmd/segmenter -frag-sec` 同义 |
+| 打包粒度 | `100` 片/包 | `PR_SEGMENT_PACK_SIZE` | 与 `cmd/segmenter -pack` 同义；`1` = 不打包 |
 | 临时目录 | `%TEMP%\projectionroom-segment` | `PR_SEGMENT_TEMP_DIR` | 每个作业一个 `job-<id>/` 子目录 |
 | ffmpeg 路径 | 自动发现 | `PR_FFMPEG` | 目录或可执行文件都可以 |
 
@@ -240,6 +243,9 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -fragment
 
 # 3) 低上行预设：转码降码率后再切（长视频耗时数分钟）
 go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k -uplink-mbps 3
+
+# 4) 关掉打包：产物与打包功能出现之前逐字节等价（每片一个 c00001.m4s）
+go run ./cmd/segmenter -in out_frag.mp4 -out ./room-media -pack 1
 ```
 
 | 参数 | 默认 | 说明 |
@@ -249,6 +255,7 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k -uplink-
 | `-fragment` | `false` | 输入是普通 MP4 时先无损重新封装 |
 | `-transcode` | 空 | 低上行预设：转码到指定码率（如 `1200k`） |
 | `-frag-sec` | `2` | 分片目标时长（秒） |
+| `-pack` | `100` | 每 N 片合成一个 `pack-*.bin`；`1` = 不打包（逐片一个文件） |
 | `-uplink-mbps` | `12` | 仅用于打印容量提示（SPEC §6.1） |
 | `-ffmpeg` | 空 | 指定 ffmpeg 路径（目录或可执行文件），优先于 `PR_FFMPEG` |
 
@@ -256,11 +263,15 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k -uplink-
 
 ```
 room-media/
-├── index.json     # 分片索引
+├── index.json     # 分片索引（含 packs 清单）
 ├── init.mp4       # ftyp + moov
-├── c00001.m4s     # 从 moof 起始，含 mdat
+├── pack-0001.bin  # 第 1–100 片，每片仍是完整的 moof+mdat
+├── pack-0002.bin  # 第 101–200 片
 └── …
 ```
+
+`-pack 1` 时退化为逐片一个文件（`c00001.m4s …`），`index.json` 里不会出现 `packs` 字段；
+两种形态客户端都能读（见 §6）。
 
 本地 CLI 与服务端切片**共用同一份流水线实现**（`internal/service/segment`），
 所以两条路径的产物格式完全一致，主播端"选择分片目录"的行为不需要任何改动。
@@ -278,7 +289,86 @@ room-media/
 
 ---
 
-## 6. 前端集成提示
+## 6. 打包格式（每 N 片一个 `.bin`）
+
+### 6.1 为什么
+
+Windows 上"每个文件一次写盘"有固定开销：浏览器先在同目录写 swap 文件再改名，杀软逐个扫描，
+1800 个小分片写入要好几分钟。**每 N 片（默认 100）合成一个 `pack-XXXX.bin`** 把产物文件数
+从 ~1800 降到 ~18，写盘、下载、解压一起变快（分片字节本身完全不变）。
+
+### 6.2 `index.json` 的两种形态
+
+字段含义是**沿用**的，没有新发明一套：`segments[i].file` 是"包含该片的文件"，
+`segments[i].offset` 是"该片在这个文件里的字节偏移"，`size` 恒为该片字节数。
+
+**打包（默认）** —— 顶层多一个 `packs` 数组，按顺序排列：
+
+```json
+{
+  "version": 1,
+  "initFile": "init.mp4",
+  "mimeType": "video/mp4; codecs=\"avc1.64001f,mp4a.40.2\"",
+  "totalDuration": 812.44,
+  "bitrateBps": 2411733,
+  "segments": [
+    { "index": 1, "file": "pack-0001.bin", "offset": 0, "size": 604112, "sha256": "3f0c…" },
+    { "index": 2, "file": "pack-0001.bin", "offset": 604112, "size": 598271, "sha256": "a91b…" }
+  ],
+  "packs": [
+    { "file": "pack-0001.bin", "firstSegment": 1, "count": 100, "bytes": 60123456 },
+    { "file": "pack-0002.bin", "firstSegment": 101, "count": 100, "bytes": 59881234 }
+  ]
+}
+```
+
+- `packs[i].file` 按顺序排列，`firstSegment`/`count` 覆盖全部分片（不重不漏）；
+- `packs[i].bytes` 是包的字节数，包内分片的 `offset`+`size` 不得越过它；
+- **`sha256` 始终是对"分片"求的**，不是对包 —— 逐片校验在两种形态下完全一致。
+
+**不打包（`-pack 1` / `PR_SEGMENT_PACK_SIZE=1`）** —— 保持完全现状：
+`segments[i].file = "c00001.m4s"`、`offset` 是它在原始视频里的偏移、`packs` 字段省略。
+
+> 客户端与服务端都必须能读两种形态：解析器只认 `segments`，
+> 只有"怎么把这一片读出来"这一件事取决于有没有 `packs`。
+
+### 6.3 浏览器端如何切片读取
+
+打包后**绝不能把整个 `.bin` 读进内存**（一个 100 片的包可能有几百 MB）。`useMediaIndex`
+只保存"包文件句柄 + 包内偏移"，按需切一片：
+
+```ts
+// client/src/composables/useMediaIndex.ts（节选）
+const slice = slices.get(segmentIndex)          // { offset, size }，来自 index.json
+if (!slice) {
+  return new Uint8Array(await file.arrayBuffer())          // 未打包：分片就是一个文件
+}
+return new Uint8Array(
+  await file.slice(slice.offset, slice.offset + slice.size).arrayBuffer(),
+)
+```
+
+`File.slice()` 直接透传到磁盘，只读这一段字节；`readChunk(i)` 的签名与返回值不变，
+因此 `stores/room.ts`、DataChannel 发送、MSE `appendBuffer` 全部零改动。
+客户端在 `loadDirectory` 阶段就校验 `packs` 与 `segments` 自洽（偏移递增、不重叠、
+不越界），不合法直接拒绝开播，而不是等到播放中途才 `appendBuffer` 报错。
+
+### 6.4 分批下载与 zip 的切分单位
+
+分批（`parts`）与 zip 打包都按**产物文件**切分：打包后一个 `pack-0001.bin` 就是一个
+不可再分的单位（绝不把一个包劈到两份里），所以每份 zip 里都是完整的包，
+解压到同一个目录即可拼回完整产物。
+
+`result` 里两个计数刻意分开命名：
+
+| 字段 | 含义 |
+| :--- | :--- |
+| `segments` | **媒体分片数**（与是否打包无关，仍然是 1800 这种量级） |
+| `files` | **产物文件数**（`index.json` + `init.mp4` + 包数/分片文件数） |
+
+---
+
+## 7. 前端集成提示
 
 1. `POST /api/v1/segment/jobs`（`FormData` 字段名 `file`）→ 记下 `jobId`；
 2. 轮询 `GET /jobs/{id}`（建议 1s 一次）：`state` 为 `done` 后看 `result`；
@@ -290,12 +380,13 @@ room-media/
 
 ---
 
-## 7. 已知限制
+## 8. 已知限制
 
 - 本服务是**一次性预处理**，不属于直播链路；直播期服务器仍然不接触任何视频字节（I1 未被破坏）。
 - 服务端转码只用于"源编码不是 H.264/AAC"的情况，固定 `veryfast + crf 23`，没有码率预设；
   需要精确控制码率时请用本地 `cmd/segmenter -transcode`。
 - 产物保存在临时目录，TTL 到期即删；下载要趁早，重复提交会重新消耗配额与磁盘。
-- 单个产物文件若本身超过单份上限（默认 1 GiB；2 秒分片几乎不可能出现）会直接失败：
-  宁可明确报错，也不产出超限的一份。
+- 单个产物文件若本身超过单份上限（默认 1 GiB；打包后是"一个包"而不是"一片"）会直接失败：
+  宁可明确报错，也不产出超限的一份。因此 `PR_SEGMENT_PACK_SIZE` 调得很大时，
+  要注意单包可能逼近该上限。
 - 服务器端不提供断点续传：分批下载的每一份都可以单独重下（内容一致），但没有 Range 支持。

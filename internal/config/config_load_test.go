@@ -83,6 +83,13 @@ func TestSegmentDefaults(t *testing.T) {
 	if sc.SegmentSeconds != 2 {
 		t.Fatalf("默认分片时长应为 2s，实际 %v", sc.SegmentSeconds)
 	}
+	// 默认打包（每 100 片一个 .bin）：这是把产物文件数从 ~1800 降到 ~18 的关键。
+	if sc.PackSize != 100 {
+		t.Fatalf("默认打包粒度应为 100，实际 %d", sc.PackSize)
+	}
+	if sc.PackSize != DefaultPackSize {
+		t.Fatalf("默认打包粒度应与 DefaultPackSize 一致，实际 %d", sc.PackSize)
+	}
 }
 
 func TestSegmentEnvOverride(t *testing.T) {
@@ -96,6 +103,7 @@ func TestSegmentEnvOverride(t *testing.T) {
 	t.Setenv(envSegmentMaxDuration, "20m")
 	t.Setenv(envSegmentMaxSource, "2048")
 	t.Setenv(envSegmentSeconds, "1.5")
+	t.Setenv(envSegmentPackSize, "1")
 	t.Setenv(envSegmentTempDir, `D:\tmp\pr-seg`)
 	t.Setenv(envFFmpeg, `D:\ffmpeg\bin\ffmpeg.exe`)
 
@@ -121,6 +129,10 @@ func TestSegmentEnvOverride(t *testing.T) {
 	if sc.MaxDuration != 20*time.Minute || sc.SegmentSeconds != 1.5 {
 		t.Fatalf("时长/分片覆盖失败: %+v", sc)
 	}
+	// 1 是合法值：表示关掉打包（逐片一个 c*.m4s，与打包功能出现之前一致）。
+	if sc.PackSize != 1 {
+		t.Fatalf("打包粒度应允许覆盖为 1（不打包），实际 %d", sc.PackSize)
+	}
 	if sc.TempDir != `D:\tmp\pr-seg` || sc.FFmpegPath != `D:\ffmpeg\bin\ffmpeg.exe` {
 		t.Fatalf("目录/ffmpeg 覆盖失败: %+v", sc)
 	}
@@ -140,6 +152,9 @@ func TestSegmentEnvRejectsInvalid(t *testing.T) {
 		{envSegmentMaxDuration, "0s"},
 		{envSegmentMaxSource, "x"},
 		{envSegmentSeconds, "0"},
+		{envSegmentPackSize, "0"},
+		{envSegmentPackSize, "-7"},
+		{envSegmentPackSize, "many"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+"="+tc.value, func(t *testing.T) {

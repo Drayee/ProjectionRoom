@@ -520,6 +520,11 @@ func TestJobCompletesAndDeletesSource(t *testing.T) {
 	if done.Result.Segments != 2 {
 		t.Fatalf("分片数应为 2，实际 %d", done.Result.Segments)
 	}
+	// 文件数与分片数是两个概念，必须分开命名：这里的假产物是逐片一个文件，
+	// 所以 2 片 + index.json + init.mp4 = 4 个文件。
+	if done.Result.Files != 4 {
+		t.Fatalf("产物文件数应为 4，实际 %d", done.Result.Files)
+	}
 
 	// 源文件必须已删除，产物必须还在。
 	entries := readDirNames(t, cfg.Segment.TempDir)

@@ -153,25 +153,36 @@ room-media/
 ### 4.3 索引模型
 
 ```go
-// internal/media/index.go
+// internal/model/index.go
 type Segment struct {
-    Index    int     `json:"index"`     // 0-based，0 固定为 init 段
-    File     string  `json:"file"`      // "c00001.m4s"
-    Offset   int64   `json:"offset"`    // 在原始 frag mp4 中的字节偏移
+    Index    int     `json:"index"`
+    File     string  `json:"file"`      // 打包后是 "pack-0001.bin"，未打包是 "c00001.m4s"
+    Offset   int64   `json:"offset"`    // 该片在 File 里的字节偏移（打包时是包内偏移）
     Size     int64   `json:"size"`
     Duration float64 `json:"duration"`  // 秒
     StartPTS float64 `json:"startPts"`  // 播放时间轴起点（秒）
     Keyframe bool    `json:"keyframe"`  // 是否可作为 seek 落点
-    SHA256   string  `json:"sha256"`    // 完整性校验
+    SHA256   string  `json:"sha256"`    // 完整性校验（始终对**分片**求，不是对包）
+}
+
+// Pack 是打包产物：每 N 片合成一个 .bin（默认 N=100）。
+// 为什么打包：Windows 上"每个文件一次 createWritable()"有固定开销（swap 文件 + 杀软扫描），
+// 60 分钟的视频有 ~1800 个分片，逐片落盘要好几分钟；打包后只剩 ~18 个文件。
+type Pack struct {
+    File         string `json:"file"`         // "pack-0001.bin"
+    FirstSegment int    `json:"firstSegment"`  // 该包第一片的 index
+    Count        int    `json:"count"`
+    Bytes        int64  `json:"bytes"`         // 包字节数，必须等于盘上实际大小
 }
 
 type Index struct {
     Version       int       `json:"version"`
     InitFile      string    `json:"initFile"`
-    MimeType      string    `json:"mimeType"`      // 如 video/mp4; codecs="avc1.640028,mp4a.40.2"
+    Packs         []Pack    `json:"packs,omitempty"` // 省略 = 逐片成文件（向后兼容）
+    MimeType      string    `json:"mimeType"`
     TotalDuration float64   `json:"totalDuration"`
     SegmentSec    float64   `json:"segmentSec"`
-    BitrateBps    int64     `json:"bitrateBps"`    // 全局平均码率，容量模型输入
+    BitrateBps    int64     `json:"bitrateBps"`
     Segments      []Segment `json:"segments"`
 }
 ```

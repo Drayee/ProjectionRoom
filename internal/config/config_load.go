@@ -28,9 +28,17 @@ const (
 	envSegmentMaxDuration   = "PR_SEGMENT_MAX_DURATION"
 	envSegmentMaxSource     = "PR_SEGMENT_MAX_SOURCE_BYTES"
 	envSegmentSeconds       = "PR_SEGMENT_SECONDS"
+	envSegmentPackSize      = "PR_SEGMENT_PACK_SIZE"
 	envSegmentTempDir       = "PR_SEGMENT_TEMP_DIR"
 	envFFmpeg               = "PR_FFMPEG"
 )
+
+// DefaultPackSize 是分片打包的默认粒度（每个 .bin 容纳多少片）。
+//
+// 它在这里而不是在 segment 包里，是因为"每包多少片"是一个配置项，而 config 不能反向
+// import segment（queue.go 依赖 config，会形成 import 循环）。segment 与 cmd/segmenter
+// 都引用这个常量，因此默认值只有一处定义。
+const DefaultPackSize = 100
 
 // Default 返回面向本机开发的默认配置。
 // 注意：服务端不传输任何视频字节，这里的 DefaultStreamBps 只用于容量预判。
@@ -63,6 +71,9 @@ func Default() *Config {
 			MaxDuration:            60 * time.Minute,
 			MaxSourceBytes:         16 << 30, // 16 GiB
 			SegmentSeconds:         2,
+			// 每 100 片合成一个 pack-*.bin：Windows 上写 1800 个小文件要好几分钟，
+			// 打包后产物文件数降到 ~18（细节见 docs/SEGMENT.md §6）。
+			PackSize: DefaultPackSize,
 		},
 		LogLevel: "info",
 	}
@@ -182,6 +193,14 @@ func applySegmentEnv(sc *SegmentConfig) error {
 			return fmt.Errorf("config: %s 必须是正数, got %q", envSegmentSeconds, v)
 		}
 		sc.SegmentSeconds = f
+	}
+	if v := os.Getenv(envSegmentPackSize); v != "" {
+		// 1 是"不打包"：逐片一个文件，与打包功能出现之前一致。
+		n, err := positiveInt(envSegmentPackSize, v)
+		if err != nil {
+			return err
+		}
+		sc.PackSize = n
 	}
 	if v := os.Getenv(envSegmentTempDir); v != "" {
 		sc.TempDir = v

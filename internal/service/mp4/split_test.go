@@ -247,6 +247,113 @@ func TestSplitSyntheticFixtureIndexFileOnDisk(t *testing.T) {
 	}
 }
 
+// TestSplitPackedMatchesUnpacked 锁定打包格式的核心不变量：
+// 打包只是"把连续的分片放进同一个文件"，逐片字节与逐片 sha256 必须与不打包时**完全一致**，
+// 且 init + 按 offset/size 切出来的全部片段拼回去仍与原文件逐字节相同。
+//
+// 打包的动机是产物文件数（Windows 上每多一个文件就多一次固定写盘开销），
+// 因此这里同时断言：3 个分片按每包 2 片打包后，目录里只有 2 个包文件。
+func TestSplitPackedMatchesUnpacked(t *testing.T) {
+	original := buildSyntheticFragmentedMP4(t, []bool{true, false, true})
+
+	plainDir := t.TempDir()
+	plain, err := SplitFile(writeTemp(t, original), SplitOptions{OutDir: plainDir})
+	if err != nil {
+		t.Fatalf("未打包切分失败: %v", err)
+	}
+
+	packedDir := t.TempDir()
+	packed, err := SplitFile(writeTemp(t, original), SplitOptions{OutDir: packedDir, PackSize: 2})
+	if err != nil {
+		t.Fatalf("打包切分失败: %v", err)
+	}
+
+	if err := packed.Validate(); err != nil {
+		t.Fatalf("打包后的索引不自洽: %v", err)
+	}
+	if len(packed.Segments) != len(plain.Segments) {
+		t.Fatalf("打包不该改变分片数：%d → %d", len(plain.Segments), len(packed.Segments))
+	}
+
+	// 3 片 / 每包 2 片 → 2 个包；包清单必须按序覆盖全部分片。
+	wantPacks := []model.Pack{
+		{File: "pack-0001.bin", FirstSegment: 1, Count: 2},
+		{File: "pack-0002.bin", FirstSegment: 3, Count: 1},
+	}
+	if len(packed.Packs) != len(wantPacks) {
+		t.Fatalf("应产出 %d 个包，实际 %d（%+v）", len(wantPacks), len(packed.Packs), packed.Packs)
+	}
+	for i, want := range wantPacks {
+		got := packed.Packs[i]
+		if got.File != want.File || got.FirstSegment != want.FirstSegment || got.Count != want.Count {
+			t.Fatalf("第 %d 个包不正确：%+v，应为 %+v", i+1, got, want)
+		}
+		if got.Bytes <= 0 {
+			t.Fatalf("第 %d 个包的 bytes 必须为正，实际 %d", i+1, got.Bytes)
+		}
+	}
+
+	// 目录里只有 index.json + init.mp4 + 2 个包：不再有逐片文件残留。
+	entries, err := os.ReadDir(packedDir)
+	if err != nil {
+		t.Fatalf("读取打包目录失败: %v", err)
+	}
+	if len(entries) != 2+len(wantPacks) {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("打包目录应只有 index.json + init.mp4 + %d 个包，实际 %v", len(wantPacks), names)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".m4s") {
+			t.Fatalf("打包后不该残留逐片文件：%s", e.Name())
+		}
+	}
+
+	var rebuilt bytes.Buffer
+	rebuilt.Write(readFileBytes(t, filepath.Join(packedDir, packed.InitFile)))
+
+	for i, seg := range packed.Segments {
+		want := readFileBytes(t, filepath.Join(plainDir, plain.Segments[i].File))
+
+		packData := readFileBytes(t, filepath.Join(packedDir, seg.File))
+		got := packData[seg.Offset : seg.Offset+seg.Size]
+
+		if !bytes.Equal(got, want) {
+			t.Fatalf("第 %d 片在包内的字节与未打包时不一致（%d vs %d 字节）",
+				seg.Index, len(got), len(want))
+		}
+		// sha256 始终是对"分片"求的，与怎么打包无关。
+		sum := sha256.Sum256(got)
+		if hex.EncodeToString(sum[:]) != seg.SHA256 {
+			t.Fatalf("第 %d 片的 sha256 与索引不一致", seg.Index)
+		}
+		if plain.Segments[i].SHA256 != seg.SHA256 {
+			t.Fatalf("第 %d 片打包前后的 sha256 不一致", seg.Index)
+		}
+		if plain.Segments[i].Size != seg.Size {
+			t.Fatalf("第 %d 片打包前后的 size 不一致", seg.Index)
+		}
+		rebuilt.Write(got)
+	}
+
+	if !bytes.Equal(rebuilt.Bytes(), original) {
+		t.Fatalf("打包产物拼不回原文件：原 %d 字节，拼回 %d 字节", len(original), rebuilt.Len())
+	}
+
+	// 每个包都以 moof 开头（包里第一片就是从包首开始的完整分片）。
+	for _, pack := range packed.Packs {
+		data := readFileBytes(t, filepath.Join(packedDir, pack.File))
+		if int64(len(data)) != pack.Bytes {
+			t.Fatalf("%s 实际 %d 字节与索引 %d 不一致", pack.File, len(data), pack.Bytes)
+		}
+		if string(data[4:8]) != "moof" {
+			t.Fatalf("%s 必须以 moof 开头，实际 %q", pack.File, data[4:8])
+		}
+	}
+}
+
 func TestSplitRejectsNonFragmentedMP4(t *testing.T) {
 	ftyp := boxBytes("ftyp", concat([]byte("isom"), u32(0x200), []byte("isom")))
 	moov := buildSyntheticMovie(1, 1000, 1000, "avc1")

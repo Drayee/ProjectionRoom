@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"ProjectionRoom/internal/config"
+	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/service/segment"
 	"ProjectionRoom/internal/usecase"
@@ -445,7 +446,10 @@ func TestSegmentResultDeliveryHTTP(t *testing.T) {
 			maxFile = f.Size
 		}
 	}
-	partLimit := maxFile*2 + 512
+	// 上限取"最大产物 + 3 个 zip 成员开销 + 1"：这样无论产物是
+	// index+init+每片一个文件（PR_SEGMENT_PACK_SIZE=1）还是 index+init+若干 pack-*.bin，
+	// 都必然至少切成两份，且每个文件本身都装得下。
+	partLimit := maxFile + 3*512 + 1
 
 	// ---- 单次返回：GET /result 直接拿到 zip ----
 	srv, _ := segmentServer(t, nil)
@@ -467,21 +471,31 @@ func TestSegmentResultDeliveryHTTP(t *testing.T) {
 		t.Fatalf("读取 zip 失败: %v", err)
 	}
 	entries := zipEntries(t, zipBytes)
-	for _, want := range []string{"index.json", "init.mp4", "c00001.m4s"} {
+	for _, want := range []string{"index.json", "init.mp4"} {
 		if _, ok := entries[want]; !ok {
 			t.Fatalf("zip 里缺少 %s，实际 %v", want, mapKeys(entries))
 		}
 	}
-	var index struct {
-		Version       int     `json:"version"`
-		MimeType      string  `json:"mimeType"`
-		TotalDuration float64 `json:"totalDuration"`
-	}
+	var index model.Index
 	if err := json.Unmarshal(entries["index.json"], &index); err != nil {
 		t.Fatalf("zip 里的 index.json 无法解析: %v", err)
 	}
 	if index.Version <= 0 || index.MimeType == "" || index.TotalDuration <= 0 {
 		t.Fatalf("zip 里的 index.json 不是合法索引: %+v", index)
+	}
+	if err := index.Validate(); err != nil {
+		t.Fatalf("zip 里的 index.json 不自洽: %v", err)
+	}
+	// 分片内容的文件形态由打包决定：默认每 100 片一个 pack-*.bin，
+	// PR_SEGMENT_PACK_SIZE=1 才是逐片一个 c*.m4s。zip 里必须有与之对应的文件。
+	if index.Packed() {
+		for _, pack := range index.Packs {
+			if _, ok := entries[pack.File]; !ok {
+				t.Fatalf("zip 里缺少分片包 %s，实际 %v", pack.File, mapKeys(entries))
+			}
+		}
+	} else if _, ok := entries["c00001.m4s"]; !ok {
+		t.Fatalf("未打包时 zip 里应有 c00001.m4s，实际 %v", mapKeys(entries))
 	}
 
 	// ---- 分批：小上限 → GET /result 返回 manifest，逐份下载并校验 sha256 ----

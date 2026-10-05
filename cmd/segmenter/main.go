@@ -6,6 +6,9 @@
 //	segmenter -in movie.mp4 -out ./room-media -fragment       # 无损重新封装后再切
 //	segmenter -in movie.mp4 -out ./room-media -transcode 1200k # 低上行预设：转码降码率
 //
+// 默认每 100 片合成一个 pack-0001.bin（产物文件数从 ~1800 降到 ~18，Windows 上写盘快得多）；
+// `-pack 1` 关掉打包，产出的目录与打包功能出现之前逐字节等价。
+//
 // 为什么必须切在 moof 边界上：SourceBuffer.appendBuffer() 只接受完整的 fMP4 片段，
 // 按固定字节数切割会产出"半个 moof"，浏览器直接抛错（SPEC §4.2）。
 //
@@ -21,6 +24,7 @@ import (
 	"os"
 	"strings"
 
+	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/service/segment"
 	"ProjectionRoom/internal/usecase"
 )
@@ -31,19 +35,21 @@ func main() {
 	transcode := flag.String("transcode", "", "低上行预设：用 ffmpeg 转码到指定码率（如 1200k）后再切片")
 	fragment := flag.Bool("fragment", false, "输入是普通 MP4 时，先无损重新封装成 fragmented MP4")
 	fragSec := flag.Float64("frag-sec", 2, "分片目标时长（秒）")
+	pack := flag.Int("pack", config.DefaultPackSize,
+		"打包粒度：每 N 片合成一个 pack-*.bin；1 = 不打包（逐片一个 c*.m4s）")
 	uplinkMbps := flag.Float64("uplink-mbps", 12, "主播上行估计（Mbps），仅用于打印容量提示")
 	ffmpegPath := flag.String("ffmpeg", "",
 		"ffmpeg 路径（可为目录或可执行文件）；默认按 PR_FFMPEG → PATH → 常见安装目录 查找")
 
 	flag.Parse()
 
-	if err := run(*in, *out, *transcode, *fragment, *fragSec, *uplinkMbps, *ffmpegPath); err != nil {
+	if err := run(*in, *out, *transcode, *fragment, *fragSec, *pack, *uplinkMbps, *ffmpegPath); err != nil {
 		fmt.Fprintf(os.Stderr, "segmenter 失败: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(in, out, transcode string, fragment bool, fragSec, uplinkMbps float64, ffmpegPath string) error {
+func run(in, out, transcode string, fragment bool, fragSec float64, pack int, uplinkMbps float64, ffmpegPath string) error {
 	if strings.TrimSpace(in) == "" {
 		return fmt.Errorf("必须指定 -in")
 	}
@@ -52,6 +58,9 @@ func run(in, out, transcode string, fragment bool, fragSec, uplinkMbps float64, 
 	}
 	if fragSec <= 0 {
 		return fmt.Errorf("-frag-sec 必须为正")
+	}
+	if pack < 1 {
+		return fmt.Errorf("-pack 必须 >=1（1 = 不打包）")
 	}
 
 	explicit := strings.TrimSpace(ffmpegPath)
@@ -72,6 +81,7 @@ func run(in, out, transcode string, fragment bool, fragSec, uplinkMbps float64, 
 	artifacts, err := segment.Process(context.Background(), in, out, segment.ProcessOptions{
 		Tools:          tools,
 		SegmentSeconds: fragSec,
+		PackSize:       pack,
 		Transcode:      transcode,
 		ForceFragment:  fragment,
 		Logf:           logf,
@@ -85,6 +95,12 @@ func run(in, out, transcode string, fragment bool, fragSec, uplinkMbps float64, 
 	fmt.Printf("  编码格式: %s\n", index.MimeType)
 	fmt.Printf("  时长:     %.2f 秒\n", index.TotalDuration)
 	fmt.Printf("  分片:     %d 个（平均 %.2f 秒/片，目标 %.1f 秒）\n", len(index.Segments), index.SegmentSec, fragSec)
+	if index.Packed() {
+		fmt.Printf("  打包:     %d 个 .bin（每包 %d 片，产物共 %d 个文件）\n",
+			len(index.Packs), pack, len(artifacts.Files))
+	} else {
+		fmt.Printf("  打包:     关闭（每片一个 c*.m4s，产物共 %d 个文件）\n", len(artifacts.Files))
+	}
 	fmt.Printf("  码率:     %.2f Mbps\n", float64(index.BitrateBps)/1_000_000)
 	fmt.Printf("  体积:     %.2f MiB\n", float64(index.TotalBytes)/(1024*1024))
 

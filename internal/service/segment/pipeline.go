@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/service/mp4"
 )
 
@@ -122,6 +123,15 @@ func Probe(ctx context.Context, tools Tools, path string) (*MediaInfo, error) {
 	return info, nil
 }
 
+// DefaultPackSize 是默认的打包粒度：每个 pack-XXXX.bin 容纳多少片。
+//
+// 为什么默认打包：Windows 上"每个文件一次写盘"有固定开销（Chrome 先写同目录 swap
+// 文件再改名 + 杀软逐个扫描），1800 个小分片要好几分钟。100 片一包把产物文件数
+// 从 ~1800 降到 ~18，写入/下载/解压同步变快，而单包仍在几百 MB 级以内。
+//
+// 它是 config.DefaultPackSize 的别名：默认值只有一处定义。
+const DefaultPackSize = config.DefaultPackSize
+
 // ProcessOptions 控制一次切片流水线。
 type ProcessOptions struct {
 	// Tools 是已定位的 ffmpeg/ffprobe。
@@ -139,6 +149,10 @@ type ProcessOptions struct {
 	Info *MediaInfo
 	// WorkDir 是重新封装/转码的中间文件目录；为空时用系统临时目录。
 	WorkDir string
+	// PackSize 是每个 .bin 容纳的分片数；<=0 用 DefaultPackSize，1 表示不打包
+	// （逐片一个 c*.m4s，与打包功能出现之前逐字节等价）。
+	// 服务端取自 config.Segment.PackSize，CLI 取自 -pack。
+	PackSize int
 	// Progress 接收 0–1 的完成度；可空。
 	Progress func(float64)
 	// Logf 接收面向用户的阶段说明；可空。
@@ -170,6 +184,9 @@ func Process(ctx context.Context, in, outDir string, opts ProcessOptions) (*Arti
 	}
 	if opts.SegmentSeconds <= 0 {
 		return nil, fmt.Errorf("分片时长必须为正（%v）", opts.SegmentSeconds)
+	}
+	if opts.PackSize > 1 {
+		opts.logf("分片打包：每 %d 片合成一个 .bin（产物文件数因此大幅减少）", opts.PackSize)
 	}
 
 	emit := opts.progressFunc()
@@ -265,6 +282,7 @@ func Process(ctx context.Context, in, outDir string, opts ProcessOptions) (*Arti
 		OutDir:    outDir,
 		InitName:  InitFileName,
 		IndexName: IndexFileName,
+		PackSize:  opts.PackSize,
 	})
 	if err != nil {
 		return nil, err
@@ -282,6 +300,9 @@ func Process(ctx context.Context, in, outDir string, opts ProcessOptions) (*Arti
 func (o *ProcessOptions) applyDefaults() {
 	if o.SegmentSeconds <= 0 {
 		o.SegmentSeconds = 2
+	}
+	if o.PackSize <= 0 {
+		o.PackSize = DefaultPackSize
 	}
 }
 

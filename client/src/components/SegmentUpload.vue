@@ -351,7 +351,11 @@ async function writeAndPublish() {
 
   writing.value = true
   writeDone.value = 0
-  writeTotal.value = artifact.segments + 2 // index.json + init.mp4 + 全部分片
+  // 进度分母必须是**文件**数：打包后 578 片可能只有 8 个文件（pack-*.bin），
+  // 拿分片数当分母会让进度条一直停在 2% 左右。
+  // 老服务端不返回 files 时回退到"分片数 + 2"，只是进度偏保守，不会算错。
+  const expectedFiles = artifact.files ?? artifact.segments + 2
+  writeTotal.value = expectedFiles
   writeCurrent.value = ''
   controller = new AbortController()
 
@@ -381,7 +385,7 @@ async function writeAndPublish() {
         const written = await extractZipToDirectory(download.blob, dir, (progress) => {
           writeCurrent.value = progress.name
           writeDone.value = done + progress.done
-          writeTotal.value = artifact.segments + 2
+          writeTotal.value = Math.max(expectedFiles, progress.total)
         })
         names.push(...written)
         done += written.length

@@ -546,6 +546,7 @@ func (q *Queue) run(job *Job) {
 	artifacts, err := q.process.Process(q.ctx, job.sourcePath, outDir, ProcessOptions{
 		Tools:          q.tools,
 		SegmentSeconds: q.cfg.SegmentSeconds,
+		PackSize:       q.cfg.PackSize,
 		Auto:           true,
 		Info:           job.currentInfo(),
 		WorkDir:        workDir,
@@ -575,6 +576,7 @@ func (q *Queue) buildResult(artifacts *Artifacts) (*Result, [][]ArtifactFile, er
 	result := &Result{
 		Bytes:          artifacts.TotalBytes,
 		Segments:       len(artifacts.Index.Segments),
+		Files:          len(artifacts.Files),
 		SingleResponse: artifacts.TotalBytes <= q.cfg.SingleResponseMaxBytes,
 	}
 	if result.SingleResponse {

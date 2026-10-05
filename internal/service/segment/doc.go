@@ -1,5 +1,5 @@
 // Package segment 实现「服务端视频切片服务」：把用户上传的源视频**一次性预处理**成
-// 放映室可用的 fMP4 分片目录（init.mp4 + c*.m4s + index.json）。
+// 放映室可用的 fMP4 分片目录（init.mp4 + index.json + pack-*.bin，或 -pack 1 时的 c*.m4s）。
 //
 // # 与不变量 I1 的关系（必读）
 //
@@ -17,7 +17,7 @@
 // # 分层
 //
 //   - tools.go     ffmpeg/ffprobe 的发现顺序
-//   - pipeline.go  probe → 必要时重新封装/转码 → 按 moof 边界切分 → 写 index.json
+//   - pipeline.go  probe → 必要时重新封装/转码 → 按 moof 边界切分（默认每 100 片一个包）→ 写 index.json
 //   - artifacts.go 产物收集、manifest 分批、确定性 zip 打包
 //   - queue.go     作业队列、状态机、配额（并发/排队/令牌桶）、TTL 清理
 //

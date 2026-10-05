@@ -181,6 +181,7 @@ func segmentResultHandler(seg *segment.Queue) gin.HandlerFunc {
 				"jobId":          id,
 				"bytes":          view.Result.Bytes,
 				"segments":       view.Result.Segments,
+				"files":          view.Result.Files,
 				"singleResponse": false,
 				"parts":          view.Result.Parts,
 			})

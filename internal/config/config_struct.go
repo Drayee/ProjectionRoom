@@ -66,6 +66,9 @@ type SegmentConfig struct {
 	MaxSourceBytes int64
 	// SegmentSeconds 是分片目标时长，与 cmd/segmenter 的 -frag-sec 语义一致。
 	SegmentSeconds float64
+	// PackSize 是每个 .bin 容纳的分片数，与 cmd/segmenter 的 -pack 语义一致。
+	// 1 表示不打包（逐片一个 c*.m4s，与打包功能出现之前逐字节等价）。
+	PackSize int
 	// TempDir 是作业临时目录的根；为空时落在 os.TempDir()/projectionroom-segment。
 	TempDir string
 	// FFmpegPath 是 PR_FFMPEG 指定的 ffmpeg 路径（目录或可执行文件）。

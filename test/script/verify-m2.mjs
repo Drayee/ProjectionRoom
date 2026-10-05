@@ -291,7 +291,8 @@ async function injectMediaInPage(cdp, baseUrl) {
   const script = `(async () => {
     const base = ${JSON.stringify(baseUrl)};
     const index = await (await fetch(base + '/index.json')).json();
-    const names = ['index.json', index.initFile, ...index.segments.map((s) => s.file)];
+    // 打包后多个分片共用同一个 .bin：必须去重，否则同一个十几 MB 的包会被抓上百次。
+    const names = [...new Set(['index.json', index.initFile, ...index.segments.map((s) => s.file)])];
     const dt = new DataTransfer();
     for (const name of names) {
       const buf = await (await fetch(base + '/' + name)).arrayBuffer();

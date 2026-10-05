@@ -60,6 +60,61 @@ func TestValidateReportsEmptyIndex(t *testing.T) {
 	}
 }
 
+// packedIndex 返回一份打包布局的合法索引：两片一个包，共两个包。
+func packedIndex() *Index {
+	index := validIndex()
+	index.Segments = []Segment{
+		{Index: 1, File: "pack-0001.bin", Offset: 0, Size: 300_000, Duration: 2, StartPTS: 0, Keyframe: true},
+		{Index: 2, File: "pack-0001.bin", Offset: 300_000, Size: 200_000, Duration: 2, StartPTS: 2, Keyframe: true},
+		{Index: 3, File: "pack-0002.bin", Offset: 0, Size: 400_000, Duration: 2, StartPTS: 4, Keyframe: true},
+	}
+	index.Packs = []Pack{
+		{File: "pack-0001.bin", FirstSegment: 1, Count: 2, Bytes: 500_000},
+		{File: "pack-0002.bin", FirstSegment: 3, Count: 1, Bytes: 400_000},
+	}
+	return index
+}
+
+// TestValidateAcceptsPackedIndex 锁定"两种形态都接受"：打包布局必须合法。
+func TestValidateAcceptsPackedIndex(t *testing.T) {
+	index := packedIndex()
+	if !index.Packed() {
+		t.Fatal("有 packs 的索引应报告 Packed() = true")
+	}
+	if err := index.Validate(); err != nil {
+		t.Fatalf("合法的打包索引不应报错: %v", err)
+	}
+	// 分片数与文件数是两个概念：3 片装在 2 个包里。
+	if len(index.Segments) != 3 || index.FileCount() != 2 {
+		t.Fatalf("分片数应为 3、文件数应为 2，实际 %d/%d", len(index.Segments), index.FileCount())
+	}
+}
+
+// TestValidateRejectsBrokenPacks 覆盖"能被写错而播放器看不出来"的那几种偏移错误。
+func TestValidateRejectsBrokenPacks(t *testing.T) {
+	cases := map[string]func(*Index){
+		"包文件名重复":           func(i *Index) { i.Packs[1].File = "pack-0001.bin" },
+		"firstSegment 不连续": func(i *Index) { i.Packs[1].FirstSegment = 5 },
+		"count 为零":         func(i *Index) { i.Packs[0].Count = 0 },
+		"bytes 为零":         func(i *Index) { i.Packs[0].Bytes = 0 },
+		"包数不覆盖全部分片":        func(i *Index) { i.Packs = i.Packs[:1] },
+		"分片不属于该包":          func(i *Index) { i.Segments[1].File = "pack-0002.bin" },
+		"包内偏移重叠":           func(i *Index) { i.Segments[1].Offset = 100 },
+		"越过包边界":            func(i *Index) { i.Segments[1].Size = i.Packs[0].Bytes },
+		"包覆盖超界":            func(i *Index) { i.Packs[1].Count = 9 },
+	}
+
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			index := packedIndex()
+			mutate(index)
+			if err := index.Validate(); err == nil {
+				t.Fatal("畸形打包索引必须被拒绝：偏移错了客户端会切出半片数据")
+			}
+		})
+	}
+}
+
 func TestSegmentAtAndMean(t *testing.T) {
 	index := validIndex()
 

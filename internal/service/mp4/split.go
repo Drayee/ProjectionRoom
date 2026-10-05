@@ -26,6 +26,12 @@ type SplitOptions struct {
 	SegmentPrefix string
 	// IndexName 是索引文件名，默认 index.json。
 	IndexName string
+	// PackSize 是每个包容纳的分片数。<=1 表示不打包：一片一个文件，
+	// Segments[i].File 是分片自己的名字、Offset 是它在原始视频里的偏移（历史行为）。
+	// >1 时按 PackSize 把连续分片写进 pack-XXXX.bin，并填充 Index.Packs。
+	PackSize int
+	// PackPrefix 是打包文件名前缀，默认 pack（产出 pack-0001.bin）。仅在 PackSize>1 时生效。
+	PackPrefix string
 }
 
 func (o *SplitOptions) applyDefaults() {
@@ -37,6 +43,9 @@ func (o *SplitOptions) applyDefaults() {
 	}
 	if o.IndexName == "" {
 		o.IndexName = "index.json"
+	}
+	if o.PackPrefix == "" {
+		o.PackPrefix = "pack"
 	}
 }
 
@@ -120,19 +129,32 @@ func SplitFile(inPath string, opts SplitOptions) (*model.Index, error) {
 		return nil, err
 	}
 
+	// 打包（PackSize>1）时直接往 pack-XXXX.bin 里追加，**不落逐片文件**：
+	// 先写 1800 个小文件再合并等于把"文件数多"的代价付了两遍。
+	var sink *packSink
+	if opts.PackSize > 1 {
+		sink = &packSink{dir: opts.OutDir, prefix: opts.PackPrefix, packSize: opts.PackSize}
+		defer sink.abandon()
+	}
+
 	for i, r := range ranges {
-		moofPayload, err := readRange(f, moofs[i].Offset+moofs[i].HeaderLen, moofs[i].Size-moofs[i].HeaderLen)
-		if err != nil {
-			return nil, err
-		}
-		info, err := parseMoof(moofPayload, movie)
+		info, err := readMoofInfo(f, moofs[i], movie)
 		if err != nil {
 			return nil, fmt.Errorf("mp4: 解析第 %d 个 moof 失败: %w", i+1, err)
 		}
 
-		name := fmt.Sprintf("%s%05d.m4s", opts.SegmentPrefix, i+1)
+		// 哈希始终只喂分片本身：SHA256 是"这一片"的摘要，与怎么打包无关。
 		hasher := sha256.New()
-		size, err := copyRange(f, r.start, r.end, filepath.Join(opts.OutDir, name), hasher)
+
+		var name string
+		var offset, size int64
+		if sink != nil {
+			name, offset, size, err = sink.write(f, r, i+1, hasher)
+		} else {
+			name = fmt.Sprintf("%s%05d.m4s", opts.SegmentPrefix, i+1)
+			offset = r.start
+			size, err = copyRange(f, r.start, r.end, filepath.Join(opts.OutDir, name), hasher)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -140,13 +162,21 @@ func SplitFile(inPath string, opts SplitOptions) (*model.Index, error) {
 		index.Segments = append(index.Segments, model.Segment{
 			Index:    i + 1,
 			File:     name,
-			Offset:   r.start,
+			Offset:   offset,
 			Size:     size,
 			Duration: info.Duration,
 			StartPTS: info.StartPTS,
 			Keyframe: info.Keyframe,
 			SHA256:   hex.EncodeToString(hasher.Sum(nil)),
 		})
+	}
+
+	if sink != nil {
+		packs, err := sink.finishAll()
+		if err != nil {
+			return nil, err
+		}
+		index.Packs = packs
 	}
 
 	// trun 未带 sample duration 时，用相邻分片的 PTS 差补齐（最后一段用影片时长）。
@@ -446,6 +476,115 @@ func readRange(r io.ReaderAt, start, length int64) ([]byte, error) {
 	return buf, nil
 }
 
+// readMoofInfo 解析一个 moof 的时间与关键帧信息。
+func readMoofInfo(r io.ReaderAt, header boxHeader, movie *MovieInfo) (moofInfo, error) {
+	payload, err := readRange(r, header.Offset+header.HeaderLen, header.Size-header.HeaderLen)
+	if err != nil {
+		return moofInfo{}, err
+	}
+	return parseMoof(payload, movie)
+}
+
+// packSink 把连续的分片追加进同一个 pack-XXXX.bin。
+//
+// 为什么要有它：Windows 上"每个文件一次写盘"有固定开销（先写同目录 swap 文件再改名、
+// 杀软逐个扫描），1800 个小分片的目录写入要好几分钟。每 PackSize 片合成一个文件后，
+// 文件数降到十几个，写盘时间随之降到秒级；下载与解压也受益。
+//
+// 包内偏移是它唯一的"状态"：分片的 Offset 记录为包内偏移，分片大小不变。
+type packSink struct {
+	dir      string
+	prefix   string
+	packSize int
+
+	file  *os.File
+	name  string
+	bytes int64 // 当前包已写入的字节数，也是下一片的包内偏移
+	count int   // 当前包已写入的分片数
+	first int   // 当前包第一个分片的序号（1 起）
+	packs []model.Pack
+}
+
+// write 把 [r.start, r.end) 追加到当前包（装满了先换包），返回分片所在文件名、
+// 包内偏移与字节数。sum 非空时同时接收内容（用于算这一片的 sha256）。
+func (s *packSink) write(src io.ReaderAt, r byteRange, segIndex int, sum io.Writer) (string, int64, int64, error) {
+	if s.file != nil && s.count >= s.packSize {
+		if err := s.rollover(); err != nil {
+			return "", 0, 0, err
+		}
+	}
+	if s.file == nil {
+		if err := s.openNext(); err != nil {
+			return "", 0, 0, err
+		}
+	}
+	if s.count == 0 {
+		s.first = segIndex
+	}
+
+	offset := s.bytes
+	size, err := copyRangeInto(src, r.start, r.end, s.file, sum)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	s.bytes += size
+	s.count++
+	return s.name, offset, size, nil
+}
+
+// rollover 收尾当前包并打开下一个。
+func (s *packSink) rollover() error {
+	if err := s.closeCurrent(); err != nil {
+		return err
+	}
+	return s.openNext()
+}
+
+// finishAll 收尾最后一个包并返回完整的包清单。
+func (s *packSink) finishAll() ([]model.Pack, error) {
+	if err := s.closeCurrent(); err != nil {
+		return nil, err
+	}
+	return s.packs, nil
+}
+
+// abandon 在出错路径上关掉未收尾的文件句柄（Windows 上不关会锁住产物目录）。
+func (s *packSink) abandon() {
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
+}
+
+func (s *packSink) closeCurrent() error {
+	if s.file == nil {
+		return nil
+	}
+	name, err := s.name, s.file.Close()
+	s.file = nil
+	if err != nil {
+		return fmt.Errorf("mp4: 关闭 %s 失败: %w", name, err)
+	}
+	s.packs = append(s.packs, model.Pack{
+		File:         name,
+		FirstSegment: s.first,
+		Count:        s.count,
+		Bytes:        s.bytes,
+	})
+	return nil
+}
+
+func (s *packSink) openNext() error {
+	name := fmt.Sprintf("%s-%04d.bin", s.prefix, len(s.packs)+1)
+	out, err := os.Create(filepath.Join(s.dir, name))
+	if err != nil {
+		return fmt.Errorf("mp4: 创建 %s 失败: %w", name, err)
+	}
+	s.file, s.name = out, name
+	s.bytes, s.count, s.first = 0, 0, 0
+	return nil
+}
+
 // copyRange 把 [start,end) 复制到 dst；sink 非空时同时写入（用于边写边算哈希）。
 func copyRange(r io.ReaderAt, start, end int64, dst string, sink io.Writer) (int64, error) {
 	out, err := os.Create(dst)
@@ -453,21 +592,25 @@ func copyRange(r io.ReaderAt, start, end int64, dst string, sink io.Writer) (int
 		return 0, fmt.Errorf("mp4: 创建 %s 失败: %w", dst, err)
 	}
 
-	writer := io.Writer(out)
-	if sink != nil {
-		writer = io.MultiWriter(out, sink)
-	}
-
-	written, err := io.Copy(writer, io.NewSectionReader(r, start, end-start))
+	written, copyErr := copyRangeInto(r, start, end, out, sink)
 	closeErr := out.Close()
-	if err != nil {
-		return 0, fmt.Errorf("mp4: 写入 %s 失败: %w", filepath.Base(dst), err)
+	if copyErr != nil {
+		return 0, fmt.Errorf("mp4: 写入 %s 失败: %w", filepath.Base(dst), copyErr)
 	}
 	if closeErr != nil {
 		return 0, fmt.Errorf("mp4: 关闭 %s 失败: %w", filepath.Base(dst), closeErr)
 	}
 
 	return written, nil
+}
+
+// copyRangeInto 把 [start,end) 复制到一个已经打开的 writer；sink 非空时同时写入。
+func copyRangeInto(r io.ReaderAt, start, end int64, dst io.Writer, sink io.Writer) (int64, error) {
+	writer := dst
+	if sink != nil {
+		writer = io.MultiWriter(dst, sink)
+	}
+	return io.Copy(writer, io.NewSectionReader(r, start, end-start))
 }
 
 func be24(b []byte) uint32 {

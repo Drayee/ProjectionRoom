@@ -35,7 +35,7 @@ const zipPerFileOverhead = 512
 
 // ArtifactFile 是一个已落盘的产物文件。
 type ArtifactFile struct {
-	// Name 是相对产物目录的文件名，例如 index.json / init.mp4 / c00001.m4s。
+	// Name 是相对产物目录的文件名，例如 index.json / init.mp4 / c00001.m4s / pack-0001.bin。
 	Name string `json:"name"`
 	// Size 是字节数。
 	Size int64 `json:"size"`
@@ -49,9 +49,13 @@ type Artifacts struct {
 	Dir string `json:"-"`
 	// Index 是切分产生的分片索引（同时已写进 index.json）。
 	Index *model.Index `json:"-"`
-	// Files 是产物清单，顺序即打包/下载顺序：index.json → init.mp4 → 分片。
+	// Files 是产物清单，顺序即打包/下载顺序：index.json → init.mp4 → 分片文件。
+	//
+	// 打包（每 N 片一个 .bin）时这里**按包去重**：一个 pack-0001.bin 只出现一次，
+	// 而不是被它包含的 100 个分片重复列 100 次。分批下载与 zip 打包因此天然按包切分，
+	// 文件数也从 ~1800 降到 ~18。
 	Files []ArtifactFile `json:"files"`
-	// TotalBytes 是产物总大小（不含 zip 头开销）。
+	// TotalBytes 是产物总大小（不含 zip 头开销）。去重后不会重复计入同一个包。
 	TotalBytes int64 `json:"totalBytes"`
 }
 
@@ -71,8 +75,12 @@ type Part struct {
 type Result struct {
 	// Bytes 是产物总大小；SingleResponse 就是拿它和单次返回上限比的。
 	Bytes int64 `json:"bytes"`
-	// Segments 是媒体分片个数（不含 init 段）。
+	// Segments 是**媒体分片个数**（不含 init 段），与是否打包无关。
 	Segments int `json:"segments"`
+	// Files 是**产物文件个数**（index.json + init.mp4 + pack-*.bin 或 c*.m4s）。
+	// 它与 Segments 是两个概念，刻意分开命名：打包后文件数远小于分片数，
+	// 客户端若要显示"还要写几个文件"，必须用这个值。
+	Files int `json:"files"`
 	// SingleResponse 为真表示走 GET /result 一次拿完。
 	SingleResponse bool `json:"singleResponse"`
 	// Parts 只在 SingleResponse 为假时非空。
@@ -80,11 +88,25 @@ type Result struct {
 }
 
 // CollectArtifacts 扫描产物目录，收集产物清单与总大小。
+//
+// 清单按"首次出现"去重：打包布局下 index.Segments 里同一个 pack-*.bin 会出现很多次
+// （100 片一包就是 100 次），去重后它才是一个真实存在的产物文件。未打包布局下
+// 每个分片本来就是独立文件，去重是恒等操作，行为与打包功能出现之前完全一致。
 func CollectArtifacts(dir string, index *model.Index) (*Artifacts, error) {
 	names := make([]string, 0, len(index.Segments)+2)
-	names = append(names, IndexFileName, InitFileName)
+	seen := make(map[string]struct{}, len(index.Segments)+2)
+	appendName := func(name string) {
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	appendName(IndexFileName)
+	appendName(InitFileName)
 	for _, seg := range index.Segments {
-		names = append(names, seg.File)
+		appendName(seg.File)
 	}
 
 	out := &Artifacts{Dir: dir, Index: index}
@@ -106,6 +128,9 @@ func CollectArtifacts(dir string, index *model.Index) (*Artifacts, error) {
 
 // PlanParts 把产物按单份上限切分成若干份，每份打包后严格小于 maxBytes。
 // 顺序被保留：客户端按 parts[n].url 逐份下载，拼起来就是完整产物。
+//
+// 它按**产物文件**切分：打包布局下每一个 pack-*.bin 就是一个不可再分的单位
+// （绝不把一个包劈到两份里，否则客户端要额外做 Range 请求才能拼回完整文件）。
 func PlanParts(files []ArtifactFile, maxBytes int64) ([][]ArtifactFile, error) {
 	if maxBytes <= 0 {
 		return nil, fmt.Errorf("segment: 单份上限必须为正（%d）", maxBytes)

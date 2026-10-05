@@ -53,6 +53,9 @@ func makeTestVideo(t *testing.T, tools Tools, dir string) string {
 
 // TestProcessWithRealFFmpeg 覆盖抽取后的流水线本体：
 // probe → 无损重新封装 → 按 moof 边界切分 → 写 index.json，产物必须自洽。
+//
+// 同一份源视频跑两遍（-pack 1 与默认打包），逐片字节必须完全相同 ——
+// 这是"打包只改变字节放在哪个文件里"的端到端证据。
 func TestProcessWithRealFFmpeg(t *testing.T) {
 	tools := requireFFmpeg(t)
 	dir := t.TempDir()
@@ -74,6 +77,7 @@ func TestProcessWithRealFFmpeg(t *testing.T) {
 	artifacts, err := Process(context.Background(), src, outDir, ProcessOptions{
 		Tools:          tools,
 		SegmentSeconds: 2,
+		PackSize:       1, // 逐片一个文件：与打包功能出现之前一致
 		Auto:           true,
 		Info:           info,
 		Progress:       func(p float64) { progress = append(progress, p) },
@@ -85,6 +89,9 @@ func TestProcessWithRealFFmpeg(t *testing.T) {
 	index := artifacts.Index
 	if err := index.Validate(); err != nil {
 		t.Fatalf("生成的索引不自洽: %v", err)
+	}
+	if index.Packed() {
+		t.Fatalf("PackSize=1 不该产出 packs: %+v", index.Packs)
 	}
 	if len(index.Segments) < 2 {
 		t.Fatalf("6 秒 / 2 秒分片应至少切出 2 段，实际 %d", len(index.Segments))
@@ -117,6 +124,61 @@ func TestProcessWithRealFFmpeg(t *testing.T) {
 		}
 	}
 
+	// ---- 同一份源视频再按默认打包（每 100 片一包）跑一遍 ----
+	var packedProgress []float64
+	packedDir := filepath.Join(dir, "room-media-packed")
+	packed, err := Process(context.Background(), src, packedDir, ProcessOptions{
+		Tools:          tools,
+		SegmentSeconds: 2,
+		Auto:           true,
+		Info:           info,
+		Progress:       func(p float64) { packedProgress = append(packedProgress, p) },
+	})
+	if err != nil {
+		t.Fatalf("打包流水线失败: %v", err)
+	}
+	if !packed.Index.Packed() {
+		t.Fatal("默认必须打包")
+	}
+	if len(packed.Index.Segments) != len(index.Segments) {
+		t.Fatalf("打包不该改变分片数：%d → %d", len(index.Segments), len(packed.Index.Segments))
+	}
+	// 6 秒短视频只有 1 个包：产物 3 个文件（对比未打包的 分片数+2）。
+	if len(packed.Files) != len(packed.Index.Packs)+2 {
+		t.Fatalf("打包产物应为 index.json + init.mp4 + %d 个包，实际 %d 个文件",
+			len(packed.Index.Packs), len(packed.Files))
+	}
+
+	var plainConcat, packedConcat bytes.Buffer
+	plainConcat.Write(initData)
+	packedConcat.Write(readAll(t, filepath.Join(packedDir, InitFileName)))
+	for i, packedSeg := range packed.Index.Segments {
+		plainSeg := index.Segments[i]
+		plainBytes := readAll(t, filepath.Join(outDir, plainSeg.File))
+
+		packData := readAll(t, filepath.Join(packedDir, packedSeg.File))
+		packedBytes := packData[packedSeg.Offset : packedSeg.Offset+packedSeg.Size]
+
+		if !bytes.Equal(plainBytes, packedBytes) {
+			t.Fatalf("第 %d 片在打包前后的字节不一致（%d vs %d 字节）",
+				packedSeg.Index, len(plainBytes), len(packedBytes))
+		}
+		if plainSeg.SHA256 != packedSeg.SHA256 {
+			t.Fatalf("第 %d 片在打包前后的 sha256 不一致", packedSeg.Index)
+		}
+		plainConcat.Write(plainBytes)
+		packedConcat.Write(packedBytes)
+	}
+	if !bytes.Equal(plainConcat.Bytes(), packedConcat.Bytes()) {
+		t.Fatalf("两种布局拼出来的字节流必须相同（未打包 %d 字节，打包 %d 字节）",
+			plainConcat.Len(), packedConcat.Len())
+	}
+
+	// 两次运行的 ffmpeg 输出应当一致；即便不一致，上面的逐片比较也会先失败。
+	if len(packedProgress) == 0 || packedProgress[len(packedProgress)-1] != 1 {
+		t.Fatalf("打包流水线也必须报告到 1 的进度，实际 %v", packedProgress)
+	}
+
 	// index.json 必须是能被 model.Index 读回来的合法索引（前端与服务器都按它解析）。
 	var decoded model.Index
 	if err := json.Unmarshal(readAll(t, filepath.Join(outDir, IndexFileName)), &decoded); err != nil {
@@ -124,6 +186,17 @@ func TestProcessWithRealFFmpeg(t *testing.T) {
 	}
 	if err := decoded.Validate(); err != nil {
 		t.Fatalf("index.json 不自洽: %v", err)
+	}
+	var decodedPacked model.Index
+	if err := json.Unmarshal(readAll(t, filepath.Join(packedDir, IndexFileName)), &decodedPacked); err != nil {
+		t.Fatalf("打包 index.json 不是合法 JSON: %v", err)
+	}
+	if err := decodedPacked.Validate(); err != nil {
+		t.Fatalf("打包 index.json 不自洽: %v", err)
+	}
+	if len(decodedPacked.Packs) != len(packed.Index.Packs) {
+		t.Fatalf("index.json 里的 packs 与内存索引不一致：%d vs %d",
+			len(decodedPacked.Packs), len(packed.Index.Packs))
 	}
 
 	if len(progress) == 0 {
@@ -138,13 +211,15 @@ func TestProcessWithRealFFmpeg(t *testing.T) {
 		}
 	}
 
-	t.Logf("真实流水线: %d 段 / 平均 %.2fs / 码率 %.2f Mbps / 产物 %.2f KiB",
+	t.Logf("真实流水线: %d 段 / 平均 %.2fs / 码率 %.2f Mbps / 未打包 %.2f KiB / 打包 %d 个包 %.2f KiB",
 		len(index.Segments), index.SegmentSec,
-		float64(index.BitrateBps)/1_000_000, float64(artifacts.TotalBytes)/1024)
+		float64(index.BitrateBps)/1_000_000, float64(artifacts.TotalBytes)/1024,
+		len(packed.Index.Packs), float64(packed.TotalBytes)/1024)
 }
 
 // TestQueueEndToEndWithRealFFmpeg 是服务端的真实端到端：
-// 提交上传 → 队列跑真实 ffmpeg → 单次返回 zip 校验 → 改用小上限验证 manifest 分批与 sha256。
+// 提交上传 → 队列跑真实 ffmpeg → 单次返回 zip 校验 → 默认打包的单次返回 →
+// 改用小上限验证 manifest 分批与 sha256（分批必须按包切分）。
 func TestQueueEndToEndWithRealFFmpeg(t *testing.T) {
 	tools := requireFFmpeg(t)
 
@@ -155,9 +230,10 @@ func TestQueueEndToEndWithRealFFmpeg(t *testing.T) {
 		t.Fatalf("读取测试视频失败: %v", err)
 	}
 
-	// ---- 第一段：走单次返回（zip） ----
+	// ---- 第一段：不打包（PR_SEGMENT_PACK_SIZE=1）+ 单次返回（zip） ----
 	cfg := testConfig(t)
 	cfg.Segment.SingleResponseMaxBytes = 1 << 30
+	cfg.Segment.PackSize = 1
 	q := newTestQueue(t, cfg, nil, Probe, processorFunc(Process), &tools)
 
 	view, err := q.Submit("movie.mp4", bytes.NewReader(payload), int64(len(payload)))
@@ -179,6 +255,13 @@ func TestQueueEndToEndWithRealFFmpeg(t *testing.T) {
 	artifactsDir, files, err := q.Artifacts(view.JobID)
 	if err != nil {
 		t.Fatalf("读取产物失败: %v", err)
+	}
+	// 分片数与文件数是两个概念：未打包时 文件数 = 分片数 + 2。
+	if done.Result.Segments != len(files)-2 {
+		t.Fatalf("未打包时 result.segments 应为 %d，实际 %d", len(files)-2, done.Result.Segments)
+	}
+	if done.Result.Files != len(files) {
+		t.Fatalf("result.files 应为 %d，实际 %d", len(files), done.Result.Files)
 	}
 
 	var buf bytes.Buffer
@@ -202,6 +285,9 @@ func TestQueueEndToEndWithRealFFmpeg(t *testing.T) {
 	if err := decoded.Validate(); err != nil {
 		t.Fatalf("zip 里的 index.json 不自洽: %v", err)
 	}
+	if decoded.Packed() {
+		t.Fatalf("PackSize=1 的 index.json 不该带 packs: %+v", decoded.Packs)
+	}
 	if len(decoded.Segments) < 2 {
 		t.Fatalf("真实视频应切出多个分片，实际 %d", len(decoded.Segments))
 	}
@@ -211,14 +297,67 @@ func TestQueueEndToEndWithRealFFmpeg(t *testing.T) {
 		t.Fatalf("源文件应在作业完成后删除，实际残留 %v", leftovers)
 	}
 
-	// ---- 第二段：把上限压到"两个最大文件"以内，逼出 manifest 分批 ----
+	// ---- 第二段：服务端默认打包（每 100 片一包）的单次返回 ----
+	cfgPacked := testConfig(t)
+	cfgPacked.Segment.SingleResponseMaxBytes = 1 << 30
+	qPacked := newTestQueue(t, cfgPacked, nil, Probe, processorFunc(Process), &tools)
+
+	viewPacked, err := qPacked.Submit("movie.mp4", bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		t.Fatalf("提交作业失败: %v", err)
+	}
+	donePacked := waitForJob(t, qPacked, viewPacked.JobID, 120*time.Second)
+	if donePacked.State != StateDone {
+		t.Fatalf("作业应完成，实际 %q（%s）", donePacked.State, donePacked.Error)
+	}
+	if donePacked.Result == nil || !donePacked.Result.SingleResponse {
+		t.Fatalf("小产物应走单次返回，实际 %+v", donePacked.Result)
+	}
+	if donePacked.Result.Segments != done.Result.Segments {
+		t.Fatalf("打包不该改变分片数：%d → %d", done.Result.Segments, donePacked.Result.Segments)
+	}
+
+	packedDir, packedFiles, err := qPacked.Artifacts(viewPacked.JobID)
+	if err != nil {
+		t.Fatalf("读取打包产物失败: %v", err)
+	}
+	if donePacked.Result.Files != len(packedFiles) {
+		t.Fatalf("result.files 应为 %d，实际 %d", len(packedFiles), donePacked.Result.Files)
+	}
+	if len(packedFiles) >= len(files) {
+		t.Fatalf("打包后的产物文件数应明显少于未打包（%d 个文件 vs %d 个文件）",
+			len(packedFiles), len(files))
+	}
+
+	var packedBuf bytes.Buffer
+	if _, err := WriteZip(&packedBuf, packedDir, packedFiles); err != nil {
+		t.Fatalf("打包 zip 失败: %v", err)
+	}
+	packedIndex := zipIndex(t, packedBuf.Bytes())
+	if !packedIndex.Packed() {
+		t.Fatal("默认配置下 zip 里的 index.json 必须带 packs")
+	}
+	// 每一个包都必须在 zip 里，且 zip 条目数等于产物文件数（包不被拆开、也不重复）。
+	packedNames := zipNames(t, packedBuf.Bytes())
+	for _, pack := range packedIndex.Packs {
+		if _, ok := packedNames[pack.File]; !ok {
+			t.Fatalf("zip 里缺少分片包 %s，实际条目 %v", pack.File, keys(packedNames))
+		}
+	}
+	if len(packedNames) != len(packedFiles) {
+		t.Fatalf("zip 条目数 %d 与产物清单 %d 不一致", len(packedNames), len(packedFiles))
+	}
+
+	// ---- 第三段：把上限压到"最大文件 + 两个成员开销"，逼出 manifest 分批 ----
+	// 打包后产物只有 3 个文件（index.json + init.mp4 + 1 个包），上限取
+	// 最大文件 + 3×512 + 1 时必然切成两份：[index, init] 与 [包]。
 	var maxFile int64
-	for _, f := range files {
+	for _, f := range packedFiles {
 		if f.Size > maxFile {
 			maxFile = f.Size
 		}
 	}
-	limit := maxFile*2 + zipPerFileOverhead
+	limit := maxFile + 3*zipPerFileOverhead + 1
 
 	cfg2 := testConfig(t)
 	cfg2.Segment.SingleResponseMaxBytes = limit
@@ -275,9 +414,9 @@ func TestQueueEndToEndWithRealFFmpeg(t *testing.T) {
 		}
 	}
 
-	// 所有份合起来必须覆盖全部产物，且不重复。
-	if len(entries) != len(files) {
-		t.Fatalf("各份条目合计 %d，应为产物的 %d 个文件", len(entries), len(files))
+	// 所有份合起来必须覆盖全部产物（这里是打包后的 3 个文件），且不重复；包不被劈开。
+	if len(entries) != len(packedFiles) {
+		t.Fatalf("各份条目合计 %d，应为产物的 %d 个文件", len(entries), len(packedFiles))
 	}
 	seen := map[string]bool{}
 	for _, name := range entries {
@@ -286,9 +425,14 @@ func TestQueueEndToEndWithRealFFmpeg(t *testing.T) {
 		}
 		seen[name] = true
 	}
+	for _, f := range packedFiles {
+		if !seen[f.Name] {
+			t.Fatalf("产物 %s 没有被任何一份覆盖", f.Name)
+		}
+	}
 
-	t.Logf("真实端到端: 单次返回 %d 字节；分批上限 %d 字节 → %d 份",
-		done.Result.Bytes, limit, len(done2.Result.Parts))
+	t.Logf("真实端到端: 未打包 %d 个文件 / 打包 %d 个文件（%d 段）；分批上限 %d 字节 → %d 份",
+		len(files), len(packedFiles), done.Result.Segments, limit, len(done2.Result.Parts))
 }
 
 // ---------- 小工具 ----------
@@ -353,6 +497,20 @@ func zipEntry(t *testing.T, data []byte, name string) []byte {
 	}
 	t.Fatalf("zip 里没有 %s", name)
 	return nil
+}
+
+// zipIndex 取出 zip 里的 index.json 并解析成索引（打包形态的断言都靠它）。
+func zipIndex(t *testing.T, data []byte) *model.Index {
+	t.Helper()
+
+	var index model.Index
+	if err := json.Unmarshal(zipEntry(t, data, IndexFileName), &index); err != nil {
+		t.Fatalf("zip 里的 index.json 无法解析: %v", err)
+	}
+	if err := index.Validate(); err != nil {
+		t.Fatalf("zip 里的 index.json 不自洽: %v", err)
+	}
+	return &index
 }
 
 func keys(m map[string]struct{}) []string {
