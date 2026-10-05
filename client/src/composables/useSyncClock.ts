@@ -224,6 +224,27 @@ export function useSyncClock() {
     drift.value = 0
   }
 
+  /**
+   * 主播专用：用自己的播放器刷新本地权威状态。
+   *
+   * 主播不从任何 peer 收进度（handlePeerControl 里直接 return），所以
+   * `playback` 永远不会被进度报文更新 —— 不主动同步的话，界面上会一直显示"已暂停"，
+   * 而视频其实在播（实测：主播视频在播、状态恒为 paused=true）。
+   * 这里只更新"本地可见状态"，不动 seq / 偏移估计：那些只有观众才有意义。
+   */
+  function syncLocal(paused: boolean, currentTime: number, rate: number, now = performance.now()) {
+    playback.value = {
+      ...playback.value,
+      paused,
+      currentTime,
+      hostClockMs: Math.round(now),
+      rate: rate > 0 ? rate : 1,
+    }
+    if (paused) {
+      drift.value = 0
+    }
+  }
+
   /** 已经积累的偏移样本数：样本太少时估计不可信，门控要等它收敛。 */
   function sampleCount(): number {
     return samples.length
@@ -253,6 +274,7 @@ export function useSyncClock() {
     expectedAt,
     correction,
     setPaused,
+    syncLocal,
     resetHop,
   }
 }

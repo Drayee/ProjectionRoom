@@ -157,6 +157,8 @@ export const useRoomStore = defineStore('room', () => {
   const lagSec = ref(0)
   const lagNotice = ref('')
   let lastLagJumpAt = 0
+  /** 最近一次下发的控制状态：用于抑制"按钮 + 播放器事件"重复广播。 */
+  let lastControl: { paused: boolean | null; rate: number; at: number } = { paused: null, rate: 1, at: 0 }
 
   /**
    * 逐跳中继的取证计数（调试与验收用）。
@@ -299,12 +301,12 @@ export const useRoomStore = defineStore('room', () => {
           clock.onAnchor(toSample(env.playback))
         }
         if (env.mediaIndex) {
-          void applyRemoteMediaIndex(env.mediaIndex)
+          safe('应用媒体索引', applyRemoteMediaIndex(env.mediaIndex))
         } else if (!isHost.value && hostId.value) {
-          void connectToHost()
+          safe('连接主播', connectToHost())
         }
         if (env.topology) {
-          void topology.apply(env.topology)
+          safe('应用拓扑', topology.apply(env.topology))
         }
         break
 
@@ -315,7 +317,7 @@ export const useRoomStore = defineStore('room', () => {
         break
 
       case T.MediaIndex:
-        if (env.mediaIndex) void applyRemoteMediaIndex(env.mediaIndex)
+        if (env.mediaIndex) safe('应用媒体索引', applyRemoteMediaIndex(env.mediaIndex))
         break
 
       case T.Signal:
@@ -331,7 +333,7 @@ export const useRoomStore = defineStore('room', () => {
 
       case T.ParentAssignment:
       case T.Topology:
-        if (env.topology) void topology.apply(env.topology)
+        if (env.topology) safe('应用拓扑', topology.apply(env.topology))
         break
 
       case T.DistributorChange:
@@ -356,7 +358,7 @@ export const useRoomStore = defineStore('room', () => {
         // 房主的离散指令：立即应用，并作为一次时钟锚点（不参与 progress 的 seq 过滤）。
         if (env.playback) {
           clock.onAnchor(toSample(env.playback))
-          void applyPlayback(env.playback, env.action)
+          safe('应用房主控制', applyPlayback(env.playback, env.action))
         }
         break
 
@@ -402,7 +404,8 @@ export const useRoomStore = defineStore('room', () => {
   // ---------- Peer 消息 ----------
   function handlePeerControl(peerId: string, msg: PeerControl) {
     if (msg.t === 'req') {
-      void serveRequest(peerId, msg)
+      // 只入队：读盘不在这里做（见 enqueueServe 的注释）。
+      enqueueServe(peerId, msg)
       return
     }
     if (msg.t === 'err') {
@@ -441,7 +444,7 @@ export const useRoomStore = defineStore('room', () => {
           } else {
             relayStats.direct += 1
           }
-          void applyPlayback(clock.playback.value)
+          safe('应用播放状态', applyPlayback(clock.playback.value))
         }
       }
       if (!authoritative) {
@@ -463,29 +466,81 @@ export const useRoomStore = defineStore('room', () => {
     flushOrdered()
   }
 
-  /** 主播应答分片请求：本地读文件 → 先发控制消息再发二进制帧。 */
-  async function serveRequest(peerId: string, msg: PeerControl) {
-    if (msg.idx === undefined) return
-    const index = msg.idx
+  /**
+   * 应答队列：把"读磁盘"从 DataChannel 的 onmessage 回调里挪出来。
+   *
+   * 之前 serveRequest 直接跑在消息回调里，一次读盘失败（NotFoundError：文件被移动/替换、
+   * 句柄过期）就变成未处理的 promise 拒绝，在控制台刷成一片红，
+   * 而且并发请求会一起挤在消息回调里互相拖慢。
+   * 现在回调只入队，真正的读盘按并发上限在队列里执行，任何异常都在这里落地。
+   */
+  const serveQueue: Array<{ peerId: string; rid: string; index: number }> = []
+  let serveRunning = 0
+  const SERVE_CONCURRENCY = 3
+  const SERVE_QUEUE_MAX = 64
 
-    if (!rtc.send(peerId, encodeControl({ t: 'chunk', rid: msg.rid, idx: index }))) {
+  function enqueueServe(peerId: string, msg: PeerControl) {
+    if (msg.idx === undefined) return
+    if (serveQueue.length >= SERVE_QUEUE_MAX) {
+      noteServe(`分片 ${msg.idx}: 队列已满，拒绝`)
+      rtc.send(peerId, encodeControl({ t: 'err', rid: msg.rid, idx: msg.idx, code: 'BUSY' }))
+      return
+    }
+    serveQueue.push({ peerId, rid: msg.rid ?? '', index: msg.idx })
+    void drainServeQueue()
+  }
+
+  async function drainServeQueue() {
+    while (serveRunning < SERVE_CONCURRENCY && serveQueue.length > 0) {
+      const task = serveQueue.shift() as { peerId: string; rid: string; index: number }
+      serveRunning += 1
+      try {
+        await serveOne(task.peerId, task.rid, task.index)
+      } catch (err) {
+        // 兜底：异常必须在这里落地，绝不能再变成"未处理的拒绝"。
+        noteServe(`分片 ${task.index}: 异常 ${(err as Error).name}: ${(err as Error).message}`)
+        rtc.send(task.peerId, encodeControl({ t: 'err', rid: task.rid, idx: task.index, code: 'INTERNAL' }))
+      } finally {
+        serveRunning -= 1
+      }
+    }
+  }
+
+  /**
+   * 本地取一片：主播读磁盘，中继读自己的分片仓库。
+   *
+   * 读盘失败重试一次：NotFoundError 多数是瞬时的（文件正在被替换、句柄刚过期），
+   * 直接放弃会让整间屋子卡在"缺这一片"上。
+   */
+  async function readLocalChunk(index: number): Promise<Uint8Array<ArrayBuffer> | null> {
+    if (!isHost.value) {
+      return index === 0 ? chunkStore.getInit() : chunkStore.get(index)
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await media.readChunk(index)
+      } catch (err) {
+        noteServe(`分片 ${index}: 读取失败 ${(err as Error).name}（第 ${attempt + 1} 次）`)
+        if (attempt === 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, 120))
+        }
+      }
+    }
+    return null
+  }
+
+  /** 应答一个分片请求：先回 ack，再读本地，最后按 DataChannel 上限分片发出。 */
+  async function serveOne(peerId: string, rid: string, index: number) {
+    if (!rtc.send(peerId, encodeControl({ t: 'chunk', rid, idx: index }))) {
       noteServe(`分片 ${index}: 通道不可用，未受理`)
       return
     }
 
-    // 主播从本地文件读；转发节点从自己已经收到的分片里取（SPEC §6.4 的中继职责）。
-    let payload: Uint8Array<ArrayBuffer> | null = null
-    if (isHost.value) {
-      payload = await media.readChunk(index)
-    } else if (index === 0) {
-      payload = chunkStore.getInit()
-    } else {
-      payload = chunkStore.get(index)
-    }
+    const payload = await readLocalChunk(index)
     if (!payload) {
       // 这条以前是静默的：观众只会"一直缓冲"，谁也看不出是本地没有这一片。
       noteServe(`分片 ${index}: 本地没有这一片（NOT_FOUND）`)
-      rtc.send(peerId, encodeControl({ t: 'err', rid: msg.rid, idx: index, code: 'NOT_FOUND' }))
+      rtc.send(peerId, encodeControl({ t: 'err', rid, idx: index, code: 'NOT_FOUND' }))
       return
     }
 
@@ -790,6 +845,19 @@ export const useRoomStore = defineStore('room', () => {
     serveLog.value = [...serveLog.value.slice(-7), `${Math.round(performance.now())}:${text}`]
   }
 
+  /**
+   * 兜住"发射后不管"的异步调用。
+   *
+   * 以前到处是 `void someAsync()`：一旦它抛错就成了未处理的 promise 拒绝，
+   * 浏览器控制台刷红，功能却"看起来还能用" —— 用户看到的那一堆错误就是这么来的。
+   */
+  function safe(what: string, task: Promise<unknown>): void {
+    task.catch((err: unknown) => {
+      const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+      noteLifecycle(`${what} 失败 ${message}`)
+    })
+  }
+
   /** 严格按序号写入播放器：MSE 需要单调递增的时间戳，乱序 append 会报错。 */
   function flushOrdered() {
     const index = mediaIndex.value
@@ -872,7 +940,11 @@ export const useRoomStore = defineStore('room', () => {
     if (!video) return
 
     bufferedAhead.value = player.bufferedAhead(video.currentTime)
-    if (isHost.value) return
+    if (isHost.value) {
+      // 主播自己就是权威：本地状态必须反映真实播放器，否则视频在播而界面显示"已暂停"。
+      clock.syncLocal(video.paused, video.currentTime, video.playbackRate)
+      return
+    }
 
     // 加载中：不矫正、不播放，只等缓冲够。
     if (gated.value) {
@@ -1124,9 +1196,29 @@ export const useRoomStore = defineStore('room', () => {
 
   // ---------- 媒体索引 ----------
   async function applyRemoteMediaIndex(index: MediaIndex) {
+    const changed =
+      !mediaIndex.value ||
+      mediaIndex.value.totalDuration !== index.totalDuration ||
+      mediaIndex.value.segments.length !== index.segments.length
+
     mediaIndex.value = index
     await ensurePlayer(index)
+
     if (!isHost.value) {
+      // 媒体索引可能比观众晚到（观众先进房、主播后选片开播）：此时取数游标、
+      // 已缓存分片、在途请求全是"没有媒体时"的残留状态，必须整体复位，
+      // 否则会卡在"缓冲中 3/4 片"这种位置再也上不去（刷新页面才恢复）。
+      if (changed) {
+        noteLifecycle(`媒体索引到达（${index.segments.length} 段），复位取数状态`)
+        resetFetchState()
+        chunkStore.reset()
+        initRequested = false
+        nextAppend = 1
+        requiredSegment = null
+        requiredSegmentSince = 0
+        await player.clearBuffered()
+        enterGate('等待媒体就绪后重新缓冲', STARTUP_GATE_SEGMENTS)
+      }
       await connectToHost()
     }
   }
@@ -1273,6 +1365,11 @@ export const useRoomStore = defineStore('room', () => {
     if (el && mediaIndex.value && !player.attached.value) {
       void ensurePlayer(mediaIndex.value)
     }
+
+    // 主播的播放器事件要能影响整个房间：原生控件暂停、浏览器自己停下都算。
+    if (el && el !== previous) {
+      relayHostControl(el)
+    }
   }
 
   function sendChat(text: string) {
@@ -1285,15 +1382,56 @@ export const useRoomStore = defineStore('room', () => {
   function sendControl(action: string, patch: Partial<PlaybackState> = {}) {
     if (!isHost.value || !joined.value) return
     const video = player.video.value
+    const paused = patch.paused ?? video?.paused ?? true
+    const rate = patch.rate ?? video?.playbackRate ?? 1
+    const currentTime = patch.currentTime ?? video?.currentTime ?? 0
+    // 本地状态先跟上：主播界面的"播放中/已暂停"就是读它。
+    clock.syncLocal(paused, currentTime, rate)
+    lastControl = { paused, rate, at: performance.now() }
     signaling.send({
       type: T.RoomControl,
       action,
-      currentTime: patch.currentTime ?? video?.currentTime ?? 0,
-      paused: patch.paused ?? video?.paused ?? true,
-      rate: patch.rate ?? video?.playbackRate ?? 1,
+      currentTime,
+      paused,
+      rate,
       hostClockMs: Math.round(performance.now()),
       clockEpoch: clockEpoch.value,
     })
+  }
+
+  /**
+   * 主播的播放器事件 → 广播控制。
+   *
+   * 必要性：以前只有"页面上的播放/暂停按钮"会下发控制。主播用**原生控件**、
+   * 或者浏览器自己把视频停下（切后台、解码卡顿），观众端完全收不到通知，
+   * 于是各播各的 —— 这就是"主播停了观众还在播、之后一直不同步"的来源。
+   */
+  function relayHostControl(el: HTMLVideoElement) {
+    const push = (action: string, patch: Partial<PlaybackState> = {}, force = false) => {
+      if (!isHost.value || !joined.value) return
+      const paused = patch.paused ?? el.paused
+      const rate = patch.rate ?? el.playbackRate
+      // 去重：按钮自己也调 sendControl，播放器事件会再触发一次，
+      // 500ms 内的相同状态只发一次，避免把房间刷成两条控制。
+      if (
+        !force &&
+        lastControl.paused === paused &&
+        lastControl.rate === rate &&
+        performance.now() - lastControl.at < 500
+      ) {
+        return
+      }
+      sendControl(action, { ...patch, paused, rate })
+    }
+
+    el.addEventListener('play', () => push(Action.Play, { paused: false }))
+    el.addEventListener('pause', () => {
+      // seek 期间浏览器会先 pause 再 play，别把中间态当成"用户暂停"广播出去。
+      if (el.seeking) return
+      push(Action.Pause, { paused: true })
+    })
+    el.addEventListener('seeked', () => push(Action.Seek, { currentTime: el.currentTime }, true))
+    el.addEventListener('ratechange', () => push(Action.Rate, { rate: el.playbackRate }, true))
   }
 
   async function play() {
