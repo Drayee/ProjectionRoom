@@ -108,16 +108,16 @@ function changeRate(event: Event) {
       </button>
       <span v-if="mediaText" class="muted mono small">{{ mediaText }}</span>
       <span v-else class="muted small">
-        未选片：用 segmenter 预处理视频，或展开下面的「一键切片脚本」自己切一个目录。
+        未选片：用 segmenter 预处理视频，或展开下面的「切片工具下载」照命令行自己切一个目录。
       </span>
     </div>
 
     <p class="error-text" v-if="store.mediaError">{{ store.mediaError }}</p>
 
-    <!-- 本机没有 ffmpeg 的兜底入口：默认收起，展开后是上传 + 服务端切片面板 + 一键脚本。 -->
+    <!-- 本机没有 ffmpeg 的兜底入口：默认收起，展开后是上传 + 服务端切片面板 + 切片工具下载。 -->
     <div class="segment-entry">
       <button class="segment-toggle" @click="segmentOpen = !segmentOpen">
-        {{ segmentOpen ? '收起服务端切片' : '本机没有 ffmpeg？交给服务器切片 / 生成一键脚本' }}
+        {{ segmentOpen ? '收起服务端切片' : '本机没有 ffmpeg？交给服务器切片 / 下载切片工具' }}
       </button>
       <SegmentUpload v-if="segmentOpen" />
     </div>

@@ -121,7 +121,7 @@ async function joinRoom() {
         </button>
         <p class="muted note">
           创建后会拿到 6 位房间码。进房后选好分片目录即可开播：分片由主播通过 WebRTC 直连分发，
-          服务器不在视频链路上。本机没有 ffmpeg 时，主播页里有「服务端切片」与「一键切片脚本」两条路。
+          服务器不在视频链路上。本机没有 ffmpeg 时，主播页里有「服务端切片」与「下载切片工具」两条路。
         </p>
       </section>
 

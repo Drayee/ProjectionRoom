@@ -138,7 +138,7 @@ export function useChunkPlayer() {
    * SourceBuffer 可能在任何时刻被"从 MediaSource 上摘掉"（元素被替换、MediaSource 被回收，
    * 或上一次 attach 留下的旧 buffer 还没释放）。此后读 `.buffered` 会抛 InvalidStateError，
    * 而这个读取点在 100ms/200ms 的定时器里 —— 一条错误就会把控制台刷满，
-   * 门控、缓冲判断与同步环也跟着一起失效（用户实测：用一键脚本切出来的目录进房后刷屏）。
+   * 门控、缓冲判断与同步环也跟着一起失效（用户实测：用下载切片工具 exe 切出来的目录进房后刷屏）。
    * 这里统一兜住，并顺手把 attached 置回 false，让调度器走"重新挂载"的自愈路径。
    */
   function safeBuffered(): TimeRanges | null {

@@ -1,11 +1,15 @@
-// 服务端切片入口的界面验收：真实 Chrome 里把「交给服务器切片 / 生成一键脚本」点开，
-// 确认面板渲染、服务端探测结果、内嵌教程、一键切片脚本面板（表单校验 / 预览 / 下载落盘 BOM），
-// 并留截图。脚本生成是纯前端逻辑，即使服务端不可达也必须可用。
+// 服务端切片入口的界面验收：真实 Chrome 里把「交给服务器切片 / 下载切片工具」点开，
+// 确认面板渲染、服务端探测结果、内嵌教程，以及切片工具下载面板
+//（清单渲染 / 平台推荐高亮 / 下载链接 / sha256 / 校验命令 / 用法说明）。
+//
+// 用法说明的判据：拖到 exe 上、双击按提示输入路径、缺 ffmpeg 时 exe 自己下载
+//（并支持 -ffmpeg-dir），且**不能**再让用户去 ffmpeg 官网或"先装 ffmpeg"。
+//
+// 工具清单来自 GET /api/downloads/segmenter：服务端没构建工具或不可达时，
+// 面板必须给出中文提示并保持页面可用 —— 这一条也在下面用 CDP 断网复现。
 //
 // 用法：node test/script/verify-segment-ui.mjs [--client http://127.0.0.1:5173] [--server http://127.0.0.1:8080]
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { writeFileSync } from 'node:fs'
 import {
   argOf,
   createRoom,
@@ -21,10 +25,19 @@ const argv = process.argv.slice(2)
 const CLIENT_URL = argOf(argv, 'client', 'http://127.0.0.1:5173')
 const SERVER_URL = argOf(argv, 'server', 'http://127.0.0.1:8080')
 const SHOT = argOf(argv, 'shot', 'segment-ui.png')
-const SHOT_SCRIPT = argOf(argv, 'shot2', 'segment-script-ui.png')
+const SHOT_TOOL = argOf(argv, 'shot2', 'segment-tool-ui.png')
 
 let chrome
 let cdp
+
+/** 展开宿主面板上的切片入口（<details>/<summary> 或按钮都能点）。 */
+const OPEN_ENTRY = `(() => {
+   const el = [...document.querySelectorAll('summary,button')].find((n) => n.textContent.includes('交给服务器切片'));
+   if (!el) return 'not-found';
+   el.click();
+   if (el.parentElement && el.parentElement.tagName === 'DETAILS') el.parentElement.open = true;
+   return 'clicked';
+ })()`
 
 async function main() {
   chrome = await startChrome(findChrome(), Number(argOf(argv, 'port', '9500')), 'ui')
@@ -44,16 +57,8 @@ async function main() {
   )
   console.log(`入口可见: ${entryFound}`)
 
-  // 2) 展开入口（<details>/<summary> 或按钮都能点）
-  await cdp.evaluate(
-    `(() => {
-       const el = [...document.querySelectorAll('summary,button')].find((n) => n.textContent.includes('交给服务器切片'));
-       if (!el) return 'not-found';
-       el.click();
-       if (el.parentElement && el.parentElement.tagName === 'DETAILS') el.parentElement.open = true;
-       return 'clicked';
-     })()`,
-  )
+  // 2) 展开入口
+  await cdp.evaluate(OPEN_ENTRY)
 
   // 3) 面板渲染 + 服务端探测结果（徽标文案见 SegmentUpload.vue：服务端可用 / 服务器切片不可用）
   await waitFor(
@@ -96,203 +101,194 @@ async function main() {
   )
   console.log(`本地教程: ${tutorialOpen}`)
 
-  // 5) 一键切片脚本面板：先确认"参数不全时必须明确报错、按钮禁用"
-  const initial = await cdp.evaluate(
+  // 5) 切片工具下载面板：清单渲染（挂载时拉了一次 /api/downloads/segmenter）
+  const rowsSeen = await waitFor(
+    async () => {
+      const count = await cdp.evaluate(
+        `document.querySelectorAll('[data-testid="slice-tool-row"]').length`,
+      )
+      return count > 0 ? count : null
+    },
+    { label: '切片工具清单渲染', timeoutMs: 20000 },
+  ).catch(() => 0)
+  console.log(`清单行数: ${rowsSeen}`)
+
+  const tool = await cdp.evaluate(
     `(() => {
-       const panel = document.querySelector('[data-testid="slice-script-panel"]');
+       const panel = document.querySelector('[data-testid="slice-tool-panel"]');
        if (!panel) return { found: false };
        const text = panel.innerText;
-       const status = panel.querySelector('[data-testid="slice-script-status"]');
-       const errors = panel.querySelector('[data-testid="slice-script-errors"]');
-       const ps1 = panel.querySelector('[data-testid="download-ps1"]');
-       const sh = panel.querySelector('[data-testid="download-sh"]');
-       const copy = panel.querySelector('[data-testid="copy-script"]');
+       const lower = text.toLowerCase();
+       const rows = [...panel.querySelectorAll('[data-testid="slice-tool-row"]')];
+       const links = [...panel.querySelectorAll('[data-testid="slice-tool-download"]')];
+       const recommended = rows.filter((r) => r.getAttribute('data-recommended') === 'true');
+       const usage = panel.querySelector('[data-testid="slice-tool-usage"]');
+       const verify = panel.querySelector('[data-testid="slice-tool-verify"]');
+       const stateEl = panel.querySelector('[data-testid="slice-tool-state"]');
        return {
          found: true,
-         status: status ? status.innerText.trim() : '',
-         errorCount: errors ? errors.querySelectorAll('li').length : 0,
-         errorText: errors ? errors.innerText.trim() : '',
-         ps1Disabled: ps1 ? ps1.disabled : null,
-         shDisabled: sh ? sh.disabled : null,
-         copyDisabled: copy ? copy.disabled : null,
-         hasThreePaths: text.includes('拖') && text.includes('Shift') && text.includes('桌面'),
-         hasClipboardStep: text.includes('复制文件地址'),
-         hasCurlPlan: text.includes('curl') && text.includes('5 秒'),
-         hasPackPlan: text.includes('index.json') && text.includes('sha256'),
-         mentionsNoApi: text.includes('不依赖 /api') || text.includes('/api'),
-         hasPreview: Boolean(panel.querySelector('[data-testid="slice-script-preview"]')),
+         state: stateEl ? stateEl.innerText.trim() : '',
+         detected: panel.getAttribute('data-detected') || '',
+         rowCount: rows.length,
+         keys: rows.map((r) => r.getAttribute('data-key')),
+         names: rows.map((r) => (r.querySelector('.name') || {}).innerText || ''),
+         recommendedKeys: recommended.map((r) => r.getAttribute('data-key')),
+         linkCount: links.length,
+         linkHrefs: links.map((a) => a.getAttribute('href')),
+         allDownloadAttr: links.every((a) => a.hasAttribute('download')),
+         shaShort: (panel.querySelector('.sha') || {}).innerText || '',
+         hasShaToggle: Boolean(panel.querySelector('[data-testid="slice-tool-sha-toggle"]')),
+         hasUsageCopy: Boolean(panel.querySelector('[data-testid="slice-tool-copy-usage"]')),
+         usageText: usage ? usage.innerText : '',
+         verifyText: verify ? verify.innerText : '',
+         usageFont: usage ? getComputedStyle(usage).fontFamily : '',
+         // 用法说明：拖到 exe 上 / 双击输入路径，且不需要用户自己装 ffmpeg（exe 会兜底下载）
+         hasDragUse: text.includes('拖到') && text.includes('exe 上'),
+         hasDoubleClickUse: text.includes('双击 exe'),
+         hasAutoFfmpeg: text.includes('自动下载') && text.includes('ffmpeg'),
+         hasFfmpegDirFlag: text.includes('-ffmpeg-dir'),
+         // 反面判据：不能再让用户去 ffmpeg 官网、也不能再写"前提是本机有 ffmpeg"
+         ffmpegHomepageLink: Boolean(panel.querySelector('a[href*="ffmpeg.org"]')),
+         hasFfmpegPrereq:
+           text.includes('前提是本机有 ffmpeg') ||
+           text.includes('本机要有 ffmpeg') ||
+           text.includes('需要 ffmpeg') ||
+           text.includes('ffmpeg 官网'),
+         // 旧「生成一键脚本」路线必须一点残留都没有
+         legacy: ['-noexe', 'executionpolicy', '.ps1', '.sh', 'bash', 'hls', '一键脚本'].filter((k) =>
+           lower.includes(k),
+         ),
+         panelBytes: text.length,
        };
      })()`,
   )
-  console.log(`一键脚本面板: ${JSON.stringify(initial)}`)
+  console.log(`切片工具面板: ${JSON.stringify(tool)}`)
 
-  // 6) 粘贴路径后必须变成"参数就绪，可生成"（浏览器拿不到完整路径，所以这条路径是主用法之一）
-  await cdp.evaluate(
+  // 6) 推荐高亮必须与推断出的平台自洽：推断出 → 恰好高亮那一行；推断不出 → 一行都不高亮
+  const recOk =
+    tool.detected === ''
+      ? tool.recommendedKeys.length === 0
+      : tool.recommendedKeys.length === 1 && tool.recommendedKeys[0] === tool.detected
+  console.log(`平台推荐: detected=${tool.detected} highlighted=${JSON.stringify(tool.recommendedKeys)} 自洽=${recOk}`)
+
+  // 7) sha256 前 16 位 + 展开完整值（完整值必须是 64 位十六进制）
+  const shaFull = await cdp.evaluate(
     `(() => {
-       const el = document.querySelector('#slice-source-path');
-       if (!el) return 'no-input';
-       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-       setter.call(el, 'D:\\\\video\\\\movie.mp4');
-       el.dispatchEvent(new Event('input', { bubbles: true }));
-       return 'ok';
+       const toggle = document.querySelector('[data-testid="slice-tool-sha-toggle"]');
+       if (!toggle) return { ok: false, reason: 'no-toggle' };
+       toggle.click();
+       return { ok: true };
      })()`,
   )
-  const ready = await waitFor(
-    async () => {
-      const state = await cdp.evaluate(
-        `(() => {
-           const panel = document.querySelector('[data-testid="slice-script-panel"]');
-           const status = panel && panel.querySelector('[data-testid="slice-script-status"]');
-           const ps1 = panel && panel.querySelector('[data-testid="download-ps1"]');
-           const errors = panel && panel.querySelector('[data-testid="slice-script-errors"]');
-           return {
-             status: status ? status.innerText.trim() : '',
-             ps1Disabled: ps1 ? ps1.disabled : true,
-             errorCount: errors ? errors.querySelectorAll('li').length : 0,
-           };
-         })()`,
-      )
-      return state.status.includes('参数就绪') && state.ps1Disabled === false ? state : null
-    },
-    { label: '一键脚本参数就绪', timeoutMs: 8000 },
-  )
-  console.log(`参数就绪: ${JSON.stringify(ready)}`)
-
-  // 7) 预览区必须给出可读脚本（等宽、含关键步骤），并且复制按钮可用
-  const preview = await cdp.evaluate(
+  await sleep(200)
+  const shaFullText = await cdp.evaluate(
     `(() => {
-       const d = document.querySelector('[data-testid="slice-script-preview"]');
-       if (!d) return { found: false };
-       d.open = true;
-       const pre = d.querySelector('pre');
-       const text = pre ? pre.innerText : '';
-       return {
-         found: true,
-         lines: text.split('\\n').length,
-         hasTitle: text.includes('ProjectionRoom 一键切片脚本'),
-         hasIndexJson: text.includes('index.json'),
-         hasFfprobe: text.includes('ffprobe'),
-         hasPack: text.includes('pack-'),
-         hasOutDir: text.includes('room-media'),
-         font: getComputedStyle(pre).fontFamily,
-         overflow: getComputedStyle(pre).overflowY,
-         maxHeight: getComputedStyle(pre).maxHeight,
-       };
+       const el = document.querySelector('[data-testid="slice-tool-sha-full"]');
+       return el ? el.innerText.trim() : '';
      })()`,
   )
-  console.log(`脚本预览: ${JSON.stringify(preview)}`)
+  const shaOk = /^[0-9a-f]{64}$/.test(shaFullText)
+  console.log(`sha256: 前16位=${JSON.stringify(tool.shaShort)} 完整=${shaFullText} 合法=${shaOk}`)
 
-  // 8) 真的下载 .ps1：Windows 上必须以 UTF-8 带 BOM 落盘，否则 PowerShell 按 ANSI 读，中文全乱码。
-  //    headless 里下载目录要靠 CDP 指定；拿不到下载能力时只报"未跑"，不让它变成假 PASS。
-  let bom = '未跑'
-  const downloadDir = mkdtempSync(join(tmpdir(), 'pr-script-dl-'))
-  try {
-    await cdp.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir })
-    await cdp.evaluate(`document.querySelector('[data-testid="download-ps1"]').click(); 'ok'`)
-    const name = await waitFor(
-      () => readdirSync(downloadDir).find((n) => n.endsWith('.ps1')) ?? null,
-      { label: '下载 .ps1 落盘', timeoutMs: 8000 },
-    ).catch(() => null)
-    if (!name) {
-      bom = '未跑（没等到下载文件）'
-    } else {
-      const bytes = readFileSync(join(downloadDir, name))
-      const hasBom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
-      const text = bytes.toString('utf8').replace(/^\uFEFF/, '')
-      const crlf = text.includes('\r\n')
-      bom = hasBom && text.includes('ProjectionRoom') ? `ok（CRLF=${crlf}）` : `失败：BOM=${hasBom}`
-      console.log(`下载文件: ${name} · ${bytes.length} 字节 · BOM=${hasBom} · CRLF=${crlf}`)
-    }
-  } catch (err) {
-    bom = `未跑（${err.message}）`
-  } finally {
-    rmSync(downloadDir, { recursive: true, force: true })
-  }
-  console.log(`.ps1 落盘校验: ${bom}`)
+  // 8) 用法块必须等宽、含 -fragment，并且复制按钮可用（纯本地能力，不依赖服务端）
+  const copyOk = await cdp.evaluate(
+    `(() => {
+       const btn = document.querySelector('[data-testid="slice-tool-copy-usage"]');
+       if (!btn) return 'no-button';
+       btn.click();
+       return 'clicked';
+     })()`,
+  )
+  console.log(`复制用法: ${copyOk}（字体 ${tool.usageFont}）`)
 
-  // 10) 「没有服务端也能用」：屏蔽 /api 后重新进房，一键脚本面板必须仍然完整可用。
-  //     生成脚本是纯前端逻辑，服务端不可用时这段面板不能跟着一起消失或禁用。
+  // 9) 降级：屏蔽清单端点后必须给中文提示且页面不崩（拿不到 CDP Network 能力时只报"未跑"）
   let offline = { ran: false }
   try {
     await cdp.send('Network.enable')
-    // 只屏蔽切片接口：不能写成 */api/* —— Vite dev 下的模块路径是 /src/api/*.ts，
+    // 只屏蔽切片接口与清单端点：不能写成 */api/* —— Vite dev 下的模块路径是 /src/api/*.ts，
     // 那样连模块加载一起挡掉，页面直接白屏（踩过一次）。
-    await cdp.send('Network.setBlockedURLs', { urls: ['*/api/v1/segment/*'] })
+    await cdp.send('Network.setBlockedURLs', {
+      urls: ['*/api/v1/segment/*', '*/api/downloads/segmenter*'],
+    })
     await cdp.evaluate(`location.reload(); 'ok'`)
     await waitFor(async () => cdp.evaluate('typeof window.__pr !== "undefined"'), {
       label: '重载后调试钩子',
       timeoutMs: 20000,
     })
-    await cdp.evaluate(
-      `(() => {
-         const el = document.querySelector('.segment-toggle');
-         if (el && !document.querySelector('[data-testid="slice-script-panel"]')) el.click();
-         return 'ok';
-       })()`,
-    )
+    await cdp.evaluate(OPEN_ENTRY)
     const state = await waitFor(
       async () => {
         const probe = await cdp.evaluate(
           `(() => {
-             const panel = document.querySelector('[data-testid="slice-script-panel"]');
+             const panel = document.querySelector('[data-testid="slice-tool-panel"]');
              const badge = [...document.querySelectorAll('.badge')].find((n) =>
                n.textContent.includes('服务器切片不可用') || n.textContent.includes('服务端可用'));
              return {
                badge: badge ? badge.textContent.trim() : '',
                panelFound: Boolean(panel),
-               ps1Disabled: panel ? panel.querySelector('[data-testid="download-ps1"]').disabled : null,
-               hasPreview: Boolean(panel && panel.querySelector('[data-testid="slice-script-preview"]')),
+               toolState: panel ? (panel.querySelector('[data-testid="slice-tool-state"]') || {}).innerText || '' : '',
+               toolUnavailable: Boolean(panel && panel.querySelector('[data-testid="slice-tool-unavailable"]')),
+               toolRows: panel ? panel.querySelectorAll('[data-testid="slice-tool-row"]').length : -1,
+               hasUsage: Boolean(panel && panel.querySelector('[data-testid="slice-tool-usage"]')),
              };
            })()`,
         )
         return probe.badge !== '' ? probe : null
       },
-      { label: '离线状态下的服务端探测结果', timeoutMs: 15000 },
+      { label: '离线状态下的清单提示', timeoutMs: 15000 },
     )
+    offline = {
+      ran: true,
+      ...state,
+      probeUnavailable: state.badge.includes('服务器切片不可用'),
+      // 屏蔽清单后必须落到"清单不可用"这句中文提示上：拿不到数据也只是一条提示，不是崩溃
+      manifestUnavailable: state.toolUnavailable && state.toolState.includes('清单不可用'),
+    }
+    console.log(`断网降级: ${JSON.stringify(offline)}`)
+    // 注意：重载会断开主播的 WS，房间若是空的会被服务端清掉（快照里可能看到 last="房间不存在"）。
+    // 这不影响本节的判据 —— 切片工具面板只看清单与浏览器本地能力。
+  } catch (err) {
+    offline = { ran: false, reason: err.message }
+    console.log(`断网降级: 未跑（${err.message}）`)
+  }
 
-    // 粘贴路径后仍然能生成（按钮变为可用）
-    await cdp.evaluate(
-      `(() => {
-         const el = document.querySelector('#slice-source-path');
-         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-         setter.call(el, '/home/me/movie.mp4');
-         el.dispatchEvent(new Event('input', { bubbles: true }));
-         return 'ok';
-       })()`,
-    )
-    const offlineReady = await waitFor(
+  // 10) 恢复网络并重载，确认清单重新渲染（截图也要拍到真实状态，而不是降级态）
+  let restored = { rowCount: -1 }
+  try {
+    await cdp.send('Network.setBlockedURLs', { urls: [] })
+    await cdp.evaluate(`location.reload(); 'ok'`)
+    await waitFor(async () => cdp.evaluate('typeof window.__pr !== "undefined"'), {
+      label: '恢复后调试钩子',
+      timeoutMs: 20000,
+    })
+    await cdp.evaluate(OPEN_ENTRY)
+    restored = await waitFor(
       async () => {
         const probe = await cdp.evaluate(
           `(() => {
-             const panel = document.querySelector('[data-testid="slice-script-panel"]');
-             const status = panel && panel.querySelector('[data-testid="slice-script-status"]');
-             const ps1 = panel && panel.querySelector('[data-testid="download-ps1"]');
-             return { status: status ? status.innerText.trim() : '', ps1Disabled: ps1 ? ps1.disabled : true };
+             const rows = document.querySelectorAll('[data-testid="slice-tool-row"]').length;
+             return { rowCount: rows };
            })()`,
         )
-        return probe.ps1Disabled === false ? probe : null
+        return probe.rowCount > 0 ? probe : null
       },
-      { label: '离线状态下生成脚本', timeoutMs: 8000 },
-    )
-    offline = { ran: true, ...state, ...offlineReady, probeUnavailable: state.badge.includes('服务器切片不可用') }
-    console.log(`无服务端可用性: ${JSON.stringify(offline)}`)
-    // 注意：重载会断开主播的 WS，房间若是空的会被服务端清掉（快照里可能看到 last="房间不存在"）。
-    // 这不影响本节的判据 —— 一键脚本面板与房间状态无关，它只看浏览器本地能力。
+      { label: '恢复后清单重新渲染', timeoutMs: 15000 },
+    ).catch(() => ({ rowCount: -1 }))
+    console.log(`恢复后清单行数: ${restored.rowCount}`)
   } catch (err) {
-    offline = { ran: false, reason: err.message }
-    console.log(`无服务端可用性: 未跑（${err.message}）`)
+    console.log(`恢复网络: 未跑（${err.message}）`)
   }
 
-  // 11) 截图留证（第二张把一键脚本面板滚到视口里）
+  // 11) 截图留证（第二张把切片工具面板滚到视口里）
   const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
   writeFileSync(SHOT, Buffer.from(shot.data, 'base64'))
   await cdp.evaluate(
-    `document.querySelector('[data-testid="slice-script-panel"]')?.scrollIntoView({ block: 'center' }); 'ok'`,
+    `document.querySelector('[data-testid="slice-tool-panel"]')?.scrollIntoView({ block: 'center' }); 'ok'`,
   )
   await sleep(300)
-  const scriptShot = await cdp.send('Page.captureScreenshot', { format: 'png' })
-  writeFileSync(SHOT_SCRIPT, Buffer.from(scriptShot.data, 'base64'))
-  console.log(`截图: ${SHOT} / ${SHOT_SCRIPT}`)
+  const toolShot = await cdp.send('Page.captureScreenshot', { format: 'png' })
+  writeFileSync(SHOT_TOOL, Buffer.from(toolShot.data, 'base64'))
+  console.log(`截图: ${SHOT} / ${SHOT_TOOL}`)
 
   const errors = await cdp.evaluate(
     `window.__pr ? JSON.stringify(window.__pr.snapshot().errors) : '（调试钩子不可用）'`,
@@ -304,23 +300,37 @@ async function main() {
     panel.hasUpload &&
     (panel.badgeOk || panel.probeUnavailable) &&
     panel.hasTutorial &&
-    initial.found &&
-    initial.errorCount > 0 &&
-    initial.ps1Disabled === true &&
-    initial.hasThreePaths &&
-    initial.hasClipboardStep &&
-    initial.hasCurlPlan &&
-    initial.hasPreview &&
-    ready.ps1Disabled === false &&
-    preview.found &&
-    preview.hasTitle &&
-    preview.hasIndexJson &&
-    preview.hasFfprobe &&
-    preview.hasPack &&
-    preview.lines > 100 &&
-    !bom.startsWith('失败') &&
-    // 服务端不可用时面板必须照样可用（拿不到 CDP Network 能力时只提示"未跑"）
-    (!offline.ran || (offline.panelFound && offline.probeUnavailable && offline.hasPreview))
+    // 清单渲染：5 个固定目标至少都在，每行都有指向 /downloads/ 的下载链接
+    tool.found &&
+    tool.rowCount >= 5 &&
+    tool.linkCount === tool.rowCount &&
+    tool.allDownloadAttr &&
+    tool.linkHrefs.every((href) => typeof href === 'string' && href.includes('/downloads/')) &&
+    tool.names.some((name) => name.includes('Windows x64')) &&
+    /^[0-9a-f]{16}…$/.test(tool.shaShort) &&
+    tool.hasShaToggle &&
+    shaFull.ok &&
+    shaOk &&
+    // 平台推荐
+    recOk &&
+    // 用法与校验命令
+    tool.hasUsageCopy &&
+    tool.usageText.includes('-fragment') &&
+    tool.usageText.includes('-transcode 1200k') &&
+    // 用法说明：拖到 exe 上 / 双击按提示输入路径 / 缺 ffmpeg 时 exe 自己下载
+    tool.hasDragUse &&
+    tool.hasDoubleClickUse &&
+    tool.hasAutoFfmpeg &&
+    tool.hasFfmpegDirFlag &&
+    !tool.ffmpegHomepageLink &&
+    !tool.hasFfmpegPrereq &&
+    tool.verifyText.includes('Get-FileHash') &&
+    tool.verifyText.includes('shasum -a 256') &&
+    // 旧脚本路线的字样一个都不能剩
+    tool.legacy.length === 0 &&
+    // 清单拿不到时必须给中文提示而不是崩掉
+    (!offline.ran || (offline.panelFound && offline.probeUnavailable && offline.manifestUnavailable)) &&
+    restored.rowCount >= 5
 
   console.log(`\n判定：${pass ? 'PASS' : 'FAIL'}`)
   process.exitCode = pass ? 0 : 1

@@ -30,7 +30,7 @@ import {
 import { extractZipToDirectory } from '../api/segmentZip'
 import { pickDirectory, supportsFileSystemAccess } from '../api/fileSystemAccess'
 import { useRoomStore } from '../stores/room'
-import SliceScriptPanel from './SliceScriptPanel.vue'
+import SliceToolPanel from './SliceToolPanel.vue'
 
 const store = useRoomStore()
 
@@ -483,7 +483,7 @@ async function writeAndPublish() {
 
     <p class="muted small" v-if="reachable === 'unavailable'">
       连不上 /api/v1/segment/jobs：后端 Go 服务没起来，或者 Vite 没代理 /api。上传与切片暂时不可用，
-      但下面的「一键切片脚本」与「本地切片教程」都只用浏览器本地能力，照旧可用。
+      但下面的「切片工具下载」与「本地切片教程」只依赖静态托管的二进制与本机 ffmpeg，照旧可用。
     </p>
     <div class="row" v-if="reachable === 'unavailable'">
       <button @click="recheck">重新检测</button>
@@ -612,9 +612,9 @@ async function writeAndPublish() {
       </div>
     </template>
 
-    <!-- 一键切片脚本：与「本地切片教程」并列的推荐路径。
-         纯前端生成，不依赖 /api —— 服务端不可用时本节照样可用（它在 v-else 之外）。 -->
-    <SliceScriptPanel />
+    <!-- 切片工具下载：与「本地切片教程」并列的推荐路径。
+         只读 /api/downloads/segmenter（拿不到就显示中文提示），不依赖切片接口（它在 v-else 之外）。 -->
+    <SliceToolPanel />
 
     <details class="tutorial" ref="tutorialEl">
       <summary>本机没有 ffmpeg？本地切片教程（手写命令，不占用服务器）</summary>
@@ -641,7 +641,7 @@ async function writeAndPublish() {
   -frag_duration 2000000 ^
   out_frag.mp4</pre>
       <p class="muted small">
-        以上命令在 Windows 的 cmd / PowerShell 里用 ^ 续行；bash 里换成 \。
+        以上命令在 Windows 的 cmd / PowerShell 里用 ^ 续行；macOS / Linux 终端里换成 \。
       </p>
 
       <h4>3. 用 cmd/segmenter 切成分片目录（三种用法）</h4>
