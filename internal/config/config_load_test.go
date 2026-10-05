@@ -165,3 +165,72 @@ func TestSegmentEnvRejectsInvalid(t *testing.T) {
 		})
 	}
 }
+
+// TestStaticDefaults 锁定单端口部署的默认形态：托管 client/dist，且默认开启。
+func TestStaticDefaults(t *testing.T) {
+	cfg := Default()
+	if !cfg.Static.Serve {
+		t.Fatal("静态资源托管默认应开启")
+	}
+	if cfg.Static.Dir != "client/dist" {
+		t.Fatalf("默认静态目录应为 client/dist，实际 %q", cfg.Static.Dir)
+	}
+}
+
+func TestStaticEnvOverride(t *testing.T) {
+	t.Setenv(envStaticDir, `D:\other\dist`)
+	t.Setenv(envServeStatic, "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 不应失败: %v", err)
+	}
+	if cfg.Static.Dir != `D:\other\dist` {
+		t.Fatalf("静态目录覆盖失败: %q", cfg.Static.Dir)
+	}
+	if cfg.Static.Serve {
+		t.Fatal("PR_SERVE_STATIC=0 应当关闭静态托管")
+	}
+
+	// 开关的常见写法都要认，且大小写不敏感。
+	for _, v := range []string{"1", "true", "TRUE", "on", "yes"} {
+		t.Setenv(envServeStatic, v)
+		on, err := Load()
+		if err != nil {
+			t.Fatalf("PR_SERVE_STATIC=%q 不应报错: %v", v, err)
+		}
+		if !on.Static.Serve {
+			t.Fatalf("PR_SERVE_STATIC=%q 应当开启静态托管", v)
+		}
+	}
+}
+
+// TestStaticDirMissingIsNotFatal 锁定一条边界：目录不存在/路径古怪都只是运行期降级，
+// 不可以在 Load 阶段报错——未构建前端时 go run ./cmd 仍要能起 API 与 /ws。
+func TestStaticDirMissingIsNotFatal(t *testing.T) {
+	for _, dir := range []string{
+		`D:\definitely\not\here\dist`,
+		"relative/not/here",
+		"...",
+	} {
+		t.Setenv(envStaticDir, dir)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("PR_STATIC_DIR=%q 不应让 Load 失败: %v", dir, err)
+		}
+		if cfg.Static.Dir != dir {
+			t.Fatalf("静态目录应当原样保留 %q，实际 %q", dir, cfg.Static.Dir)
+		}
+	}
+}
+
+func TestStaticEnvRejectsInvalidSwitch(t *testing.T) {
+	for _, v := range []string{"maybe", "2", "开", "-1"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv(envServeStatic, v)
+			if _, err := Load(); err == nil {
+				t.Fatalf("PR_SERVE_STATIC=%q 应当报错", v)
+			}
+		})
+	}
+}

@@ -152,6 +152,73 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 | `PR_DEFAULT_STREAM_BPS` | `2000000` | 尚未拿到 mediaIndex 时的码率估计 |
 | `PR_STUN_URLS` | `stun:stun.l.google.com:19302` | 逗号分隔 |
 | `PR_TURN_URLS` / `PR_TURN_USER` / `PR_TURN_PASS` | 空 | 直连失败时的中继（默认不启用） |
+| `PR_STATIC_DIR` | `client/dist` | 前端构建产物目录（相对**进程工作目录**解析，请在仓库根目录启动） |
+| `PR_SERVE_STATIC` | `true` | 是否由 Go 服务端托管前端页面（单端口部署的总开关） |
+
+---
+
+## 单端口部署 / 内网穿透
+
+开发态是两个端口（Vite 5173 + Go 8080）。要在局域网或公网给外部用，就把前端构建产物交给 Go 托管：
+**API、`/ws`、页面全部在同一个端口上**，于是一条隧道指向这一个端口就够了。
+
+前端只使用相对路径 `/api` 与 `/ws`，WebSocket 地址按页面协议推导
+（`client/src/stores/room.ts`：`location.protocol === 'https:' ? 'wss' : 'ws'`），
+所以同源托管之后不需要任何额外配置。
+
+```bash
+# 1. 构建前端（产物在 client/dist，已 gitignore）
+npm --prefix client install     # 首次
+npm --prefix client run build
+
+# 2. 起服务：默认就会托管 client/dist
+go run ./cmd                    # → http://127.0.0.1:8080 同时是页面、API 与 /ws
+
+# 3. 需要局域网/公网可访问时，监听所有网卡
+PR_ADDR=0.0.0.0:8080 go run ./cmd
+```
+
+Windows PowerShell 里等价写法：
+
+```powershell
+$env:PR_ADDR = '0.0.0.0:8080'; go run ./cmd
+```
+
+然后用任意内网穿透工具把隧道指向这个端口，例如：
+
+```bash
+# frp（服务端 frps + 本地 frpc）
+frpc tcp --server_addr <frps 地址> --server_port 7000 --local_ip 127.0.0.1 --local_port 8080 --remote_port 8080
+
+# ngrok / cloudflared（直接指本地端口）
+ngrok http 8080
+cloudflared tunnel --url http://127.0.0.1:8080
+```
+
+隧道把外部请求转给本机 `8080`，页面、`/api`、`/ws` 一起可达。路由优先级固定为
+**`/healthz` → `/api/*` → `/ws` → `/assets/*` → 其它真实文件 → SPA 回退 `index.html`**，
+所以页面永远不会顶掉业务路由。
+
+**三条必须知道的注意：**
+
+1. **隧道给 HTTPS 时，页面会走 `wss://`。** 信令地址由 `location.protocol` 推导（见上），
+   https 页面连的是 `wss://<域名>/ws`；隧道必须支持 WebSocket 升级（frp 的 http 类型、
+   ngrok、cloudflared 都支持，但某些只做 HTTP 转发的反代会在升级时失败）。
+   页面本身如果是 https，混用 `ws://` 会被浏览器按混合内容拦掉——这也是必须推导而不是硬编码的原因。
+2. **隧道只解决「页面 + 信令」，媒体仍然是 P2P。** 视频分片走 WebRTC DataChannel，
+   不经过隧道，也不经过服务器（不变量 I1）。因此双向打洞失败时（对称 NAT、严格公司网络），
+   没有 TURN 就是连不上——`PR_TURN_*` 已预留但**默认不启用**，需要自备 TURN 并配置：
+   `PR_TURN_URLS=turn:your.turn:3478 PR_TURN_USER=... PR_TURN_PASS=...`。
+   隧道对 P2P 打洞没有任何帮助。
+3. **分片上传/下载接口受隧道限制。** `/api/v1/segment/*` 的源文件上限是 **16 GiB**、
+   作业时长上限 **60 分钟**（`PR_SEGMENT_MAX_SOURCE_BYTES` / `PR_SEGMENT_MAX_DURATION`），
+   而隧道通常有自己的最大请求体与超时（很多免费隧道只有几十 MB / 30~100s），
+   大视频远程上传大概率会在隧道层先被拒或超时。稳妥做法：在服务器本机（或局域网内）先切好分片，
+   再把产物通过隧道分批下载（≥1 GiB 时接口会自动返回 JSON manifest + 分批链接）。
+
+静态目录缺失（还没构建前端 / `PR_STATIC_DIR` 指错）**不影响服务启动**：
+服务端只打一条 WARN 并在页面路径上返回 404 提示，`/api`、`/ws`、`/healthz` 照常工作
+（所以 `go run ./cmd` 不装前端也能当纯信令服务器跑）。
 
 ---
 
@@ -249,7 +316,7 @@ cmd/wire.go             wire.Build 依赖声明（inject 侧，勿手写 wire_ge
 cmd/wire_gen.go         `go tool wire ./cmd` 生成的装配代码（提交，不手改）
 cmd/segmenter/          视频分片工具（moof 边界切片 + index.json）
 internal/config/        配置结构与加载（环境变量覆盖）
-internal/handler/       gin 路由、/ws 处理与错误映射（HTTP/协议适配层）
+internal/handler/       gin 路由、/ws 处理、错误映射与前端静态资源托管（HTTP/协议适配层）
 internal/usecase/       业务用例：房间生命周期、拓扑分配、模式判定、换防（唯一状态权威）
 internal/model/         数据契约：消息模型、分片索引、protobuf 转换
 internal/service/       WebSocket 信令层（Hub）与 HTTP 服务器生命周期

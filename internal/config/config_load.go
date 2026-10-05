@@ -31,6 +31,10 @@ const (
 	envSegmentPackSize      = "PR_SEGMENT_PACK_SIZE"
 	envSegmentTempDir       = "PR_SEGMENT_TEMP_DIR"
 	envFFmpeg               = "PR_FFMPEG"
+
+	// 单端口部署：静态资源托管（前端构建产物）。
+	envStaticDir   = "PR_STATIC_DIR"
+	envServeStatic = "PR_SERVE_STATIC"
 )
 
 // DefaultPackSize 是分片打包的默认粒度（每个 .bin 容纳多少片）。
@@ -75,6 +79,11 @@ func Default() *Config {
 			// 打包后产物文件数降到 ~18（细节见 docs/SEGMENT.md §6）。
 			PackSize: DefaultPackSize,
 		},
+		Static: StaticConfig{
+			// 默认托管 client/dist：单端口部署是默认形态，开发态用的是 Vite dev server，不冲突。
+			Serve: true,
+			Dir:   "client/dist",
+		},
 		LogLevel: "info",
 	}
 }
@@ -118,7 +127,42 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	if err := applyStaticEnv(&cfg.Static); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// applyStaticEnv 应用 PR_STATIC_DIR / PR_SERVE_STATIC 覆盖。
+//
+// 这里**故意不校验目录是否存在**：目录缺失是运行期可降级的情况
+// （未构建前端时 go run ./cmd 仍要能起 API 与 /ws），
+// 真正需要报错的是开关值本身写错（例如 PR_SERVE_STATIC=maybe）。
+func applyStaticEnv(sc *StaticConfig) error {
+	if v := os.Getenv(envServeStatic); v != "" {
+		b, err := parseBool(envServeStatic, v)
+		if err != nil {
+			return err
+		}
+		sc.Serve = b
+	}
+	if v := os.Getenv(envStaticDir); v != "" {
+		sc.Dir = v
+	}
+	return nil
+}
+
+// parseBool 解析开关型环境变量，非法取值直接报错（与其它配置一致，不静默回退）。
+func parseBool(name, v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("config: %s 必须是布尔值（1/0/true/false/yes/no/on/off）, got %q", name, v)
+	}
 }
 
 // applySegmentEnv 应用 PR_SEGMENT_* / PR_FFMPEG 覆盖。

@@ -10,7 +10,25 @@ type Config struct {
 	Signal   SignalConfig
 	ICE      ICEConfig
 	Segment  SegmentConfig
+	Static   StaticConfig
 	LogLevel string
+}
+
+// StaticConfig 控制「单端口部署」：由 Go 服务端在同一个端口上托管前端构建产物。
+//
+// 为什么需要它：开发态是 Vite(5173) + Go(8080) 两个端口，用户要在内网/公网用就得暴露两个口。
+// 前端只使用相对路径 /api 与 /ws，所以把 client/dist 交给 Go 托管之后，
+// 一条隧道指向一个端口就能同时覆盖页面、API 与信令。
+//
+// 注意：这两个字段只描述"从哪个目录、要不要托管"，**不在这里校验目录是否存在**。
+// 目录缺失/非法由 internal/handler 记 WARN 并降级（API 与 /ws 照常可用），不允许 fatal。
+type StaticConfig struct {
+	// Serve 是静态托管总开关，默认开（PR_SERVE_STATIC）。
+	// 关掉之后服务端只提供 API 与 /ws，页面需要另找地方托管。
+	Serve bool
+	// Dir 是前端构建产物目录，默认 client/dist（PR_STATIC_DIR）。
+	// 相对路径按进程工作目录解析，因此请在仓库根目录启动服务（go run ./cmd 即是）。
+	Dir string
 }
 
 // RoomConfig 控制房间规模与生命周期。

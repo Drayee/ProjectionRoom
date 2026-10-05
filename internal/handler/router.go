@@ -41,6 +41,10 @@ func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, seg
 
 	r.GET("/ws", wsHandler(cfg, hub, rooms))
 
+	// 静态资源与 SPA 回退必须放在最后：NoRoute 只兜住业务路由之外的请求，
+	// 这样 /api、/ws、/healthz 永远优先（详见 static.go）。
+	registerStatic(r, cfg)
+
 	return r
 }
 
