@@ -1281,6 +1281,29 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   // ---------- 对外动作 ----------
+  /**
+   * 拉取服务端的 ICE 配置（STUN/TURN）。
+   *
+   * 为什么必须主动拉：`POST /api/rooms` 的响应里带 iceServers，但**直接通过分享链接进房**
+   * 的人不会经过那个调用，`joined` 信封里也没有这个字段 —— 结果 PeerConnection 用
+   * `{iceServers: []}` 构造，**配好的 TURN 永远不生效**，对称 NAT 下就是"进得去房间、
+   * 一直缓冲 0 片"。这条是实测抓到的（test/script/verify-ice.mjs）。
+   * 拿不到也不能挡住进房：退化成只用 host candidate，局域网/本机仍可用。
+   */
+  async function loadIceServers(): Promise<void> {
+    if (iceServers.value.length > 0) return
+    try {
+      const resp = await fetch('/api/ice')
+      if (!resp.ok) return
+      const body = (await resp.json()) as { iceServers?: RTCIceServer[] }
+      if (Array.isArray(body.iceServers) && body.iceServers.length > 0) {
+        setIceServers(body.iceServers)
+      }
+    } catch {
+      // 忽略：没有 ICE 配置时 WebRTC 仍可在本机/局域网直连
+    }
+  }
+
   function enterRoom(creds: JoinCredentials) {
     noteLifecycle('enterRoom')
     leaveRoom()
@@ -1291,6 +1314,9 @@ export const useRoomStore = defineStore('room', () => {
     roomClosed.value = ''
     lastError.value = ''
     needsGesture.value = false
+
+    // 先把 ICE 配置拿到手再连：PC 是在 connectTo 时构造的，晚拿到就白建了。
+    safe('拉取 ICE 配置', loadIceServers())
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const url = `${proto}://${window.location.host}/ws?roomId=${encodeURIComponent(creds.roomId)}&clientId=${encodeURIComponent(creds.clientId)}`
