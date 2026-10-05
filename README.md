@@ -76,24 +76,77 @@ curl -o part1.zip http://127.0.0.1:8080/api/v1/segment/jobs/<jobId>/parts/1
 （`showDirectoryPicker()` + File System Access API；浏览器不支持时退化为"下载 zip 手动解压后再选目录"）。
 服务器连不上或没装 ffmpeg 时，面板会直接说明原因，内嵌的本地切片教程始终可用。
 
-主播页还能**由浏览器直接生成一键切片脚本**（`.ps1` / `.sh`）：脚本先从
-`GET /api/downloads/segmenter` 发布的位置下载 `segmenter` 可执行文件并**校验 sha256**
-（校验不过立刻退出），再调它切片；下载不到或加 `-NoExe` 时退回内置的 **HLS-fMP4**
-路径（`-f hls -hls_segment_type fmp4`，单条 muxed 流）。两条路径都会用 ffprobe 断言
-`init.mp4` 的轨道数与 `index.json` 声明的编码一致，**不一致就报错退出**，
-不再静默产出"丢音轨 / 分片互相覆盖"的坏切片。二进制由 `scripts/build-segmenter.ps1`
-交叉编译到 `client/dist/downloads/`，下载目录可用 `PR_DOWNLOADS_DIR` 覆盖。
+主播页还能直接**下载切片工具（segmenter）+ 照命令行用法自己切**：面板从
+`GET /api/downloads/segmenter` 拿清单，按当前平台高亮推荐那一行，给出体积、sha256
+（可展开/复制）与**下载按钮**，并附校验命令（Windows 用 `Get-FileHash`，Linux / macOS 用
+`shasum -a 256`）与用法：
 
 ```bash
-# 界面验收：真实 Chrome 里展开入口、确认面板/探测徽标/教程，并留一张截图
+# 三种用法完全等价（都不需要额外装什么）：
+segmenter -in <视频文件> -out <输出目录>
+segmenter "<视频文件>" -out <输出目录>   # 把视频拖到 exe 上就是这个形状（唯一的位置参数）
+segmenter -out <输出目录>                # 双击 exe 后按提示粘贴路径也一样
+```
+
+**本机没有 ffmpeg 也没关系**：exe 会按 `-ffmpeg-dir` → `PATH` → exe 同级目录
+（`./ffmpeg/bin/`、`./ffmpeg/`、`./bin/`）依次找；都没有就打印醒目警告 + **5 秒倒计时**
+（按 Ctrl+C 取消，`-yes` 直接跳过），然后用 net/http 自动下载一份解压到 **exe 同级目录**
+（Windows / macOS 取 `.zip`，用标准库解；Linux 取 `.tar.xz`，交给系统 `tar -xJf`），再找一次。
+下载地址可用 `-ffmpeg-url` 或环境变量 `PR_FFMPEG_URL` 覆盖；已经有 ffmpeg 的用户用
+`-ffmpeg-dir` 指过去即可（旧名 `-ffmpeg` 仍然可用）。**下载或解压失败不会静默**：
+会打印手动安装指引。
+
+> 注意：CLI 只在上面这几处 + 自动下载目录里找，**不会去扫系统里其它安装位置**
+> （服务端切片用的 `PR_FFMPEG` 发现顺序仍会扫 Windows 常见安装目录）。
+> ffmpeg 装在别处（例如 `D:\Program Files (x86)\ffmpeg-…\bin`）时，用 `-ffmpeg-dir` 指过去，
+> 或把该目录加进 `PATH`。
+
+**要不要转码它自己判断**：先用 ffprobe 探测，视频 ∈ {h264, av1, vp9} 且音频 ∈ {aac, opus, 无}
+→ 只做 `-c copy` 无损重新封装；否则自动转码成 H.264/AAC（`libx264 veryfast crf 23` +
+`aac 128k`）。直通 AV1/VP9 时会明确提示"只有在支持它的浏览器里能播（Safari、部分 Firefox
+不行）；要最大兼容请加 `-transcode 1200k`"。
+
+> 已知限制：本机切片器（`internal/service/mp4`）只认 avc1/avc3/av01 + mp4a/Opus 的采样格式，
+> 所以 **VP9（vp09）直通会在切片这一步被拒绝** —— 此时工具会明确提示"请加 `-transcode 1200k`
+> 重跑"，而不是静默产出一个播不了的目录。
+
+| 参数 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `-in` | 空 | 输入视频；不给时按「位置参数 → 常见目录按文件名找 → 交互式询问」的顺序找 |
+| `-name` | 空 | 想找的文件名；不给时用 `-out` 的目录名（与旧一键脚本一致） |
+| `-search-by-name` | `true` | 是否在 桌面/下载/视频/文档/当前目录/exe 同级目录 里按文件名找 |
+| `-out` | `./room-media` | 输出（分片）目录 |
+| `-transcode` | 空 | 强制转码到该视频码率（如 `1200k`）；优先于自动判定 |
+| `-fragment` | `false` | 强制无损重新封装（`-c copy`）；优先于自动判定 |
+| `-frag-sec` | `2` | 分片目标时长（秒） |
+| `-pack` | `100` | 每 N 片合成一个 `pack-*.bin`；`1` = 不打包 |
+| `-uplink-mbps` | `12` | 主播上行估计（Mbps），仅用于打印容量提示 |
+| `-ffmpeg-dir` | 空 | ffmpeg/ffprobe 所在目录或可执行文件（别名 `-ffmpeg`） |
+| `-ffmpeg-url` | 按平台 | ffmpeg 下载地址（也认环境变量 `PR_FFMPEG_URL`） |
+| `-yes` | `false` | 跳过自动下载前的 5 秒倒计时（仍然会下载） |
+
+切完回主播页「选择分片目录」选中输出目录即可开播。工具走的是「**单条复用 fMP4 + 按 moof
+切分**」，产物格式与服务端切片完全一致，**不需要用户自己拼 index.json**，也不会再出现
+"丢音轨 / 分片互相覆盖"的坏切片；结束时打印分片数/文件数/体积/码率 + K0 容量提示
+（**K0 是能带几个直连子节点，不是能带几个人**）+ 下一步。二进制由
+`scripts/build-segmenter.ps1` 交叉编译到 `client/dist/downloads/`，下载目录可用
+`PR_DOWNLOADS_DIR` 覆盖。
+
+> Go 版不再做"引号 / `$` 符号校验"：参数是用 exec 数组直接传给 ffmpeg 的，不经过 shell，
+> 不再有旧 `.ps1` 那种"路径里有引号就会被打断"的问题。
+
+```bash
+# 界面验收：真实 Chrome 里展开入口、确认面板/探测徽标/教程/切片工具清单，并留一张截图
 node test/script/verify-segment-ui.mjs
 ```
 
 ### M2 已交付
 
-- **`cmd/segmenter`**：把本地视频切成 `init.mp4` + `c00001.m4s…` + `index.json`。
-  支持 `-fragment`（无损重新封装）与 `-transcode 1200k`（低上行预设），并直接打印
-  "这个码率下主播能带几个人"。
+- **`cmd/segmenter`**：把本地视频切成 `init.mp4` + `pack-*.bin`（或 `c00001.m4s…`）+
+  `index.json`。**只下载一个 exe 就能用**：自动找输入（`-in` / 位置参数=拖拽 / 常见目录按
+  文件名找 / 交互式询问）、自动找 ffmpeg（`-ffmpeg-dir` → `PATH` → exe 同级目录 →
+  5 秒倒计时后自动下载）、自动判定直通或转码（`-fragment` / `-transcode 1200k` 可强制），
+  并直接打印"这个码率下主播能带几个直连子节点"。
 - **切片正确性的判据**：init + 全部分片按序拼接必须与原文件**逐字节相同**，
   且每个分片都以 `moof` 开头。按固定字节数切分会产生"半个 moof"，浏览器会直接抛错。
 - **前端播放链路**：`useMediaIndex`（选片 + `isTypeSupported` 硬校验）→
@@ -118,7 +171,7 @@ node test/script/verify-segment-ui.mjs
 
 ## 快速开始
 
-前置：Go 1.26+、Node 20+、`ffmpeg`（用于把本地视频预处理成 fMP4 分片）。
+前置：Go 1.26+、Node 20+；`ffmpeg` **可选**（本地切片工具会自己下载一份，服务端切片才需要它）。
 
 ```bash
 # 终端 1：服务端（默认 127.0.0.1:8080）
@@ -133,8 +186,12 @@ cd client && npm install && npm run dev
 ### 主播准备视频
 
 ```bash
-# 普通 MP4 → 分片目录（无损重新封装，不重新编码）
-go run ./cmd/segmenter -in movie.mp4 -out ./room-media -fragment -frag-sec 2
+# 一条命令搞定：探测编码后自动决定（能直通就只重新封装，不能就自动转码）
+go run ./cmd/segmenter -in movie.mp4 -out ./room-media
+
+# 不想给 -in：把视频拖到 exe 上，或按文件名在常见目录里找
+go run ./cmd/segmenter "movie.mp4" -out ./room-media
+go run ./cmd/segmenter -name movie.mp4 -out ./room-media
 
 # 上行不足时的低码率预设（重新编码，耗时随片长增长）
 go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
@@ -142,11 +199,18 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 
 然后在主播控制台点「选择分片目录」，选中 `room-media/` 即可开播。
 
-`segmenter` 会打印容量提示，例如：
+`segmenter` 会打印探测结果、处理依据、产物摘要与容量提示，例如：
 
 ```
-容量提示（按主播上行 12.0 Mbps 估计）:
-  K0 = 4 → 扇出模式：主播可直接服务 4 个一级节点，其余成员挂到它们下面。
+探测: 时长 801.3 秒（13.4 分钟）  视频=h264  音频=aac
+判定: 视频 h264 与音频 aac 都在直通集合内 → 直通：只做 -c copy 重新封装，不重新编码
+...
+容量提示（按主播上行 12.0 Mbps 估算，K0 = floor(上行 × 0.8 ÷ 码率)，上限 8）:
+  K0 = 8
+  注意：K0 是主播能直接带几个子节点，不是能带几个人；其余成员挂在这些直连节点下面。
+  扇出模式：主播可直接服务 8 个一级节点，其余成员挂到它们下面。
+
+接下来：在主播页点「选择分片目录」选中 ./room-media 即可开播。
 ```
 
 ### 配置
@@ -237,10 +301,15 @@ cloudflared tunnel --url http://127.0.0.1:8080
 ```bash
 gofmt -l ./cmd ./internal          # 必须为空
 go vet ./... && go vet -tags wireinject ./cmd
-go test ./...                      # 8 个包
+go test ./...                      # 7 个有测试的包（含 cmd/segmenter 的一键流程）
 
 cd client && npm run typecheck && npm run build
 ```
+
+`cmd/segmenter` 的测试里有两条不需要真 ffmpeg 的关键用例：用 `httptest` 提供一个小 zip
+验证"下载→解压→找到工具"，以及用 `testdata/stubtools`（假 ffmpeg/ffprobe）把整条
+一键流程跑到产出 `index.json`（假 ffmpeg 会把收到的参数写进 `PR_STUB_LOG`，用来证明
+"找到了工具并把它作为 ffmpeg 路径传下去"）。
 
 ### 竞态检测（-race）
 
@@ -322,7 +391,7 @@ cmd/                    入口：main.go 只有 加载配置 → InitializeApp �
 cmd/init.go             Init 聚合根与 Run()（wire 图与 main 的唯一交点）
 cmd/wire.go             wire.Build 依赖声明（inject 侧，勿手写 wire_gen.go）
 cmd/wire_gen.go         `go tool wire ./cmd` 生成的装配代码（提交，不手改）
-cmd/segmenter/          视频分片工具（moof 边界切片 + index.json）
+cmd/segmenter/          视频分片工具（一键流程：找输入/找或下载 ffmpeg/探测判定 + moof 边界切片 + index.json）
 internal/config/        配置结构与加载（环境变量覆盖）
 internal/handler/       gin 路由、/ws 处理、错误映射与前端静态资源托管（HTTP/协议适配层）
 internal/usecase/       业务用例：房间生命周期、拓扑分配、模式判定、换防（唯一状态权威）

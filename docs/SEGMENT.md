@@ -232,32 +232,48 @@ ffmpeg -i input.mp4 -c:v libx264 -preset veryfast -b:v 1200k \
 
 > 源视频不是 H.264/AAC 时先转码：`-c:v libx264 -c:a aac`。HEVC / AV1 / VP9 不能直接进 MSE。
 
-### 5.2 `cmd/segmenter` 的三种用法
+### 5.2 `cmd/segmenter`：拖拽 / 双击 / 命令行三种用法等价
+
+三种写法最终只要求"给出一个输入文件"，产物完全相同：
+
+1. **拖到 exe 图标上** —— 文件路径作为唯一位置参数传进来；
+2. **双击 exe** —— 按提示粘贴路径（也可以把路径用管道喂给 stdin）；
+3. **命令行 `-in`** —— 脚本 / CI 推荐。
 
 ```bash
 # 1) 已经是 fragmented MP4：直接按 moof 边界切（这一步不需要 ffmpeg）
-go run ./cmd/segmenter -in out_frag.mp4 -out ./room-media
+segmenter -in out_frag.mp4 -out ./room-media
+segmenter "out_frag.mp4" -out ./room-media          # 位置参数与 -in 等价
 
-# 2) 普通 MP4：先无损重新封装成 fMP4，再切
-go run ./cmd/segmenter -in movie.mp4 -out ./room-media -fragment
+# 2) 普通 MP4/MKV：自动判为"非 H.264/AAC"就转码、否则无损重新封装成 fMP4 再切
+segmenter -in movie.mkv -out ./room-media
 
 # 3) 低上行预设：转码降码率后再切（长视频耗时数分钟）
-go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k -uplink-mbps 3
+segmenter -in movie.mkv -out ./room-media -transcode 1200k -uplink-mbps 3
 
 # 4) 关掉打包：产物与打包功能出现之前逐字节等价（每片一个 c00001.m4s）
-go run ./cmd/segmenter -in out_frag.mp4 -out ./room-media -pack 1
+segmenter -in out_frag.mp4 -out ./room-media -pack 1
 ```
+
+**本机没有 ffmpeg 也能用**：找不到 ffmpeg/ffprobe 时会醒目警告 + 5 秒倒计时（Ctrl+C 取消），
+然后自动下载（`net/http`，带进度）解压到 exe 同级的 `ffmpeg-pkg/` 并继续切片。
+不想等就加 `-yes` 跳过倒计时；想用自己那份就用 `-ffmpeg-dir` 指定（目录或可执行文件都行）。
 
 | 参数 | 默认 | 说明 |
 | :--- | :--- | :--- |
-| `-in` | 必填 | 输入视频 |
+| `-in` | 空 | 输入视频；也可以用唯一位置参数（拖拽/粘贴路径）代替 |
+| `-name` | 空 | 不给 `-in` 时按文件名在常见目录（桌面/下载/视频/文档/当前目录/exe 同级）里找 |
+| `-search-by-name` | `true` | 关掉后不再按文件名搜索，直接进入交互询问 |
 | `-out` | `./room-media` | 输出目录 |
-| `-fragment` | `false` | 输入是普通 MP4 时先无损重新封装 |
-| `-transcode` | 空 | 低上行预设：转码到指定码率（如 `1200k`） |
+| `-transcode` | 空 | 低上行预设：转码到指定码率（如 `1200k`），优先于自动判定 |
+| `-fragment` | `false` | 强制无损重新封装（`-c copy`）；默认由探测结果自动决定 |
 | `-frag-sec` | `2` | 分片目标时长（秒） |
 | `-pack` | `100` | 每 N 片合成一个 `pack-*.bin`；`1` = 不打包（逐片一个文件） |
 | `-uplink-mbps` | `12` | 仅用于打印容量提示（SPEC §6.1） |
-| `-ffmpeg` | 空 | 指定 ffmpeg 路径（目录或可执行文件），优先于 `PR_FFMPEG` |
+| `-ffmpeg-dir` | 空 | ffmpeg/ffprobe 所在目录或可执行文件，优先于 `PR_FFMPEG` |
+| `-ffmpeg` | 空 | `-ffmpeg-dir` 的别名（同时给以最后出现的为准） |
+| `-ffmpeg-url` | 空 | 自动下载的地址；不填按平台取默认值，也可用 `PR_FFMPEG_URL` |
+| `-yes` | `false` | 跳过自动下载前的 5 秒倒计时 |
 
 产物：
 
@@ -281,8 +297,9 @@ room-media/
 | 报错 | 原因 | 处理 |
 | :--- | :--- | :--- |
 | `mp4: … 不是 fragmented MP4（没有 moof box），无法按分片边界切分` | 输入是普通 MP4 | 加 `-fragment`，或先跑 §5.1 的一步 ffmpeg |
-| `mp4: 暂不支持 hvc1/hev1/vp09/av01（M2 只处理 H.264/AAC）` | 视频编码不是 H.264 | `ffmpeg -c:v libx264 -c:a aac` 转码后再切（服务端切片会自动转） |
-| `未找到 ffmpeg，请先安装并加入 PATH（或用 -in 直接传 fragmented MP4）` | `PATH` 里没有 ffmpeg | 安装 ffmpeg，或用 `-ffmpeg` / `PR_FFMPEG` 指定路径 |
+| `mp4: 暂不支持 hvc1/hev1/vp09` | 视频编码不在 `avc1/avc3/av01` 之内（常见 hevc、vp9） | 加 `-transcode 1200k` 自动转成 H.264/AAC；或 `ffmpeg -c:v libx264 -c:a aac` 转码后再切 |
+| `segmenter 失败: 没有从 stdin 读到路径（非交互环境请用 -in 或位置参数指定输入文件）: EOF` | 双击/管道方式运行且拿不到输入（非交互环境会立即报错，不挂死） | 用 `-in`、位置参数或 `-name` 指定输入 |
+| 警告"没有找到 ffmpeg/ffprobe" + 5 秒倒计时 | `-ffmpeg-dir`/`PR_FFMPEG`、`PATH`、exe 同级目录里都没有 | 等它自动下载；或 `-yes` 跳过倒计时；或用 `-ffmpeg-dir` 指定自己那份 |
 | `ffmpeg 执行失败: … Invalid data found when processing input` | 文件损坏，或根本不是视频 | 先用 `ffprobe -v error <文件>` 确认 |
 | `segment: 源视频超过时长上限` | 视频超过 60 分钟 | 本地切（§5.2），或调大 `PR_SEGMENT_MAX_DURATION` |
 | `服务器未安装 ffmpeg …` | 服务器没有 ffmpeg | 走 §5.1 / §5.2 本地切片 |
@@ -390,3 +407,10 @@ return new Uint8Array(
   宁可明确报错，也不产出超限的一份。因此 `PR_SEGMENT_PACK_SIZE` 调得很大时，
   要注意单包可能逼近该上限。
 - 服务器端不提供断点续传：分批下载的每一份都可以单独重下（内容一致），但没有 Range 支持。
+- `cmd/segmenter` 的 ffmpeg 发现链是 `-ffmpeg-dir`/`PR_FFMPEG` → `PATH` → exe 同级目录
+  → 警告并自动下载，**不再扫描系统其它安装位置**（服务端 `segment.DiscoverTools` 仍会扫）。
+  自己的 ffmpeg 装在非 `PATH` 目录时，请用 `-ffmpeg-dir` 或 `PR_FFMPEG` 指定。
+- VP9 按一键脚本的判据被列入直通集合，但本机切片器
+  （`internal/service/mp4`）只认 `avc1/avc3/av01` + `mp4a/Opus`，
+  所以 VP9 直通会在切片时失败：CLI 会在**决定处理方式时**就提示改用 `-transcode 1200k`，
+  而不是等切到一半才报错（`compatWarning`）。

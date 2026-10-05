@@ -1,10 +1,18 @@
 // Command segmenter 把本地视频预处理成放映室可用的 fMP4 分片目录（SPEC §4.1、§4.5）。
 //
-// 三种用法：
+// 它是「浏览器一键切片脚本」的可执行文件版本：用户只下载一个 exe，**不需要自己装 ffmpeg**。
+// 一次运行包含脚本里原来的全部步骤：
 //
-//	segmenter -in out_frag.mp4 -out ./room-media              # 已经是 fragmented MP4，直接切
-//	segmenter -in movie.mp4 -out ./room-media -fragment       # 无损重新封装后再切
-//	segmenter -in movie.mp4 -out ./room-media -transcode 1200k # 低上行预设：转码降码率
+//	找输入 → 找 ffmpeg（没有就下载一份） → 探测并决定直通/转码 → 按 moof 边界切分 → 打印摘要与容量提示
+//
+// 三种用法（都可以）：
+//
+//	segmenter -in movie.mkv -out ./room-media              # 显式指定输入
+//	segmenter "D:\video\movie.mkv" -out ./room-media        # 只给位置参数（把视频拖到 exe 上就是这个形状）
+//	segmenter -out ./room-media -name movie.mkv             # 按文件名在常见目录里找，找不到再交互式询问
+//
+// 默认不再要求用户选 -fragment/-transcode：工具会先探测编码，可直通就只做无损重新封装
+// （-c copy），不可直通就自动转码成 H.264/AAC。两个开关仍然保留，用来强制指定。
 //
 // 默认每 100 片合成一个 pack-0001.bin（产物文件数从 ~1800 降到 ~18，Windows 上写盘快得多）；
 // `-pack 1` 关掉打包，产出的目录与打包功能出现之前逐字节等价。
@@ -19,112 +27,364 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/service/segment"
-	"ProjectionRoom/internal/usecase"
 )
 
+// 默认的 ffmpeg 下载地址（-ffmpeg-url / 环境变量 PR_FFMPEG_URL 可覆盖）。
+const (
+	ffmpegURLWindows = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+	ffmpegURLDarwin  = "https://evermeet.cx/ffmpeg/getrelease/zip"
+	ffmpegURLLinux   = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+
+	// darwinFFprobeURL 是 macOS 上的补充下载地址：
+	// evermeet 的 ffmpeg 包里**只有 ffmpeg、没有 ffprobe**，而探测编码必须要 ffprobe。
+	// 所以主包解压后若缺 ffprobe，再按这个地址补一份（成败都会明确打印）。
+	darwinFFprobeURL = "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
+
+	// countdownSeconds 是自动下载前的倒计时秒数（与一键脚本一致，-yes 跳过）。
+	countdownSeconds = 5
+
+	// ffmpegPkgDirName 是自动下载/解压的落地目录名（相对 exe 所在目录）。
+	ffmpegPkgDirName = "ffmpeg-pkg"
+
+	// 手动安装指引：任何"找不到 ffmpeg 又下不下来"的路径都要打出来，不能静默失败。
+	manualInstallHint = "手动安装指引：到 https://www.ffmpeg.org/download.html 下载，" +
+		"解压后用 -ffmpeg-dir 指定它所在的 bin 目录（例如 -ffmpeg-dir C:\\ffmpeg\\bin），或把该目录加进 PATH。"
+)
+
+// boolFlagNames 是"取值不跟在后面的"开关名。
+// 拆分参数时要用它判断"-x"后面那一个词是它的值，还是位置参数（见 splitArgs）。
+var boolFlagNames = map[string]bool{
+	"fragment":       true,
+	"yes":            true,
+	"search-by-name": true,
+	"h":              true,
+	"help":           true,
+}
+
+// usageText 是 -h / 参数写错时的中文用法说明。
+const usageText = `segmenter 把一个视频切成放映室可用的分片目录（init.mp4 + pack-*.bin + index.json）。
+
+用法:
+  segmenter -in <视频文件> -out <输出目录> [其它参数]
+  segmenter <视频文件> -out <输出目录>          # 唯一的位置参数会被当成输入（拖到 exe 上即可）
+  segmenter -out <输出目录>                     # 不给输入：按文件名在常见目录里找，找不到再问你
+
+参数:
+`
+
+// options 是命令行参数（与一键脚本的参数一一对应，只是名字改成了 Go 习惯的 -x 形式）。
+type options struct {
+	// in 是显式指定的输入视频。
+	in string
+	// name 是"想要的文件名"，用于在常见目录里查找。
+	name string
+	// out 是输出（分片）目录。
+	out string
+	// transcode 非空则强制转码到该视频码率（如 1200k），优先于自动判定。
+	transcode string
+	// fragment 为真则强制无损重新封装（-c copy），跳过自动判定。
+	fragment bool
+	// fragSec 是分片目标时长（秒）。
+	fragSec float64
+	// pack 是打包粒度（每 N 片一个 pack-*.bin；1 = 不打包）。
+	pack int
+	// uplinkMbps 是主播上行估计（Mbps），仅用于打印容量提示。
+	uplinkMbps float64
+	// ffmpegDir 是 ffmpeg/ffprobe 所在目录或可执行文件（-ffmpeg-dir / 别名 -ffmpeg）。
+	ffmpegDir string
+	// ffmpegURL 是 ffmpeg 下载地址覆盖（空则看环境变量与平台默认值）。
+	ffmpegURL string
+	// yes 为真则跳过自动下载前的倒计时。
+	yes bool
+	// searchByName 为假则不做"按文件名在常见目录里查找"，直接进入交互询问。
+	searchByName bool
+	// quiet 为真则少打印流水线日志（当前保留，供以后接 -q）。
+	quiet bool
+	// positional 是去掉参数之后剩下的位置参数（拖拽进来的文件就在里面）。
+	positional []string
+}
+
+// app 是一次运行的全部外部依赖。
+//
+// 抽成结构体的唯一目的是可测：单测能换掉 exe 目录、stdin/stdout、时钟、HTTP 客户端与 PATH 查找，
+// 否则"没装 ffmpeg → 倒计时 → 下载 → 解压 → 找到工具"这条最关键的路径只能靠真下 100 MB 来验证。
+type app struct {
+	opts   *options
+	stdin  io.Reader
+	stdout io.Writer
+	stderr io.Writer
+
+	// exeDir 是 exe 所在目录：自动下载落在这里，也在这里找同级 ffmpeg。
+	exeDir string
+	// homeDir / cwd 用于拼"常见目录"。
+	homeDir string
+	cwd     string
+	// searchDirs 非空时覆盖默认的常见目录列表（单测用）。
+	searchDirs []string
+
+	// sleep 注入倒计时的等待（单测用假 sleep 验证"5 秒"与"-yes 跳过"）。
+	sleep      func(time.Duration)
+	httpClient *http.Client
+	lookPath   func(string) (string, error)
+	goos       string
+}
+
 func main() {
-	in := flag.String("in", "", "输入视频文件（必填）")
-	out := flag.String("out", "./room-media", "输出目录")
-	transcode := flag.String("transcode", "", "低上行预设：用 ffmpeg 转码到指定码率（如 1200k）后再切片")
-	fragment := flag.Bool("fragment", false, "输入是普通 MP4 时，先无损重新封装成 fragmented MP4")
-	fragSec := flag.Float64("frag-sec", 2, "分片目标时长（秒）")
-	pack := flag.Int("pack", config.DefaultPackSize,
-		"打包粒度：每 N 片合成一个 pack-*.bin；1 = 不打包（逐片一个 c*.m4s）")
-	uplinkMbps := flag.Float64("uplink-mbps", 12, "主播上行估计（Mbps），仅用于打印容量提示")
-	ffmpegPath := flag.String("ffmpeg", "",
-		"ffmpeg 路径（可为目录或可执行文件）；默认按 PR_FFMPEG → PATH → 常见安装目录 查找")
-
-	flag.Parse()
-
-	if err := run(*in, *out, *transcode, *fragment, *fragSec, *pack, *uplinkMbps, *ffmpegPath); err != nil {
-		fmt.Fprintf(os.Stderr, "segmenter 失败: %v\n", err)
+	a, err := newApp(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return // -h/--help：用法已经打印过，正常退出
+		}
+		fmt.Fprintf(os.Stderr, "segmenter: %v\n", err)
+		os.Exit(2)
+	}
+	if err := a.run(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "\nsegmenter 失败: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(in, out, transcode string, fragment bool, fragSec float64, pack int, uplinkMbps float64, ffmpegPath string) error {
-	if strings.TrimSpace(in) == "" {
-		return fmt.Errorf("必须指定 -in")
-	}
-	if _, err := os.Stat(in); err != nil {
-		return fmt.Errorf("输入文件不可读: %w", err)
-	}
-	if fragSec <= 0 {
-		return fmt.Errorf("-frag-sec 必须为正")
-	}
-	if pack < 1 {
-		return fmt.Errorf("-pack 必须 >=1（1 = 不打包）")
+// newApp 解析参数并组装真实依赖。
+func newApp(args []string) (*app, error) {
+	opts, err := parseOptions(args, os.Stderr)
+	if err != nil {
+		return nil, err
 	}
 
-	explicit := strings.TrimSpace(ffmpegPath)
-	if explicit == "" {
-		explicit = os.Getenv("PR_FFMPEG")
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
 	}
-	tools := segment.DiscoverTools(explicit)
+	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
 
-	// 只有需要重新封装/转码时才要求 ffmpeg；直接切已经 fragmented 的 MP4 不需要它。
-	if (transcode != "" || fragment) && tools.FFmpeg == "" {
-		return fmt.Errorf("未找到 ffmpeg，请先安装并加入 PATH（或用 -in 直接传 fragmented MP4）")
+	return &app{
+		opts:       opts,
+		stdin:      os.Stdin,
+		stdout:     os.Stdout,
+		stderr:     os.Stderr,
+		exeDir:     exeDir,
+		homeDir:    home,
+		cwd:        cwd,
+		sleep:      time.Sleep,
+		httpClient: &http.Client{Timeout: 30 * time.Minute},
+		lookPath:   exec.LookPath,
+		goos:       runtime.GOOS,
+	}, nil
+}
+
+// parseOptions 解析命令行：先按"标志/位置参数"拆开，再交给 flag 包。
+//
+// 为什么要先拆：Go 的 flag 包遇到第一个非标志参数就停止解析，
+// 于是 `segmenter movie.mkv -out ./cut`（拖拽 + 参数）里的 -out 会被当成位置参数丢掉。
+func parseOptions(args []string, usage io.Writer) (*options, error) {
+	flagArgs, positional := splitArgs(args, boolFlagNames)
+
+	opts := &options{}
+	fs := flag.NewFlagSet("segmenter", flag.ContinueOnError)
+	fs.SetOutput(usage)
+	fs.Usage = func() { fmt.Fprint(usage, usageText); fs.PrintDefaults() }
+
+	fs.StringVar(&opts.in, "in", "",
+		"输入视频文件；不给时按 位置参数 → 常见目录按文件名查找 → 交互式询问 的顺序找")
+	fs.StringVar(&opts.name, "name", "",
+		"想在常见目录里查找的文件名；不给时用 -out 的目录名（与一键脚本一致）")
+	fs.BoolVar(&opts.searchByName, "search-by-name", true,
+		"没给 -in 时是否按文件名在 桌面/下载/视频/文档/当前目录/exe 同级目录 里查找")
+	fs.StringVar(&opts.out, "out", "./room-media", "输出（分片）目录")
+	fs.StringVar(&opts.transcode, "transcode", "",
+		"强制转码到指定视频码率（如 1200k）后再切；不给则自动判定直通/转码")
+	fs.BoolVar(&opts.fragment, "fragment", false,
+		"强制无损重新封装为 fMP4（-c copy）后再切；不给则自动判定")
+	fs.Float64Var(&opts.fragSec, "frag-sec", 2, "分片目标时长（秒）")
+	fs.IntVar(&opts.pack, "pack", config.DefaultPackSize,
+		"打包粒度：每 N 片合成一个 pack-*.bin；1 = 不打包（逐片一个 c*.m4s）")
+	fs.Float64Var(&opts.uplinkMbps, "uplink-mbps", 12, "主播上行估计（Mbps），仅用于打印容量提示")
+	fs.StringVar(&opts.ffmpegDir, "ffmpeg-dir", "",
+		"ffmpeg/ffprobe 所在目录（或可执行文件）；优先于 PATH 与自动下载")
+	// -ffmpeg 是 -ffmpeg-dir 的历史名字。两个标志写同一个变量，
+	// 因此先出现哪个都行，同时给则以最后出现的为准（flag 包的默认行为）。
+	fs.StringVar(&opts.ffmpegDir, "ffmpeg", "", "-ffmpeg-dir 的别名（向后兼容）")
+	fs.StringVar(&opts.ffmpegURL, "ffmpeg-url", "",
+		"ffmpeg 下载地址；默认按平台，也认环境变量 PR_FFMPEG_URL")
+	fs.BoolVar(&opts.yes, "yes", false,
+		fmt.Sprintf("跳过自动下载前的 %d 秒倒计时（仍然会下载）", countdownSeconds))
+
+	if err := fs.Parse(flagArgs); err != nil {
+		return nil, err
+	}
+	opts.positional = positional
+	return opts, nil
+}
+
+// splitArgs 把参数拆成"交给 flag 包的标志序列"与"位置参数"。
+//
+// 规则：
+//   - `--` 之后一律是位置参数；
+//   - `-x=v` 是一个完整标志；
+//   - `-x v` 中，x 不是 bool 开关时 v 是它的值（bool 开关不吞下一个词，因为
+//     `-fragment movie.mkv` 里的 movie.mkv 是输入文件，不是 -fragment 的值）；
+//   - 其它以 '-' 开头（且不是单独的 "-"）的都当标志。
+func splitArgs(args []string, boolFlags map[string]bool) (flags []string, positional []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if len(arg) > 1 && arg[0] == '-' {
+			flags = append(flags, arg)
+			name := strings.TrimLeft(arg, "-")
+			if idx := strings.IndexByte(name, '='); idx >= 0 {
+				continue // -x=v：值已经在里面了
+			}
+			if boolFlags[name] {
+				continue // bool 开关不吞下一个词
+			}
+			if i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		positional = append(positional, arg)
+	}
+	return flags, positional
+}
+
+// sayf 打印普通信息。
+func (a *app) sayf(format string, args ...any) {
+	fmt.Fprintf(a.stdout, format+"\n", args...)
+}
+
+// warnf 打印醒目警告：终端上是黄色，重定向到文件/管道时保持纯文本。
+func (a *app) warnf(format string, args ...any) {
+	text := fmt.Sprintf(format, args...)
+	if isTerminal(a.stderr) {
+		fmt.Fprintf(a.stderr, "\x1b[33m%s\x1b[0m\n", text)
+		return
+	}
+	fmt.Fprintf(a.stderr, "%s\n", text)
+}
+
+// isTerminal 判断写出的目标是不是终端（只有 os.File 才可能是）。
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// run 是一次完整的一键流程。
+func (a *app) run(ctx context.Context) error {
+	if a.opts.fragSec <= 0 {
+		return fmt.Errorf("-frag-sec 必须为正（当前 %v）", a.opts.fragSec)
+	}
+	if a.opts.pack < 1 {
+		return fmt.Errorf("-pack 必须 >=1（1 = 不打包），当前 %d", a.opts.pack)
+	}
+	if strings.TrimSpace(a.opts.out) == "" {
+		return errors.New("-out 不能为空")
 	}
 
-	logf := func(format string, args ...any) {
-		fmt.Printf(format+"\n", args...)
-	}
-
-	artifacts, err := segment.Process(context.Background(), in, out, segment.ProcessOptions{
-		Tools:          tools,
-		SegmentSeconds: fragSec,
-		PackSize:       pack,
-		Transcode:      transcode,
-		ForceFragment:  fragment,
-		Logf:           logf,
-	})
+	// ---------- 1. 找输入文件 ----------
+	in, err := a.resolveInput()
 	if err != nil {
 		return err
 	}
+	out := filepath.Clean(a.opts.out)
+	a.sayf("输出: %s", out)
 
-	index := artifacts.Index
-	fmt.Printf("\n输出目录: %s\n", out)
-	fmt.Printf("  编码格式: %s\n", index.MimeType)
-	fmt.Printf("  时长:     %.2f 秒\n", index.TotalDuration)
-	fmt.Printf("  分片:     %d 个（平均 %.2f 秒/片，目标 %.1f 秒）\n", len(index.Segments), index.SegmentSec, fragSec)
-	if index.Packed() {
-		fmt.Printf("  打包:     %d 个 .bin（每包 %d 片，产物共 %d 个文件）\n",
-			len(index.Packs), pack, len(artifacts.Files))
-	} else {
-		fmt.Printf("  打包:     关闭（每片一个 c*.m4s，产物共 %d 个文件）\n", len(artifacts.Files))
-	}
-	fmt.Printf("  码率:     %.2f Mbps\n", float64(index.BitrateBps)/1_000_000)
-	fmt.Printf("  体积:     %.2f MiB\n", float64(index.TotalBytes)/(1024*1024))
-
-	printCapacityHint(index.BitrateBps, uplinkMbps)
-
-	return nil
-}
-
-// printCapacityHint 把"这个码率下主播能带几个人"直接告诉主播（SPEC §6.1、§6.2）。
-func printCapacityHint(streamBps int64, uplinkMbps float64) {
-	uplinkBps := int64(uplinkMbps * 1_000_000)
-	slots := usecase.HostChildSlots(uplinkBps, streamBps)
-
-	fmt.Printf("\n容量提示（按主播上行 %.1f Mbps 估计）:\n", uplinkMbps)
-	switch usecase.SelectMode(slots) {
-	case usecase.ModeChain:
-		if slots == 0 {
-			fmt.Printf("  当前码率下连 1 个观众都带不动。请降低码率，例如：\n")
-			fmt.Printf("    segmenter -in <视频> -out %s -transcode 1200k\n", "./room-media")
-			return
+	// ---------- 2. 找 ffmpeg/ffprobe（没有就自动下载） ----------
+	tools, sources, toolErr := a.resolveTools(ctx)
+	if toolErr != nil {
+		a.warnf("警告: %v", toolErr)
+		a.warnf(manualInstallHint)
+		if !tools.Available() {
+			a.warnf("警告: 没有可用的 ffmpeg/ffprobe，只能直接按 moof 边界切分" +
+				"（仅适用于已经是 fragmented MP4 的输入）。")
 		}
-		fmt.Printf("  K0 = 1 → 单链分发模式：主播只服务 1 个分发节点，由它承担全房间分发。\n")
-		fmt.Printf("  该节点必须真的比主播上行强，否则只是把瓶颈从主播搬到它身上。\n")
-	default:
-		fmt.Printf("  K0 = %d → 扇出模式：主播可直接服务 %d 个一级节点，其余成员挂到它们下面。\n", slots, slots)
+	} else {
+		a.printTools(tools, sources)
 	}
+
+	// ---------- 3. 探测并决定直通还是转码 ----------
+	var (
+		info *segment.MediaInfo
+		dec  decision
+	)
+	if tools.Available() {
+		info, err = segment.Probe(ctx, tools, in)
+		if err != nil {
+			// 显式指定了处理方式时，探测失败不该把人拦住（例如容器很奇怪但 ffmpeg 能读）。
+			if a.opts.transcode != "" || a.opts.fragment {
+				a.warnf("警告: 探测失败（%v），按你显式指定的方式继续。", err)
+			} else {
+				return fmt.Errorf("探测失败: %w\n（可以用 -ffmpeg-dir 指定另一个 ffprobe，"+
+					"或用 -transcode/-fragment 跳过自动判定）", err)
+			}
+		} else {
+			a.printProbe(info)
+		}
+	}
+	dec = decide(info, a.opts.transcode, a.opts.fragment)
+	a.printDecision(dec, info)
+
+	// 需要过一遍 ffmpeg 却没有它：明确报错（并给出人工安装指引），
+	// 而不是让共享流水线抛一句"服务器未安装 ffmpeg"这种对 CLI 用户没意义的话。
+	if dec.mode != modeDirect && tools.FFmpeg == "" {
+		return fmt.Errorf("这一步（%s）需要 ffmpeg，但没有找到可用的 ffmpeg。\n%s",
+			modeName(dec.mode), manualInstallHint)
+	}
+
+	// ---------- 4. 切片 ----------
+	processOpts := segment.ProcessOptions{
+		Tools:          tools,
+		SegmentSeconds: a.opts.fragSec,
+		PackSize:       a.opts.pack,
+		Info:           info,
+		Logf:           a.sayf,
+	}
+	switch dec.mode {
+	case modeRemux:
+		// 直通：只重新封装，不重新编码。
+		processOpts.ForceFragment = true
+	case modeTranscode:
+		if a.opts.transcode != "" {
+			// 用户显式给了码率：与 cmd/segmenter -transcode 的历史行为逐字一致。
+			processOpts.Transcode = a.opts.transcode
+		} else {
+			// 自动转码：走服务端同款"不是 H.264/AAC 就转成 libx264 veryfast crf 23 + aac 128k"。
+			processOpts.Auto = true
+		}
+	}
+
+	a.sayf("切片中（每片约 %.1f 秒）…", a.opts.fragSec)
+	artifacts, err := segment.Process(ctx, in, out, processOpts)
+	if err != nil {
+		return explainProcessError(err, dec, info)
+	}
+
+	// ---------- 5. 摘要 + 容量提示 + 下一步 ----------
+	a.printSummary(out, artifacts)
+	return nil
 }
