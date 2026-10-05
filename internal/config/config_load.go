@@ -13,11 +13,13 @@ const (
 	envAddr             = "PR_ADDR"
 	envMaxMembers       = "PR_MAX_MEMBERS"
 	envDefaultStreamBps = "PR_DEFAULT_STREAM_BPS"
-	envSTUNURLs         = "PR_STUN_URLS"
-	envAllowedOrigins   = "PR_ALLOWED_ORIGINS"
-	envTURNURLs         = "PR_TURN_URLS"
-	envTURNUser         = "PR_TURN_USER"
-	envTURNPass         = "PR_TURN_PASS"
+	// envRoomHostGrace 是主播断线宽限期，接受 45s / 2m 这类 Go 时长字符串。
+	envRoomHostGrace  = "PR_ROOM_HOST_GRACE"
+	envSTUNURLs       = "PR_STUN_URLS"
+	envAllowedOrigins = "PR_ALLOWED_ORIGINS"
+	envTURNURLs       = "PR_TURN_URLS"
+	envTURNUser       = "PR_TURN_USER"
+	envTURNPass       = "PR_TURN_PASS"
 
 	// 服务端切片服务的环境变量（前缀 PR_SEGMENT_，ffmpeg 路径单独用 PR_FFMPEG）。
 	envSegmentConcurrency   = "PR_SEGMENT_CONCURRENCY"
@@ -49,6 +51,19 @@ const (
 // 都引用这个常量，因此默认值只有一处定义。
 const DefaultPackSize = 100
 
+// 主播断线宽限期（PR_ROOM_HOST_GRACE）。
+//
+// DefaultHostGrace 取 60s：客户端 WS 重连计划通常是"指数退避、上限 30s 内"，
+// 60s 足够覆盖一次网络抖动、页面刷新，也覆盖半开连接被 ping/写超时收尸的最坏情况
+// （service 层 20s ping + 10s 写超时 ≈ 最长 30s 才判定断线）。
+//
+// MaxHostGrace 取 10m：宽限期越长，"主播其实已经走了但房间（含房间码）还占着"的窗口越久。
+// 10 分钟是这个取舍的上限，不是推荐值。
+const (
+	DefaultHostGrace = 60 * time.Second
+	MaxHostGrace     = 10 * time.Minute
+)
+
 // Default 返回面向本机开发的默认配置。
 // 注意：服务端不传输任何视频字节，这里的 DefaultStreamBps 只用于容量预判。
 func Default() *Config {
@@ -58,6 +73,7 @@ func Default() *Config {
 			MaxMembers:       16,
 			DefaultStreamBps: 2_000_000,
 			SafetyFactor:     0.8,
+			HostGrace:        DefaultHostGrace,
 		},
 		Signal: SignalConfig{
 			WriteTimeout: 10 * time.Second,
@@ -150,6 +166,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	if err := applyRoomEnv(&cfg.Room); err != nil {
+		return nil, err
+	}
+
 	if err := applyStaticEnv(&cfg.Static); err != nil {
 		return nil, err
 	}
@@ -189,6 +209,23 @@ func applyStaticEnv(sc *StaticConfig) error {
 	}
 	if v := os.Getenv(envStaticDir); v != "" {
 		sc.Dir = v
+	}
+	return nil
+}
+
+// applyRoomEnv 应用房间生命周期的环境变量覆盖（目前只有 PR_ROOM_HOST_GRACE）。
+// 与其它配置一致：非法取值直接报错，不做静默回退 —— 宽限期写错会让"主播掉线"
+// 要么等于立刻销毁房间（0），要么等于房间几乎不回收（>10m），都必须立刻可见。
+func applyRoomEnv(rc *RoomConfig) error {
+	if v := os.Getenv(envRoomHostGrace); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("config: %s 必须是 Go 时长（如 45s、2m）, got %q", envRoomHostGrace, v)
+		}
+		if d <= 0 || d > MaxHostGrace {
+			return fmt.Errorf("config: %s 必须落在 (0, %s] 区间, got %q", envRoomHostGrace, MaxHostGrace, v)
+		}
+		rc.HostGrace = d
 	}
 	return nil
 }

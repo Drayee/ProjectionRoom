@@ -82,7 +82,7 @@ func (m *Member) info() model.MemberInfo {
 }
 
 // Room 的并发保护：members / order / HostID / Seq / lastPlayback / MediaIndex
-// 与实测度量的所有读写都必须持 mu；
+// 与实测度量、主播离线宽限期状态（hostOffline / hostGraceTimer / closed）的所有读写都必须持 mu；
 // 只读字段（ID/CreatedAt/Password）构造后不再变更。
 type Room struct {
 	mu sync.Mutex
@@ -96,6 +96,19 @@ type Room struct {
 	StreamBps int64
 	// MediaIndex 是主播发布的分片索引，一经设定即锁定（SPEC §8.1）。
 	MediaIndex *model.Index
+
+	// hostOffline / hostOfflineSince 描述"主播已断线但房间仍在宽限期内"。
+	//
+	// 主播断线不等于离开：WebSocket 断一次（抖动 / 刷新 / 服务端重启 / 半开连接）
+	// 就要保留房间，等主播凭同一房间码重连回来（PR_ROOM_HOST_GRACE）。
+	// 宽限期内 HostID 为 ""、members/lastPlayback/Seq/MediaIndex 全部原样保留。
+	hostOffline      bool
+	hostOfflineSince time.Time
+	// hostGraceTimer 是宽限期到期定时器；主播重连或房间关闭时取消。
+	hostGraceTimer *time.Timer
+	// closed 表示房间已被 closeRoom 销毁。
+	// Join 在持 mu 后会先检查它：否则"关房瞬间挤进来"的连接会拿到 joined 却立即被断连。
+	closed bool
 
 	Seq          int64
 	lastPlayback model.PlaybackState

@@ -113,6 +113,12 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 	}
 
 	r.mu.Lock()
+	// 房间可能在拿到指针之后、拿到锁之前被 CloseRoomIfEmpty / 宽限期到期销毁：
+	// 没有这道检查，一次加入会"成功"却立即被断连（拿到 joined 也毫无意义）。
+	if r.closed {
+		r.mu.Unlock()
+		return ErrNotFound
+	}
 	if _, exists := r.members[clientID]; exists {
 		r.mu.Unlock()
 		return ErrAlreadyJoined
@@ -122,12 +128,20 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 		return ErrHostTaken
 	}
 	if role == model.RoleViewer {
-		if r.HostID == "" {
+		// 闸门只拦"主播从未进房"的房间 —— 那种房间没有任何可播放内容。
+		//
+		// 主播离线宽限期内 HostID 同样是空的，但房间还在：members / MediaIndex /
+		// lastPlayback 全部保留，新观众据此就能对齐播放。若这里一律返回 ErrNotReady，
+		// 同一次网络抖动里掉线的观众在主播回来之前（最长 60s）就再也回不了房 ——
+		// 那等于把"主播断线"的破坏面从主播一个人扩大到全房间的观众。
+		if r.HostID == "" && !r.hostOffline {
 			r.mu.Unlock()
 			return ErrNotReady
 		}
 		// 容量闸门：拿到实测上行后，超过 1+K0 的人会被直接拒绝，
 		// 而不是全部挂上去一起卡（SPEC §6.2）。
+		// 宽限期内用的是主播断线前的那份实测值（plan 被刻意保留），
+		// 口径与断线前一致，不会凭空放大房间容量。
 		if len(r.members) >= r.joinLimitLocked(m.cfg.Room.MaxMembers) {
 			r.mu.Unlock()
 			return ErrFull
@@ -142,9 +156,24 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 		Role:        role,
 		JoinedAt:    time.Now(),
 	}
+	recovered := false
+	offlineFor := time.Duration(0)
 	if role == model.RoleHost {
 		member.Depth = 0
 		r.HostID = clientID
+		// 主播重连：结束宽限期，但**不重置**任何播放状态 ——
+		// Seq / lastPlayback / MediaIndex / StreamBps 都要原样延续，
+		// 否则观众的 seq 过滤会把恢复后的进度全部当成乱序丢掉（SPEC §7.1、§5.3）。
+		if r.hostOffline {
+			r.hostOffline = false
+			offlineFor = time.Since(r.hostOfflineSince)
+			r.hostOfflineSince = time.Time{}
+			if r.hostGraceTimer != nil {
+				r.hostGraceTimer.Stop()
+				r.hostGraceTimer = nil
+			}
+			recovered = true
+		}
 	} else {
 		member.Depth = 1
 		member.PrimaryID = r.HostID
@@ -183,7 +212,12 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 		Members: infos,
 	}), clientID)
 
-	log.Printf("room %s: %s(%s) 加入，当前 %d 人", roomID, displayName, role, len(infos))
+	if recovered {
+		log.Printf("room %s: %s(%s) 重连成功（离线 %s），宽限期结束，房间恢复（保留 seq=%d、分片索引=%t、房内 %d 人）",
+			roomID, displayName, role, offlineFor.Round(time.Millisecond), playback.Seq, mediaIndex != nil, len(infos))
+	} else {
+		log.Printf("room %s: %s(%s) 加入，当前 %d 人", roomID, displayName, role, len(infos))
+	}
 
 	// 入房快照先发，拓扑分配后发（客户端据此再建 P2P 连接）。
 	m.ReassignTopology(roomID, true)
@@ -192,7 +226,11 @@ func (m *Manager) Join(roomID, clientID, displayName, role, password string) err
 }
 
 // Leave 让连接离开房间。
-// 主播离开会销毁整个房间：主播是唯一时间权威，没有主播就没有可播放的内容（SPEC §7.1）。
+//
+// 主播离开**不再**立刻销毁房间：任何 WS 断开（网络抖动 / 刷新 / 服务端重启 / 半开连接）
+// 都会走到这里，而断线不等于离开。主播离开时房间进入宽限期（PR_ROOM_HOST_GRACE）：
+// 保留 members / MediaIndex / lastPlayback / Seq，只把 hostOffline 置位并起一个到期定时器；
+// 到期仍无主播才 closeRoom。观众离开的语义完全不变。
 func (m *Manager) Leave(roomID, clientID string) {
 	r, ok := m.Get(roomID)
 	if !ok {
@@ -211,9 +249,15 @@ func (m *Manager) Leave(roomID, clientID string) {
 	wasHost := member.Role == model.RoleHost || r.HostID == clientID
 	if wasHost {
 		r.HostID = ""
+		// 宽限期从这里开始：房间仍在，只是"当前没有主播"。
+		r.hostOffline = true
+		r.hostOfflineSince = time.Now()
 	}
 	infos := r.memberInfosLocked()
 	remaining := len(infos)
+	// 主播离线宽限中：房间只剩元数据（几 KB）也**不能**删 ——
+	// 删掉就等于把房间码作废，主播重连只会拿到 ROOM_NOT_FOUND。
+	graceActive := r.hostOffline
 	r.mu.Unlock()
 
 	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{
@@ -226,7 +270,15 @@ func (m *Manager) Leave(roomID, clientID string) {
 	log.Printf("room %s: %s(%s) 离开，剩余 %d 人", roomID, member.DisplayName, member.Role, remaining)
 
 	if wasHost {
-		m.closeRoom(roomID, "主播已离开，房间关闭")
+		// 只广播 member-left（上面那条），不发 room-closed：房间还活着。
+		m.enterHostGrace(roomID, r)
+		return
+	}
+
+	if graceActive {
+		// 没有主播就没有树可算：保留上一次的 plan / lastSent，
+		// 这样主播重连时可以按原来的父子关系平滑恢复（SPEC §6.3 换防不强断连接）。
+		log.Printf("room %s: 主播离线宽限中，暂不重算拓扑（保留原分配）", roomID)
 		return
 	}
 
@@ -234,11 +286,65 @@ func (m *Manager) Leave(roomID, clientID string) {
 	m.ReassignTopology(roomID, true)
 
 	if remaining == 0 {
+		// 摘出 m.rooms 与置 closed 必须成对发生，且都在 m.mu + r.mu 临界区内：
+		// 否则一个已拿到 *Room 指针、还没拿到 r.mu 的并发 Join 会把自己加进
+		// 一个查不到的孤儿房间（后续 Get / 广播全部失效）。
+		// 另外按身份核对一次：别的清理路径可能已经摘掉这个房间，
+		// 而房间码可能已被新房间复用 —— 那时绝不能误删新房间。
 		m.mu.Lock()
-		delete(m.rooms, roomID)
+		removed := false
+		if cur, ok := m.rooms[roomID]; ok && cur == r {
+			delete(m.rooms, roomID)
+			r.closed = true
+			removed = true
+		}
 		m.mu.Unlock()
-		log.Printf("room %s: 已空，房间销毁", roomID)
+		if removed {
+			log.Printf("room %s: 已空，房间销毁", roomID)
+		}
 	}
+}
+
+// enterHostGrace 让房间进入主播离线宽限期；grace 被配置为 <=0 时退回"立即销毁"的旧语义。
+func (m *Manager) enterHostGrace(roomID string, r *Room) {
+	grace := m.cfg.Room.HostGrace
+	if grace <= 0 {
+		m.closeRoom(roomID, "主播已离开，房间关闭")
+		return
+	}
+
+	r.mu.Lock()
+	if r.hostGraceTimer != nil {
+		r.hostGraceTimer.Stop()
+	}
+	// 到期时再确认一次"仍然没有主播"：这 60 秒内主播很可能已经回来了。
+	r.hostGraceTimer = time.AfterFunc(grace, func() { m.expireHostGrace(roomID) })
+	remaining := len(r.members)
+	r.mu.Unlock()
+
+	log.Printf("room %s: 主播离线，进入 %s 宽限期（房间保留，房内仍有 %d 人；到期仍无主播才关闭）",
+		roomID, grace, remaining)
+}
+
+// expireHostGrace 是宽限期到期的处理：仍然没有主播才销毁房间。
+//
+// 判定与销毁在 m.mu + r.mu 下原子完成（见 closeRoomIf），因此"到期"与"主播恰好重连"
+// 不会互相覆盖：重连成功会清掉 hostOffline，这里就不再关房。
+func (m *Manager) expireHostGrace(roomID string) {
+	m.closeRoomIf(roomID, func(r *Room) bool { return r.hostOffline }, func(r *Room) string {
+		return "主播离线超过 " + describeDuration(m.cfg.Room.HostGrace) + "，房间已关闭"
+	})
+}
+
+// describeDuration 把宽限期写成人能读懂的时长（60s → "60 秒"，2m → "2 分钟"）。
+func describeDuration(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return strconv.Itoa(int(d/time.Minute)) + " 分钟"
+	}
+	if d >= time.Second && d%time.Second == 0 {
+		return strconv.Itoa(int(d/time.Second)) + " 秒"
+	}
+	return d.String()
 }
 
 // HandleChat 校验成员身份与长度后广播聊天。
@@ -382,6 +488,13 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 	}
 
 	r.mu.Lock()
+	// 主播离线宽限期内不重算拓扑：没有根节点，Assign 只会给出一个空的 pending 计划，
+	// 反而会把刻意保留的分配与容量口径抹掉 —— 而主播重连后正是靠它平滑恢复。
+	// 主播重连时会先把 hostOffline 清掉再调用这里，所以恢复那一次不会被拦住。
+	if r.hostOffline {
+		r.mu.Unlock()
+		return
+	}
 	if !force && time.Since(r.lastAssignAt) < reassignMinInterval {
 		r.mu.Unlock()
 		return
@@ -610,21 +723,31 @@ func (m *Manager) HandleControl(roomID, clientID string, in model.Envelope) erro
 }
 
 // CloseRoomIfEmpty 用于连接断开后的兜底清理（正常情况下 Leave 已处理）。
+//
+// 主播离线宽限期内**不清理**：那时房间可能真的一个人都没有（全在重连），
+// 但那几 KB 元数据正是"房间码还能用"的全部依据，清了就等于把房间作废。
 func (m *Manager) CloseRoomIfEmpty(roomID string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	r, ok := m.rooms[roomID]
-	m.mu.Unlock()
 	if !ok {
 		return
 	}
 
 	r.mu.Lock()
-	empty := len(r.members) == 0
-	r.mu.Unlock()
+	empty := len(r.members) == 0 && !r.hostOffline
 	if empty {
-		m.mu.Lock()
+		// 与 Leave 的同一条不变式：摘出 m.rooms 与置 closed 在同一个临界区里成对发生，
+		// 这样并发 Join 要么在摘除前完整完成（房间里有成员，本函数就不会再删），
+		// 要么在摘除后被 r.closed 挡住（ErrNotFound）。
 		delete(m.rooms, roomID)
-		m.mu.Unlock()
+		r.closed = true
+	}
+	r.mu.Unlock()
+
+	if empty {
+		log.Printf("room %s: 已空，房间销毁", roomID)
 	}
 }
 
@@ -638,12 +761,39 @@ func (m *Manager) broadcastCapacity(roomID string, capacity model.Capacity) {
 
 // closeRoom 销毁房间：先广播原因，再关闭连接（关闭留出投递时间，见 service.closeGrace）。
 func (m *Manager) closeRoom(roomID, reason string) {
+	m.closeRoomIf(roomID, nil, func(*Room) string { return reason })
+}
+
+// closeRoomIf 只在 cond 成立时销毁房间，理由由 reasonOf 依据当时状态生成。
+//
+// cond 必须在 m.mu 与 r.mu 双锁下求值：宽限期到期（定时器协程）与主播重连（handler 协程）
+// 是两条并发路径，只有把"判定 + 摘除房间 + 置 closed"放进同一个临界区，才不会出现
+// "主播刚恢复又被到期定时器关掉"或"房间已关还被 Join 加入"这两种撕裂状态。
+// 锁序固定为 m.mu → r.mu：仓库里没有任何一处持 r.mu 后再去拿 m.mu，因此不会死锁。
+func (m *Manager) closeRoomIf(roomID string, cond func(*Room) bool, reasonOf func(*Room) string) {
 	m.mu.Lock()
-	if _, ok := m.rooms[roomID]; !ok {
+	r, ok := m.rooms[roomID]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+
+	r.mu.Lock()
+	if cond != nil && !cond(r) {
+		r.mu.Unlock()
 		m.mu.Unlock()
 		return
 	}
 	delete(m.rooms, roomID)
+	// 关房即终止宽限期：否则定时器会在房间已被销毁后再触发一次无意义的关房。
+	r.closed = true
+	r.hostOffline = false
+	if r.hostGraceTimer != nil {
+		r.hostGraceTimer.Stop()
+		r.hostGraceTimer = nil
+	}
+	reason := reasonOf(r)
+	r.mu.Unlock()
 	m.mu.Unlock()
 
 	m.bus.BroadcastToRoom(roomID, model.MustEnvelope(model.Envelope{

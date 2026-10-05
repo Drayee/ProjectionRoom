@@ -339,15 +339,20 @@ func TestLeaveLifecycle(t *testing.T) {
 		t.Fatal("还有主播在房时，房间不应被销毁")
 	}
 
+	// 主播断线：进入宽限期。房间、成员、播放状态全部保留，只广播 member-left，
+	// 不发 room-closed、不断开任何连接（详细断言见 host_grace_test.go）。
 	m.Leave(r.ID, "host")
-	if closed := bus.lastBroadcastOfType(t, r.ID, model.TypeRoomClosed); closed.Type != model.TypeRoomClosed {
-		t.Fatalf("主播离开应广播 room-closed: %+v", closed)
+	if _, ok := m.Get(r.ID); !ok {
+		t.Fatal("主播断线后房间应进入宽限期而不是立刻销毁")
 	}
-	if len(bus.closed) != 1 || bus.closed[0] != r.ID {
-		t.Fatalf("主播离开应关闭房间连接: %#v", bus.closed)
+	if got := bus.broadcastCount(r.ID, model.TypeRoomClosed); got != 0 {
+		t.Fatalf("宽限期内不得广播 room-closed，实际 %d 条", got)
 	}
-	if _, ok := m.Get(r.ID); ok {
-		t.Fatal("主播离开后房间必须销毁：没有主播就没有可播放的内容")
+	if len(bus.closed) != 0 {
+		t.Fatalf("宽限期内不得关闭房间连接: %#v", bus.closed)
+	}
+	if hostID, _, _, _, _ := r.Snapshot(8); hostID != "" {
+		t.Fatalf("主播离线期间 hostId 必须为空（HTTP 侧据此判定「当前无主播」），实际 %q", hostID)
 	}
 }
 

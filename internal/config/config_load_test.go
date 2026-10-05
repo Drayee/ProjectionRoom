@@ -167,6 +167,79 @@ func TestSegmentEnvRejectsInvalid(t *testing.T) {
 	}
 }
 
+// TestHostGraceDefaults 锁定主播断线宽限期的默认值：60s。
+// 它必须覆盖"半开连接被 ping/写超时收尸"的最坏情况（20s ping + 10s 写超时 ≈ 30s），
+// 否则主播重连时会撞上"房间已销毁"。
+func TestHostGraceDefaults(t *testing.T) {
+	if DefaultHostGrace != 60*time.Second {
+		t.Fatalf("默认宽限期应为 60s，实际 %v", DefaultHostGrace)
+	}
+	if MaxHostGrace != 10*time.Minute {
+		t.Fatalf("宽限期上限应为 10m，实际 %v", MaxHostGrace)
+	}
+	if cfg := Default(); cfg.Room.HostGrace != DefaultHostGrace {
+		t.Fatalf("Default() 的宽限期应为 %v，实际 %v", DefaultHostGrace, cfg.Room.HostGrace)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 不应失败: %v", err)
+	}
+	if cfg.Room.HostGrace != 60*time.Second {
+		t.Fatalf("未配置时宽限期应为 60s，实际 %v", cfg.Room.HostGrace)
+	}
+}
+
+// TestHostGraceEnvOverride 锁定 PR_ROOM_HOST_GRACE 接受 Go 时长字符串（45s / 2m）。
+func TestHostGraceEnvOverride(t *testing.T) {
+	cases := []struct {
+		value string
+		want  time.Duration
+	}{
+		{"45s", 45 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"600s", 10 * time.Minute},
+		{"500ms", 500 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv(envRoomHostGrace, tc.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("PR_ROOM_HOST_GRACE=%q 不应报错: %v", tc.value, err)
+			}
+			if cfg.Room.HostGrace != tc.want {
+				t.Fatalf("PR_ROOM_HOST_GRACE=%q 应解析为 %v，实际 %v", tc.value, tc.want, cfg.Room.HostGrace)
+			}
+		})
+	}
+}
+
+// TestHostGraceEnvRejectsInvalid 锁定非法宽限期必须明确报错，而不是静默回退：
+// 静默回退会让"配错了"和"配对了"在运行期完全无法区分。
+func TestHostGraceEnvRejectsInvalid(t *testing.T) {
+	for _, v := range []string{
+		"0",       // 0 会让宽限期失效（等于立刻销毁房间）
+		"0s",      // 同上，显式写法也不能接受
+		"-1m",     // 负数
+		"30",      // 缺少单位
+		"nope",    // 无法解析
+		"601s",    // 超过 10 分钟上限
+		"11m",     // 同上
+		"1h",      // 同上
+		"60 秒",    // 中文单位不是 Go 时长
+		"60s 30s", // 拼接
+	} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv(envRoomHostGrace, v)
+			if _, err := Load(); err == nil {
+				t.Fatalf("PR_ROOM_HOST_GRACE=%q 应当报错", v)
+			}
+		})
+	}
+}
+
 // TestStaticDefaults 锁定单端口部署的默认形态：托管 client/dist，且默认开启。
 func TestStaticDefaults(t *testing.T) {
 	cfg := Default()

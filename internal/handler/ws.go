@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
@@ -13,6 +15,13 @@ import (
 	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/usecase"
 )
+
+// preAuthWriteTimeout 是"连接尚未注册进 Hub"时写单条帧的超时上限。
+//
+// 为什么单独设上限而不是直接用 cfg.Signal.WriteTimeout（默认 10s）：
+// 此时还没有写协程/发送队列，写操作就压在这次握手请求上；
+// 客户端若已跑掉，10s 会拖住这个请求协程。2s 足够覆盖一次本地/局域网投递。
+const preAuthWriteTimeout = 2 * time.Second
 
 // wsHandler 是唯一的 WebSocket 入口：/ws?roomId=..&clientId=..
 //
@@ -43,6 +52,13 @@ func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager) gin
 
 		client, err := hub.Register(clientID, roomID, conn)
 		if err != nil {
+			// 在拒绝之前先把原因告诉客户端：否则它只会看到一次策略违规关闭，
+			// 除了拿着同一个 clientId 空转重试别无选择（旧连接可能是半开连接，
+			// 最多约 30s 才被 ping/写超时收尸）。客户端收到 CLIENT_ID_TAKEN 后应换一个 clientId 重连。
+			// 注意：此刻连接还没注册进 Hub，也就不是 *service.Client，只能自己写这一帧。
+			writePreAuthError(cfg, conn, model.ErrorEnvelope(model.CodeClientIDTaken, "该 clientId 已有活跃连接，请换一个 clientId 重试"))
+			log.Printf("ws: %s 被拒绝（room=%s）: %v，已下发 %s 并关闭连接",
+				clientID, roomID, err, model.CodeClientIDTaken)
 			_ = conn.Close(websocket.StatusPolicyViolation, "clientId 已存在活跃连接")
 			return
 		}
@@ -59,6 +75,10 @@ func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager) gin
 		for {
 			typ, data, err := conn.Read(ctx)
 			if err != nil {
+				// 断线原因必须记下来，否则无法分辨"隧道掐连接 / 浏览器关连接 /
+				// 服务端重启 / 半开连接被超时收尸"——而这决定了要不要保留宽限期。
+				log.Printf("ws: %s 读循环结束（room=%s）: %v（关闭码=%v）",
+					clientID, roomID, err, websocket.CloseStatus(err))
 				return
 			}
 			if typ != websocket.MessageBinary {
@@ -75,6 +95,24 @@ func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager) gin
 			handleMessage(hub, rooms, client, roomID, clientID, *env)
 		}
 	}
+}
+
+// writePreAuthError 在连接尚未注册进 Hub 时写一条错误信封。
+//
+// 这条路径上没有 *service.Client（没有发送队列与写协程），所以直接写裸连接：
+// 超时取 min(cfg.Signal.WriteTimeout, preAuthWriteTimeout)；写失败不 panic、也不重试 ——
+// 客户端可能早已离开，为一条"解释"阻塞或崩溃都不值得。
+func writePreAuthError(cfg *config.Config, conn *websocket.Conn, msg []byte) {
+	timeout := preAuthWriteTimeout
+	if cfg != nil && cfg.Signal.WriteTimeout > 0 && cfg.Signal.WriteTimeout < timeout {
+		timeout = cfg.Signal.WriteTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// 信令是 protobuf：与正常链路一致走二进制帧。
+	_ = conn.Write(ctx, websocket.MessageBinary, msg)
 }
 
 func handleMessage(hub *service.Hub, rooms *usecase.Manager, client *service.Client, roomID, clientID string, env model.Envelope) {

@@ -60,6 +60,12 @@ const (
 	CodeBadMediaIndex = "BAD_MEDIA_INDEX"
 	CodeMediaLocked   = "MEDIA_LOCKED"
 	CodeInternalError = "INTERNAL"
+	// CodeClientIDTaken 表示该 clientId 已有活跃连接（连接尚未注册进 Hub 就被拒）。
+	//
+	// 为什么需要它：旧连接可能是半开连接（最多约 30s 才被 ping/写超时收尸），
+	// 客户端拿着同一个 clientId 重连时只会看到一次"策略违规关闭"，
+	// 既不知道原因也无从自救，只能空转重试。带上这个错误码后客户端可以换一个 clientId 重试。
+	CodeClientIDTaken = "CLIENT_ID_TAKEN"
 )
 
 // 角色。

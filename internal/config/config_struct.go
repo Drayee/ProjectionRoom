@@ -52,6 +52,13 @@ type RoomConfig struct {
 	DefaultStreamBps int64
 	// SafetyFactor 是容量计算时的上行安全系数（SPEC §6.1）。
 	SafetyFactor float64
+	// HostGrace 是主播断线后房间的宽限期（PR_ROOM_HOST_GRACE，默认 60s）。
+	//
+	// 为什么需要它：WebSocket 断一次（网络抖动 / 刷新 / 服务端重启 / 半开连接）
+	// 不代表主播离开。旧行为是"任何 WS 结束 → 立刻销毁房间"，于是主播自动重连
+	// 只会拿到 ROOM_NOT_FOUND，房间码彻底作废、观众全掉。
+	// 宽限期内房间只保留元数据（几 KB），主播凭同一房间码 + 密码重连即可恢复。
+	HostGrace time.Duration
 }
 
 // SignalConfig 控制 WebSocket 信令层的超时与限额。
