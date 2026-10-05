@@ -8,6 +8,81 @@ export interface LoadedMedia {
   segments: Map<number, File>
 }
 
+/** 取出编码串的"编码族"：av01.0.12M.10 → av01，avc1.64001f → avc1，opus → opus。 */
+function codecFamily(codec: string): string {
+  const dot = codec.indexOf('.')
+  return (dot > 0 ? codec.slice(0, dot) : codec).trim()
+}
+
+/** 拆出 `type/subtype; codecs="a,b"` 的承载类型与编码串；拆不开返回 null。 */
+function splitMimeType(mimeType: string): { base: string; codecs: string[]; quoted: boolean } | null {
+  const match = /^\s*([^;]+?)\s*;\s*codecs\s*=\s*(?:"([^"]*)"|([^";]+))\s*$/i.exec(mimeType)
+  if (!match) return null
+
+  const raw = match[2] ?? match[3] ?? ''
+  const codecs = raw
+    .split(',')
+    .map((codec) => codec.trim())
+    .filter((codec) => codec !== '')
+  if (codecs.length === 0) return null
+
+  return { base: match[1].trim(), codecs, quoted: match[2] !== undefined }
+}
+
+function renderMimeType(base: string, codecs: string[], quoted: boolean): string {
+  const list = codecs.join(',')
+  return `${base}; codecs=${quoted ? `"${list}"` : list}`
+}
+
+/**
+ * 按"从精确到宽松"的顺序给出候选 mimeType，第一个能被浏览器接受的才是真正要用的。
+ *
+ * 为什么需要：index.json 里的编码串是按**真实码流**算出来的（例如 av01.0.12M.10），
+ * 而 `isTypeSupported` 在不同浏览器/版本上接受的粒度不一样：
+ *   - 有的只认编码族（av01 / vp09 / avc1），带上 profile/level/位深就一律返回 false；
+ *   - 有的要求必须带参数，只给编码族反而不认。
+ * 只试精确串的话，第二种情况会直接黑屏；这里两种都试，全失败才报错。
+ */
+export function mimeTypeCandidates(mimeType: string): string[] {
+  const parsed = splitMimeType(mimeType)
+  if (!parsed) return [mimeType]
+
+  const candidates: string[] = [mimeType]
+  const push = (codecs: string[]) => {
+    const rendered = renderMimeType(parsed.base, codecs, parsed.quoted)
+    if (!candidates.includes(rendered)) {
+      candidates.push(rendered)
+    }
+  }
+
+  // 1) 全部降级成编码族：av01.0.12M.10,opus → av01,opus
+  push(parsed.codecs.map(codecFamily))
+
+  // 2) 只降级其中一条：音频串写错时不该把视频串一起丢掉（反之亦然）
+  for (let i = 0; i < parsed.codecs.length; i += 1) {
+    const codecs = parsed.codecs.slice()
+    codecs[i] = codecFamily(codecs[i])
+    push(codecs)
+  }
+
+  return candidates
+}
+
+/** 返回第一个浏览器能接受的候选串；全部失败返回 null。 */
+function pickSupportedMimeType(mimeType: string): string | null {
+  for (const candidate of mimeTypeCandidates(mimeType)) {
+    if (MediaSource.isTypeSupported(candidate)) {
+      return candidate
+    }
+  }
+  return null
+}
+
+/** 只用于错误文案：把 mimeType 里的编码串列出来。 */
+function describeCodecs(mimeType: string): string {
+  return splitMimeType(mimeType)?.codecs.join(',') ?? mimeType
+}
+
 /**
  * 主播端的媒体准备：选择一个由 cmd/segmenter 产出的分片目录。
  *
@@ -15,7 +90,8 @@ export interface LoadedMedia {
  *   1. 目录里没有 index.json（没经过 segmenter 预处理）；
  *   2. 索引不自洽（序号断档、缺文件）；
  *   3. 浏览器不支持该编码 —— 必须在开播前用 isTypeSupported 判定，
- *      否则会在运行期变成一块黑屏。
+ *      否则会在运行期变成一块黑屏。判定时先试索引里的精确串，再降级成编码族
+ *      （av01.0.12M.10 → av01），两者都试过才敢说"不支持"。
  *
  * 目录有两种合法形态，都必须读得进来：
  *   - 逐片一个文件（`-pack 1`）：c00001.m4s…，segments[i].file 就是分片文件；
@@ -62,8 +138,20 @@ export function useMediaIndex() {
       if (typeof MediaSource === 'undefined') {
         throw new Error('当前浏览器不支持 MediaSource，无法播放分片流')
       }
-      if (!MediaSource.isTypeSupported(parsed.mimeType)) {
-        throw new Error(`浏览器不支持该编码：${parsed.mimeType}。可用 segmenter -transcode 转成 H.264/AAC`)
+
+      // 精确串 → 编码族串逐级降级，第一个能过的就是真正要 append 的 mimeType。
+      const supportedMime = pickSupportedMimeType(parsed.mimeType)
+      if (!supportedMime) {
+        throw new Error(
+          `这段视频是 ${describeCodecs(parsed.mimeType)} 编码，你的浏览器不支持；` +
+            `可让主播用 -Transcode（或 segmenter -transcode）转成 H.264/AAC 后重开。`,
+        )
+      }
+      if (supportedMime !== parsed.mimeType) {
+        // 降级串才是浏览器认的。这里改写的是**内存里的索引**（JSON 文件不动），
+        // 它会随 MediaIndex 一起广播给观众 —— 主播与观众必须用同一个串，
+        // 否则观众端 addSourceBuffer 会用一个自己没验证过的串。
+        parsed = { ...parsed, mimeType: supportedMime }
       }
 
       const byName = new Map(list.map((file) => [file.name, file]))

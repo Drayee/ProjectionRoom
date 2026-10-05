@@ -205,7 +205,7 @@ func parseMdhdTimescale(data []byte) (uint32, error) {
 	}
 }
 
-// parseStsd 解析 sample description，返回 RFC 6381 形式的编码串（如 avc1.64001f）。
+// parseStsd 解析 sample description，返回 RFC 6381 形式的编码串（如 avc1.64001f、av01.0.12M.10、opus）。
 func parseStsd(data []byte) ([]string, error) {
 	if len(data) < 8 {
 		return nil, errTruncated
@@ -235,8 +235,13 @@ func parseStsd(data []byte) ([]string, error) {
 	return codecs, nil
 }
 
-// codecFromSampleEntry 处理 M2 支持的采样格式：H.264 与 AAC。
-// 其它格式（hvc1/hev1/vp09/av01/opus）明确报错而不是给出一个 play 不起来的 mimeType。
+// supportedCodecsHint 是错误信息里列出的"当前支持的编码"。
+// 集中一处，避免文案在多个分支里各写一份、改一处漏一处。
+const supportedCodecsHint = "当前支持 avc1/avc3(H.264)、av01(AV1)、mp4a(AAC)、Opus"
+
+// codecFromSampleEntry 把采样条目换算成 RFC 6381 编码串。
+// 支持的格式：H.264(avc1/avc3)、AV1(av01)、AAC(mp4a) 与 Opus(Opus)。
+// 其它格式（hvc1/hev1/vp09/…）明确报错，而不是给出一个 play 不起来的 mimeType。
 func codecFromSampleEntry(typ string, entry []byte) (string, error) {
 	switch typ {
 	case "avc1", "avc3":
@@ -258,6 +263,21 @@ func codecFromSampleEntry(typ string, entry []byte) (string, error) {
 		// AVCDecoderConfigurationRecord: version, profile, compatibility, level
 		return fmt.Sprintf("%s.%02x%02x%02x", typ, avcC.Data[1], avcC.Data[2], avcC.Data[3]), nil
 
+	case "av01":
+		// VisualSampleEntry 的固定字段共 78 字节，加 8 字节 box 头 = 86。
+		if len(entry) < 86 {
+			return "", errTruncated
+		}
+		children, err := parseChildren(entry[86:])
+		if err != nil {
+			return "", err
+		}
+		av1C := findBox(children, "av1C")
+		if av1C == nil {
+			return "", fmt.Errorf("mp4: av01 缺少 av1C 配置")
+		}
+		return av1CodecString(av1C.Data)
+
 	case "mp4a":
 		// AudioSampleEntry 的固定字段共 28 字节，加 8 字节 box 头 = 36。
 		if len(entry) < 36 {
@@ -277,12 +297,60 @@ func codecFromSampleEntry(typ string, entry []byte) (string, error) {
 		}
 		return fmt.Sprintf("mp4a.40.%d", audioObjectType), nil
 
-	case "hvc1", "hev1", "vp09", "av01", "opus", "Opus":
-		return "", fmt.Errorf("mp4: 暂不支持 %s（M2 只处理 H.264/AAC；可用 ffmpeg -c:v libx264 -c:a aac 转码）", typ)
+	case "Opus", "opus":
+		// AudioSampleEntry 的固定字段共 28 字节，加 8 字节 box 头 = 36。
+		// RFC 6381 里 Opus 的编码串就是 "opus"（全小写）；
+		// dOps（OpusSpecificBox）只是解码器初始化数据，不参与编码串拼接。
+		if len(entry) < 36 {
+			return "", errTruncated
+		}
+		return "opus", nil
+
+	case "hvc1", "hev1", "vp09", "vp08", "avc2":
+		return "", fmt.Errorf("mp4: 暂不支持 %s（%s；其它编码可用 ffmpeg -c:v libx264 -c:a aac 转码）",
+			typ, supportedCodecsHint)
 
 	default:
-		return "", fmt.Errorf("mp4: 未知采样格式 %q", typ)
+		return "", fmt.Errorf("mp4: 未知采样格式 %q（%s）", typ, supportedCodecsHint)
 	}
+}
+
+// av1CodecString 按 AV1-ISOBMFF 的 av1C（AV1CodecConfigurationRecord）生成 RFC 6381 编码串：
+//
+//	av01.<seq_profile>.<seq_level_idx><seq_tier>.<bitDepth>   例如 av01.0.12M.10
+//
+// av1C 负载的位布局：
+//
+//	第 0 字节 = marker(1) + version(7)
+//	第 1 字节 = seq_profile(高 3 位) | seq_level_idx_0(低 5 位)
+//	第 2 字节 = seq_tier_0(bit7) | high_bitdepth(bit6) | twelve_bit(bit5) |
+//	           monochrome(bit4) | chroma_subsampling_x(bit3) |
+//	           chroma_subsampling_y(bit2) | chroma_sample_position(bit1-0)
+//
+// level 写两位十进制（5 → "05"，12 → "12"），bitDepth 写两位（8 → "08"，10 → "10"）。
+func av1CodecString(av1c []byte) (string, error) {
+	if len(av1c) < 3 {
+		return "", errTruncated
+	}
+	profile := (av1c[1] >> 5) & 0x07
+	levelIdx := av1c[1] & 0x1f
+
+	tier := "M"
+	if av1c[2]&0x80 != 0 {
+		tier = "H"
+	}
+
+	// high_bitdepth=0 → 8bit；=1 时由 twelve_bit 决定 10 还是 12 bit。
+	bitDepth := 8
+	if av1c[2]&0x40 != 0 {
+		if av1c[2]&0x20 != 0 {
+			bitDepth = 12
+		} else {
+			bitDepth = 10
+		}
+	}
+
+	return fmt.Sprintf("av01.%d.%02d%s.%02d", profile, levelIdx, tier, bitDepth), nil
 }
 
 // parseESDS 从 esds 中取出 AAC 的 audioObjectType（AAC-LC = 2）。

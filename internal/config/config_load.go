@@ -58,7 +58,13 @@ func Default() *Config {
 		Signal: SignalConfig{
 			WriteTimeout:    10 * time.Second,
 			PingInterval:    20 * time.Second,
-			MaxMessageBytes: 256 * 1024,
+			// 单条信令上限：索引是**一条**消息，大小随分片数线性增长。
+			// 实测：142 分钟视频按 2s 切片 = 5087 片 → index.json 1.39MB；
+			// 原来的 256KiB 会让主播一发布索引就被 1009 掐断 → Leave → 房间销毁 →
+			// 后来的人看到"房间不存在"（既不是房间满，也不是编码问题）。
+			// 4MiB 覆盖约 14000 片（2s/片 ≈ 7.8 小时）；再长的片子应改成紧凑索引/分批下发，
+			// 而不是继续抬高这个值（抬高等于放宽 DoS 面）。
+			MaxMessageBytes: 4 * 1024 * 1024,
 			MaxChatLen:      500,
 			SendQueueSize:   32,
 			// 本机开发时页面在 Vite 5173、/ws 在 Go 8080（跨源）；

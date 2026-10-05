@@ -91,7 +91,8 @@ export function buildPowerShellScript(p: ScriptParams): string {
   const ffmpegUrl = p.ffmpegUrl.trim() || DEFAULT_FFMPEG_URLS.windows
   const forced = p.transcodeBitrate.trim()
 
-  return `# ============================================================================
+  return `
+# ============================================================================
 #  ProjectionRoom 一键切片脚本（由浏览器生成）
 #  把视频切成放映室可用的分片目录：init.mp4 + pack-*.bin + index.json
 #
@@ -113,6 +114,8 @@ param(
   [int]$SegmentSeconds = ${p.segmentSeconds},
   [int]$PackSize = ${p.packSize},
   [string]$TranscodeBitrate = "${forced}",
+  # 显式要求转码（默认：浏览器能解的编码族直接 remux，省掉整片转码）
+  [switch]$Transcode,
   [string]$FfmpegDir = "",
   [string]$FfmpegUrl = "${ffmpegUrl}",
   [switch]$KeepFragments
@@ -201,10 +204,13 @@ if (-not $ffmpeg -or -not $ffprobe) {
 Say "ffmpeg: $ffmpeg"
 
 # ---------- 3. 探测源文件 ----------
-$probe = & $ffprobe -v error -show_entries format=duration,bit_rate -show_entries stream=codec_name,codec_type -of json -- "$Source" | ConvertFrom-Json
+$probe = & $ffprobe -v error -show_entries format=duration,bit_rate -show_entries stream=codec_name,codec_type,pix_fmt,profile,level -of json -- "$Source" | ConvertFrom-Json
 $duration = [double]$probe.format.duration
-$vCodec = ($probe.streams | Where-Object { $_.codec_type -eq 'video' } | Select-Object -First 1).codec_name
-$aCodec = ($probe.streams | Where-Object { $_.codec_type -eq 'audio' } | Select-Object -First 1).codec_name
+$vStream = $probe.streams | Where-Object { $_.codec_type -eq 'video' } | Select-Object -First 1
+$aStream = $probe.streams | Where-Object { $_.codec_type -eq 'audio' } | Select-Object -First 1
+$vCodec = $vStream.codec_name
+$aCodec = $aStream.codec_name
+$vPixFmt = $vStream.pix_fmt
 $audio = if ([string]::IsNullOrEmpty($aCodec)) { '无' } else { $aCodec }
 Say ("源: {0:N1}s ({1:N1} 分钟)  视频={2} 音频={3}" -f $duration, ($duration / 60), $vCodec, $audio)
 if ($duration -gt 3600) { Warn "超过 60 分钟：本地切片没问题，但服务端切片会拒绝这么长的视频。" }
@@ -215,23 +221,59 @@ $work = Join-Path $env:TEMP ("pr-slice-" + [guid]::NewGuid().ToString('N').Subst
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $mpd = Join-Path $work 'index.mpd'
 
-# 播放器要的是浏览器能解的编码：H.264/AAC 直接 copy，其它一律转码。
-$playable = ($vCodec -eq 'h264') -and ([string]::IsNullOrEmpty($aCodec) -or $aCodec -eq 'aac')
+# 播放器要的是浏览器能解的**编码族**：能解就只 remux（-c copy），不要整片转码。
+# 142 分钟的 AV1 转码要数小时；直通只受磁盘带宽限制，通常几分钟。
+$vFamily = switch ($vCodec) { 'h264' { 'avc1' } 'av1' { 'av01' } 'vp9' { 'vp09' } default { '' } }
+$aFamily = switch ($aCodec) { 'aac' { 'mp4a.40.2' } 'opus' { 'opus' } '' { '' } default { '' } }
+$audioOk = [string]::IsNullOrEmpty($aCodec) -or ($aFamily -ne '')
+$passthrough = ($vFamily -ne '') -and $audioOk -and (-not $Transcode)
 $force = -not [string]::IsNullOrWhiteSpace($TranscodeBitrate)
-if (-not $playable -or $force) {
-  Say "转码为 H.264/AAC（源编码浏览器可能不支持）..."
+$is10bit = ($vPixFmt -like '*10*')
+# AV1 的编码串按 ffprobe 报出的真实 profile/level 拼（level 就是 av1C 里的 seq_level_idx_0），
+# 不要写死：写死一个对不上的 level，严格校验的浏览器会直接判 isTypeSupported 为假 → 黑屏。
+# profile: Main=0 / High=1 / Professional=2；tier 只有 High 才写 H，ffprobe 不报 tier 时按 Main 处理。
+$av1Profile = switch ([string]$vStream.profile) { 'High' { 1 } 'Professional' { 2 } default { 0 } }
+$av1Level = '05'
+if ("$($vStream.level)" -match '^\\d+$') { $av1Level = '{0:d2}' -f [int]$vStream.level }
+$av1Depth = if ($is10bit) { '10' } else { '08' }
+$vCodecString = switch ($vFamily) {
+  'avc1' { 'avc1.64001f' }
+  'av01' { 'av01.' + $av1Profile + '.' + $av1Level + 'M.' + $av1Depth }
+  'vp09' { 'vp09.00.10.08' }
+  default { '' }
+}
+# mimeType 必须按**真实编码**写：写错了 isTypeSupported 照样通过，但 append 的是别的编码 → 黑屏。
+$q = [char]34
+$mime = if ([string]::IsNullOrEmpty($aCodec)) {
+  'video/mp4; codecs=' + $q + $vCodecString + $q
+} else {
+  'video/mp4; codecs=' + $q + $vCodecString + ',' + $aFamily + $q
+}
+
+if (-not $passthrough) {
+  if ($Transcode) { Say '按 -Transcode 显式要求转码为 H.264/AAC…' }
+  else { Say "源编码（$vCodec/$aCodec）浏览器可能解不了，转码为 H.264/AAC…" }
   $rate = if ($force) { $TranscodeBitrate } else { '1800k' }
-  & $ffmpeg -y -v warning -i "$Source" -c:v libx264 -preset veryfast -crf 23 -maxrate $rate -bufsize ($rate -replace 'k$','k') -c:a aac -b:a 128k -movflags +faststart $work/source.mp4
+  & $ffmpeg -y -v warning -i "$Source" -c:v libx264 -preset veryfast -crf 23 -maxrate $rate -bufsize $rate -c:a aac -b:a 128k -movflags +faststart $work/source.mp4
   if ($LASTEXITCODE -ne 0) { Die '转码失败' }
   $Source = Join-Path $work 'source.mp4'
+  $mime = 'video/mp4; codecs=' + $q + 'avc1.64001f,mp4a.40.2' + $q
+} else {
+  $aLabel = if ([string]::IsNullOrEmpty($aCodec)) { '无音轨' } else { $aCodec }
+  Say "直通（不转码）：$vCodec / $aLabel"
+  if ($vFamily -eq 'av01' -or $vFamily -eq 'vp09') {
+    Warn '注意：AV1/VP9 只在支持它的浏览器能播（Chrome 基本都行；Safari 与部分 Firefox 不行）。'
+    Warn '      要最大兼容性就加 -Transcode（代价是整片转码，142 分钟要数小时）。'
+  }
 }
+Say "mimeType: $mime"
 
 Say "切片中（每片约 ${p.segmentSeconds}s）..."
 # 分片名必须是**绝对路径**：DASH 复用器把相对路径解析到"当前目录"而不是 mpd 目录
 #（踩过：分片全掉进仓库根目录，脚本在 work 目录里一个都找不到）。
 # 单引号拼接是为了不让 PowerShell 把 $Number / $ 当变量插值。
 & $ffmpeg -y -v warning -i "$Source" -map 0:v -map 0:a? -c copy \`
-  -f dash -seg_duration ${p.segmentSeconds} -use_timeline 1 -use_template 1 \`
+  -f dash -format_options webm=0 -seg_duration ${p.segmentSeconds} -use_timeline 1 -use_template 1 \`
   -init_seg_name ($work + '\\init.mp4') -media_seg_name ($work + '\\seg$Number%05d$.m4s') "$mpd"
 if ($LASTEXITCODE -ne 0) { Die '切片失败（看上面的 ffmpeg 输出）' }
 
@@ -239,23 +281,56 @@ $segs = Get-ChildItem -LiteralPath $work -Filter 'seg*.m4s' | Sort-Object Name
 if ($segs.Count -eq 0) { Die '没有产出任何分片' }
 
 # MPD 的 SegmentTimeline 给出每片时长：<S t="0" d="60000" r="12"/>
-# 注意两处都踩过坑：1) SegmentTemplate 在 AdaptationSet 下（不是 Period）；
-# 2) MPD 带默认命名空间，XPath 必须挂 namespace manager，否则一条都选不中；
-# 3) timescale 也在 SegmentTemplate 上，取不到会让时长整体缩水（60000/1e6 = 0.06s）。
+# 踩过的坑：
+#   1) SegmentTemplate 在 AdaptationSet 下（不是 Period）；
+#   2) MPD 带默认命名空间，XPath 必须挂 namespace manager，否则一条都选不中；
+#   3) timescale 也在 SegmentTemplate 上，取不到会让时长整体缩水（60000/1e6 = 0.06s）；
+#   4) **视频与音频各有一个 AdaptationSet、各有各的时间轴**。按 //SegmentTimeline/S 一把取
+#      会拿到两条轨条目之和（实测 255 条 vs 180 片），对不上就静默换成平均时长。
+#      这里逐条 AdaptationSet 展开，优先取"视频且条目数与分片数一致"的那条；
+#      真的对不上时明确告警，绝不静默回填。
 $xml = [xml](Get-Content -LiteralPath $mpd -Raw)
 $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
 $ns.AddNamespace('d', $xml.DocumentElement.NamespaceURI)
-$tpl = $xml.SelectSingleNode('//d:SegmentTemplate', $ns)
-$timescale = if ($tpl -and $tpl.timescale) { [double]$tpl.timescale } else { 1000000 }
-$durations = New-Object System.Collections.Generic.List[double]
-foreach ($s in $xml.SelectNodes('//d:SegmentTimeline/d:S', $ns)) {
-  $d = [double]$s.d / $timescale
-  $r = if ($s.r) { [int]$s.r } else { 0 }
-  for ($i = 0; $i -le $r; $i++) { $durations.Add($d) }
+
+$timelines = New-Object System.Collections.Generic.List[object]
+foreach ($set in $xml.SelectNodes('//d:AdaptationSet', $ns)) {
+  $tpl = $set.SelectSingleNode('d:SegmentTemplate', $ns)
+  if (-not $tpl) {
+    $rep = $set.SelectSingleNode('d:Representation', $ns)
+    if ($rep) { $tpl = $rep.SelectSingleNode('d:SegmentTemplate', $ns) }
+  }
+  if (-not $tpl) { continue }
+
+  $scale = if ($tpl.timescale) { [double]$tpl.timescale } else { 1000000 }
+  $list = New-Object System.Collections.Generic.List[double]
+  foreach ($s in $tpl.SelectNodes('d:SegmentTimeline/d:S', $ns)) {
+    $d = [double]$s.d / $scale
+    $r = if ($s.r) { [int]$s.r } else { 0 }
+    for ($i = 0; $i -le $r; $i++) { $list.Add($d) }
+  }
+
+  # contentType 缺失时（少量复用器不写）按 Representation 的 mimeType 兜底判轨。
+  $content = [string]$set.contentType
+  if (-not $content) {
+    $rep = $set.SelectSingleNode('d:Representation', $ns)
+    if ($rep -and ("$($rep.mimeType)" -like 'video/*')) { $content = 'video' }
+    elseif ($rep -and ("$($rep.mimeType)" -like 'audio/*')) { $content = 'audio' }
+  }
+  $timelines.Add([pscustomobject]@{ Content = $content; Count = $list.Count; Durations = $list })
 }
+
+$pick = $timelines | Where-Object { $_.Content -eq 'video' -and $_.Count -eq $segs.Count } | Select-Object -First 1
+if (-not $pick) { $pick = $timelines | Where-Object { $_.Content -eq 'video' } | Select-Object -First 1 }
+if (-not $pick) { $pick = $timelines | Where-Object { $_.Count -eq $segs.Count } | Select-Object -First 1 }
+if (-not $pick) { $pick = $timelines | Select-Object -First 1 }
+
+$durations = New-Object System.Collections.Generic.List[double]
+if ($pick) { $durations = $pick.Durations }
 if ($durations.Count -ne $segs.Count) {
-  Warn "时间轴条目数($($durations.Count))与分片数($($segs.Count))不一致，按平均时长回填。"
-  $durations.Clear()
+  Warn "时间轴条目数($($durations.Count))与分片数($($segs.Count))不一致：按平均时长回填。"
+  Warn "  这会让进度条与 seek 出现偏差，请保留 $work 里的 index.mpd 与分片以便排查。"
+  $durations = New-Object System.Collections.Generic.List[double]
   for ($i = 0; $i -lt $segs.Count; $i++) { $durations.Add(($duration / $segs.Count)) }
 }
 
@@ -326,7 +401,7 @@ for ($i = 0; $i -lt $segs.Count; $i++) {
 }
 Close-Pack
 
-$mime = if ([string]::IsNullOrEmpty($aCodec) -and $playable) { 'video/mp4; codecs="avc1.64001f"' } else { 'video/mp4; codecs="avc1.64001f,mp4a.40.2"' }
+$mime = $mime  # 已在上面按真实编码算好
 $bitrate = [long](($totalBytes * 8) / [Math]::Max($duration, 1))
 $index = [ordered]@{
   version = 1
@@ -357,7 +432,7 @@ Say "接下来：在主播页点「选择分片目录」选中这个目录即可
 `
 }
 
-/** 生成 bash 版（Linux/macOS）。 */
+/** 生成 bash 版（Linux/macOS）。行为与文案必须与 PowerShell 版逐一对应。 */
 export function buildBashScript(p: ScriptParams): string {
   const out = p.outputDir.replace(/\/+$/, '')
   const ffmpegUrl = p.ffmpegUrl.trim() || DEFAULT_FFMPEG_URLS.unix
@@ -367,13 +442,26 @@ export function buildBashScript(p: ScriptParams): string {
 # ============================================================================
 #  ProjectionRoom 一键切片脚本（由浏览器生成）
 #  切成：init.mp4 + pack-*.bin + index.json
-#  用法：  bash <脚本名>.sh                       # 用内置的路径/文件名
-#          bash <脚本名>.sh /path/to/movie.mp4    # 指定源文件
+#  用法：  bash <脚本名>.sh                              # 用内置的路径/文件名
+#          bash <脚本名>.sh /path/to/movie.mp4           # 指定源文件
+#          bash <脚本名>.sh /path/to/movie.mp4 -Transcode # 强制转码为 H.264/AAC
+#          TRANSCODE=1 bash <脚本名>.sh                  # 同上（环境变量写法）
 #  没有 ffmpeg 时：提示 5 秒后用 curl 自动下载静态版到脚本旁边（Ctrl+C 取消）。
+#
+#  默认策略与 Windows 版一致：浏览器能解的编码族（H.264/AV1/VP9 + AAC/Opus）只 remux
+#  （-c copy），不整片转码 —— 142 分钟的 AV1 转码要数小时，直通只受磁盘带宽限制。
 # ============================================================================
 set -euo pipefail
 
-SRC="\${1:-${p.sourcePath.trim()}}"
+TRANSCODE="\${TRANSCODE:-}"
+SRC=""
+for _arg in "$@"; do
+  case "$_arg" in
+    -Transcode|--transcode) TRANSCODE=1 ;;
+    *) [ -n "$SRC" ] || SRC="$_arg" ;;
+  esac
+done
+[ -n "$SRC" ] || SRC="${p.sourcePath.trim()}"
 OUT="\${OUT:-${out}}"
 SEGMENT_SECONDS="\${SEGMENT_SECONDS:-${p.segmentSeconds}}"
 PACK_SIZE="\${PACK_SIZE:-${p.packSize}}"
@@ -436,31 +524,94 @@ fi
 say "ffmpeg: $FFMPEG"
 
 # ---------- 3. 探测 ----------
-probe="$("$FFPROBE" -v error -show_entries format=duration -show_entries stream=codec_name,codec_type -of json -- "$SRC")"
-duration="$(printf '%s' "$probe" | sed -n 's/.*"duration": *"\\([0-9.]*\\)".*/\\1/p' | head -1)"
-vcodec="$(printf '%s' "$probe" | tr -d ' \\n' | sed -n 's/.*"codec_name":"\\([a-z0-9_]*\\)","codec_type":"video".*/\\1/p' | head -1)"
-acodec="$(printf '%s' "$probe" | tr -d ' \\n' | sed -n 's/.*"codec_name":"\\([a-z0-9_]*\\)","codec_type":"audio".*/\\1/p' | head -1)"
-say "源: \${duration}s  视频=\${vcodec:-?} 音频=\${acodec:-无}"
+# 逐字段用 ffprobe 取（-of default=noprint_wrappers=1:nokey=1 只输出值）：比在 bash 里解 JSON 稳，
+# 编码字段的顺序/存在性变化都不会把结果打偏。
+probe_field() { "$FFPROBE" -v error -select_streams "$1" -show_entries "$2" -of default=noprint_wrappers=1:nokey=1 -- "$SRC" | head -1 | tr -d '\\r'; }
+duration="$("$FFPROBE" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 -- "$SRC" | head -1 | tr -d '\\r')"
+vcodec="$(probe_field v:0 stream=codec_name)"
+acodec="$(probe_field a:0 stream=codec_name)"
+vpix="$(probe_field v:0 stream=pix_fmt)"
+vprofile="$(probe_field v:0 stream=profile)"
+vlevel="$(probe_field v:0 stream=level)"
+minutes="$(awk -v d="$duration" 'BEGIN { printf "%.1f", d / 60 }')"
+say "源: \${duration}s (\${minutes} 分钟)  视频=\${vcodec:-?} 音频=\${acodec:-无}"
+if awk -v d="$duration" 'BEGIN { exit !(d > 3600) }'; then
+  warn "超过 60 分钟：本地切片没问题，但服务端切片会拒绝这么长的视频。"
+fi
 
-# ---------- 4. 切片 ----------
+# ---------- 4. 切片（DASH：init + 每片一个 m4s + MPD 时间轴）----------
 mkdir -p "$OUT"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mpd="$work/index.mpd"
 
-playable=0
-[ "$vcodec" = "h264" ] && { [ -z "$acodec" ] || [ "$acodec" = "aac" ]; } && playable=1
-if [ "$playable" = "0" ] || [ -n "$TRANSCODE_BITRATE" ]; then
-  say "转码为 H.264/AAC ..."
+# 播放器要的是浏览器能解的**编码族**：能解就只 remux（-c copy），不要整片转码。
+# 142 分钟的 AV1 转码要数小时；直通只受磁盘带宽限制，通常几分钟。
+case "$vcodec" in
+  h264) vfamily=avc1 ;;
+  av1)  vfamily=av01 ;;
+  vp9)  vfamily=vp09 ;;
+  *)    vfamily='' ;;
+esac
+audio_ok=1
+case "$acodec" in
+  '')   afamily='' ;;
+  aac)  afamily=mp4a.40.2 ;;
+  opus) afamily=opus ;;
+  *)    afamily=''; audio_ok=0 ;;
+esac
+passthrough=1
+[ -n "$vfamily" ] || passthrough=0
+[ "$audio_ok" = "1" ] || passthrough=0
+[ -z "$TRANSCODE" ] || passthrough=0
+
+# AV1 的编码串按 ffprobe 报出的真实 profile/level 拼（level 就是 av1C 里的 seq_level_idx_0）：
+# 写死一个对不上的 level，严格校验的浏览器会直接判 isTypeSupported 为假 → 黑屏。
+case "$vpix" in *10*) is10bit=1 ;; *) is10bit=0 ;; esac
+case "$vprofile" in High) av1_profile=1 ;; Professional) av1_profile=2 ;; *) av1_profile=0 ;; esac
+case "$vlevel" in ''|*[!0-9]*) av1_level=05 ;; *) av1_level="$(printf '%02d' "$vlevel")" ;; esac
+if [ "$is10bit" = "1" ]; then av1_depth=10; else av1_depth=08; fi
+case "$vfamily" in
+  avc1) vcodec_string=avc1.64001f ;;
+  # tier 只有 High 才写 H；ffprobe 不报 tier，一律按 Main 处理。
+  av01) vcodec_string="av01.$av1_profile.$av1_level""M.$av1_depth" ;;
+  vp09) vcodec_string=vp09.00.10.08 ;;
+  *)    vcodec_string='' ;;
+esac
+# mimeType 必须按**真实编码**写：写错了 isTypeSupported 照样通过，但 append 的是别的编码 → 黑屏。
+q='"'
+if [ -z "$acodec" ]; then
+  mime_type="video/mp4; codecs=$q$vcodec_string$q"
+else
+  mime_type="video/mp4; codecs=$q$vcodec_string,$afamily$q"
+fi
+
+if [ "$passthrough" != "1" ]; then
+  if [ -n "$TRANSCODE" ]; then
+    say '按 -Transcode 显式要求转码为 H.264/AAC…'
+  else
+    say "源编码（$vcodec/$acodec）浏览器可能解不了，转码为 H.264/AAC…"
+  fi
   rate="\${TRANSCODE_BITRATE:-1800k}"
   "$FFMPEG" -y -v warning -i "$SRC" -c:v libx264 -preset veryfast -crf 23 -maxrate "$rate" -bufsize "$rate" -c:a aac -b:a 128k -movflags +faststart "$work/source.mp4"
   SRC="$work/source.mp4"
+  mime_type="video/mp4; codecs=$qavc1.64001f,mp4a.40.2$q"
+else
+  a_label="\${acodec:-无音轨}"
+  say "直通（不转码）：$vcodec / $a_label"
+  case "$vfamily" in
+    av01|vp09)
+      warn '注意：AV1/VP9 只在支持它的浏览器能播（Chrome 基本都行；Safari 与部分 Firefox 不行）。'
+      warn '      要最大兼容性就加 -Transcode（代价是整片转码，142 分钟要数小时）。'
+      ;;
+  esac
 fi
+say "mimeType: $mime_type"
 
 say "切片中（每片约 \${SEGMENT_SECONDS}s）..."
 # 绝对路径：DASH 复用器按"当前目录"解析相对分片名（与 mpd 所在目录无关）。
 "$FFMPEG" -y -v warning -i "$SRC" -map 0:v -map 0:a? -c copy \\
-  -f dash -seg_duration "$SEGMENT_SECONDS" -use_timeline 1 -use_template 1 \\
+  -f dash -format_options webm=0 -seg_duration "$SEGMENT_SECONDS" -use_timeline 1 -use_template 1 \\
   -init_seg_name "$work/init.mp4" -media_seg_name "$work/seg\\$Number%05d\\$.m4s" "$mpd"
 
 cp "$work/init.mp4" "$OUT/init.mp4"
@@ -468,8 +619,26 @@ seg_count="$(find "$work" -name 'seg*.m4s' | wc -l | tr -d ' ')"
 [ "$seg_count" -gt 0 ] || die '没有产出任何分片'
 
 # MPD 时间轴：<S t="0" d="2000000" r="12"/>
-timeline="$(tr '>' '>\\n' < "$mpd" | sed -n 's/.*<S .*d="\\([0-9]*\\)".*r="\\([0-9]*\\)".*/\\1 \\2/p')"
-timescale="$(tr '>' '>\\n' < "$mpd" | sed -n 's/.*timescale="\\([0-9]*\\)".*/\\1/p' | head -1)"
+# 视频与音频各有一个 AdaptationSet、各有各的时间轴：一把全取会拿到两条轨的条目之和
+# （实测 255 条 vs 180 片），对不上就静默换成平均时长。这里只保留视频那条里的 <S>。
+xml_lines="$(awk '{ gsub(/</, "\\n<"); print }' "$mpd")"
+video_block="$(printf '%s\\n' "$xml_lines" | awk '
+  /<AdaptationSet/ { in_as=1; video=0 }
+  in_as && /contentType="video"/ { video=1 }
+  in_as && video { print }
+  /<\\/AdaptationSet>/ { in_as=0; video=0 }
+')"
+timeline="$(printf '%s\\n' "$video_block" | awk '
+  # 只认真正的时间轴条目行 <S …/>：属性里也藏着 d="…"（例如 id="0"、maxWidth="320"），
+  # 不加这道闸会把它们当成条目，数出来的片数比实际多。
+  /^[ \\t]*<S[ \\t]/ {
+    d=""; r=0
+    if (match($0, /d="[0-9]+"/)) { d=substr($0, RSTART+3, RLENGTH-4) }
+    if (match($0, /r="[0-9]+"/)) { r=substr($0, RSTART+3, RLENGTH-4) }
+    if (d != "") print d, r
+  }
+')"
+timescale="$(printf '%s\\n' "$video_block" | sed -n 's/.*timescale="\\([0-9]*\\)".*/\\1/p' | head -1)"
 [ -n "$timescale" ] || timescale=1000000
 
 # ---------- 5. 拼包 + sha256 + index.json ----------
@@ -478,9 +647,9 @@ command -v python3 >/dev/null 2>&1 && python_ok=1
 
 if [ "$python_ok" = "1" ]; then
   WORK="$work" OUT="$OUT" PACK_SIZE="$PACK_SIZE" TIMESCALE="$timescale" TIMELINE="$timeline" \\
-  INIT_SRC="$work/init.mp4" SEG_COUNT="$seg_count" DURATION="$duration" \\
+  INIT_SRC="$work/init.mp4" SEG_COUNT="$seg_count" DURATION="$duration" MIME="$mime_type" \\
   python3 - <<'PYEOF'
-import json, os, hashlib, glob, shutil
+import json, os, hashlib, glob, shutil, sys
 work, out = os.environ['WORK'], os.environ['OUT']
 pack_size = int(os.environ['PACK_SIZE'])
 timescale = float(os.environ['TIMESCALE'])
@@ -493,6 +662,10 @@ for line in os.environ['TIMELINE'].splitlines():
         d, r = float(parts[0]) / timescale, int(parts[1])
         durations.extend([d] * (r + 1))
 if len(durations) != len(segs):
+    # 明确告警而不是静默回填：条目数对不上意味着分片时长只能按平均估，
+    # 进度条与 seek 会有偏差（Windows 版同款告警）。
+    print(f"警告：视频时间轴条目数({len(durations)})与分片数({len(segs)})不一致，按平均时长回填；"
+          f"进度条与 seek 会有偏差。", file=sys.stderr)
     durations = [float(os.environ['DURATION']) / max(len(segs), 1)] * len(segs)
 shutil.copyfile(os.path.join(work, 'init.mp4'), os.path.join(out, 'init.mp4'))
 segments, packs, pts, total = [], [], 0.0, 0
@@ -525,7 +698,7 @@ close_pack()
 if pack is not None: pack.close()
 duration = float(os.environ['DURATION'])
 index = {"version": 1, "initFile": "init.mp4",
-         "mimeType": 'video/mp4; codecs="avc1.64001f,mp4a.40.2"',
+         "mimeType": os.environ['MIME'],
          "totalDuration": round(duration, 6),
          "segmentSec": round(duration / max(len(segments), 1), 6),
          "bitrateBps": int(total * 8 / max(duration, 1)),
