@@ -374,25 +374,43 @@ export function decodeControl(bytes: Uint8Array): PeerControl {
 //   [kind(1)][flags(2)][chunkIndex(4)][fMP4 片段]          media（init / 媒体 / 尾段）
 //
 // kind 取值见下面的常量；分片帧只多 1 字节开销，换来的是绝不歧义。
+//
+// flags：低 1 位 = 后面还有分片；高 15 位 = 当前分片序号（0 起）。
+// DataChannel 单条消息有上限（Chrome 256KiB，规范默认 64KiB），
+// 高码率素材的单个分片可能有 1–2MB，**必须切开发**；重组在 useWebRTC 里做。
 export const KIND_CONTROL = 0x01
 export const KIND_INIT = 0x02
 export const KIND_MEDIA = 0x03
 export const KIND_TAIL = 0x04
 
-const MEDIA_HEADER_BYTES = 7
+export const MEDIA_HEADER_BYTES = 7
+/** flags 低 1 位：后面还有分片。 */
+export const FRAG_MORE = 0x0001
+/** flags 高 15 位能表达的分片数上限（7 字节头 + 64KB 分片 ≈ 2GB 单个分片）。 */
+export const FRAG_MAX_INDEX = 0x7fff
 
 export interface DecodedMedia {
   kind: number
   chunkIndex: number
+  /** 当前分片在一个 chunk 内的序号（0 起）；未分片时恒为 0。 */
+  fragmentIndex: number
+  /** 是否还有后续分片。 */
+  more: boolean
   /** 零拷贝视图（绑 ArrayBuffer）：直接交给 SourceBuffer.appendBuffer。 */
   payload: Bytes
 }
 
-export function encodeMediaFrame(kind: number, chunkIndex: number, payload: Uint8Array): Bytes {
+export function encodeMediaFrame(
+  kind: number,
+  chunkIndex: number,
+  payload: Uint8Array,
+  fragmentIndex = 0,
+  more = false,
+): Bytes {
   const out = new Uint8Array(MEDIA_HEADER_BYTES + payload.length)
   const view = new DataView(out.buffer, out.byteOffset, out.byteLength)
   view.setUint8(0, kind)
-  view.setUint16(1, 0)
+  view.setUint16(1, ((fragmentIndex & FRAG_MAX_INDEX) << 1) | (more ? FRAG_MORE : 0))
   view.setUint32(3, chunkIndex)
   out.set(payload, MEDIA_HEADER_BYTES)
   return out
@@ -415,11 +433,14 @@ export function decodeFrame(bytes: Uint8Array): DecodedFrame | null {
   if (kind === KIND_INIT || kind === KIND_MEDIA || kind === KIND_TAIL) {
     if (bytes.length < MEDIA_HEADER_BYTES) return null
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const flags = view.getUint16(1)
     return {
       kind,
       media: {
         kind,
         chunkIndex: view.getUint32(3),
+        fragmentIndex: flags >>> 1,
+        more: (flags & FRAG_MORE) !== 0,
         // 直接在这个 ArrayBuffer 上开视图：零拷贝，且类型满足 appendBuffer 的要求。
         payload: viewOf(bytes.buffer as ArrayBuffer, bytes.byteOffset + MEDIA_HEADER_BYTES, bytes.byteLength - MEDIA_HEADER_BYTES),
       },

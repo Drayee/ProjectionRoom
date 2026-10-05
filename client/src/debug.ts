@@ -54,6 +54,10 @@ export interface DebugSnapshot {
     delivered: number
     timedOut: number
     chunkErrors: number
+    /** 取数失败的最近几条原因（排障入口：以前这里是静默的）。 */
+    fetchFailures: string[]
+    /** 应答侧最近几条（主播/中继："到底发出去没有"）。 */
+    serveLog: string[]
   }
   room: {
     members: number
@@ -154,6 +158,8 @@ export function installDebugHook(): void {
           delivered: store.delivered,
           timedOut: store.timedOut,
           chunkErrors: store.chunkErrors,
+          fetchFailures: store.fetchFailures,
+          serveLog: store.serveLog,
         },
         room: {
           members: store.members.length,

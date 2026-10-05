@@ -11,9 +11,9 @@
  * 因此上行数字由 `__pr.reportMetrics` 注入；除该数字外，信令、拓扑分配、
  * P2P 中继、分片传输与播放同步全部是真实链路。
  *
- * 用法：
- *   node tools/verify-m3.mjs --media <分片目录> [--nodes 4] [--duration 30]
- *                            [--host-uplink 800000] [--uplink 1=6000000] [--throttle 1=200000]
+ * 用法（在仓库根目录执行）：
+ *   node test/script/verify-m3.mjs [--media test/resource/short_video/cut] [--nodes 4] [--duration 15]
+ *                                 [--host-uplink 800000] [--uplink 1=6000000] [--throttle 1=200000]
  */
 import {
   argOf,
@@ -31,9 +31,9 @@ import {
 const argv = process.argv.slice(2)
 const CLIENT_URL = argOf(argv, 'client', 'http://127.0.0.1:5173')
 const SERVER_URL = argOf(argv, 'server', 'http://127.0.0.1:8080')
-const MEDIA_DIR = argOf(argv, 'media')
+const MEDIA_DIR = argOf(argv, 'media', 'test/resource/short_video/cut')
 const NODES = Number(argOf(argv, 'nodes', '4'))
-const DURATION_S = Number(argOf(argv, 'duration', '30'))
+const DURATION_S = Number(argOf(argv, 'duration', '15'))
 const BASE_PORT = Number(argOf(argv, 'port', '9400'))
 const HOST_UPLINK = Number(argOf(argv, 'host-uplink', '0'))
 const THROTTLE = argOf(argv, 'throttle', '')

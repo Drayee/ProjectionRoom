@@ -153,32 +153,71 @@ export interface ExtractProgress {
   total: number
 }
 
+export interface ExtractOptions {
+  /**
+   * 同时写入的文件数上限。
+   *
+   * 为什么要并发：`createWritable()` 对每个文件都有固定开销（Chrome 先写同目录 swap 文件再改名，
+   * Windows 上还要叠加杀软扫描）。实测 OPFS 下约 18ms/文件，真实目录更高；
+   * 60 分钟的视频有 ~1800 个分片，串行就是"文件都很小但整体非常慢"。
+   */
+  concurrency?: number
+  /** 目标文件已存在且大小一致时跳过重写（重复点"写入"时几乎瞬间完成）。 */
+  skipIdentical?: boolean
+}
+
 /**
  * 把 zip 解到一个本地目录里。
  *
  * 单个文件用 dirHandle.getFileHandle(name, {create:true}) + createWritable() 直写：
  * store 条目直接把 Blob 切片交给写入流，不做多余的拷贝。
- * 返回真正的文件名列表（不含目录），调用方可以据此再 getFileHandle().getFile() 拿到 File。
+ * 返回真正的文件名列表（保持 zip 内的顺序），调用方可以据此再 getFileHandle().getFile() 拿 File。
  */
 export async function extractZipToDirectory(
   blob: Blob,
   dir: FileSystemDirectoryHandle,
   onProgress?: (progress: ExtractProgress) => void,
+  options: ExtractOptions = {},
 ): Promise<string[]> {
   const entries = await readZipEntries(blob)
-  const written: string[] = []
+  const written: string[] = new Array(entries.length)
+  const concurrency = Math.max(1, Math.min(options.concurrency ?? 6, entries.length))
+  const skipIdentical = options.skipIdentical ?? true
 
-  for (let i = 0; i < entries.length; i += 1) {
-    const entry = entries[i]
-    const handle = await dir.getFileHandle(entry.name, { create: true })
-    const writable = await handle.createWritable()
-    try {
-      await writable.write(entry.blob)
-    } finally {
-      await writable.close()
+  let next = 0
+  let done = 0
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next
+      next += 1
+      if (i >= entries.length) return
+
+      const entry = entries[i]
+      const handle = await dir.getFileHandle(entry.name, { create: true })
+      let skip = false
+      if (skipIdentical) {
+        try {
+          const existing = await handle.getFile()
+          skip = existing.size === entry.blob.size
+        } catch {
+          skip = false
+        }
+      }
+      if (!skip) {
+        const writable = await handle.createWritable()
+        try {
+          await writable.write(entry.blob)
+        } finally {
+          await writable.close()
+        }
+      }
+      written[i] = entry.name
+      done += 1
+      onProgress?.({ name: entry.name, done, total: entries.length })
     }
-    written.push(entry.name)
-    onProgress?.({ name: entry.name, done: i + 1, total: entries.length })
   }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()))
   return written
 }

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { extname, join } from 'node:path'
+import { extname, join, resolve, sep } from 'node:path'
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -206,12 +206,16 @@ export async function openTarget(port, label) {
  */
 export function startMediaServer(dir) {
   const types = { '.json': 'application/json', '.mp4': 'video/mp4', '.m4s': 'video/iso.segment' }
+  // 规范化后再比较：Windows 上 join() 会把 'a/b' 变成 'a\\b'，
+  // 拿它和未规范化的 dir 做 startsWith 永远为假 —— 表现为所有文件 404
+  //（用绝对 TEMP 路径时看不出来，换成仓库内的相对路径立刻暴露）。
+  const root = resolve(dir)
 
   const server = createServer((req, res) => {
     const name = decodeURIComponent((req.url ?? '/').replace(/^\/+/, ''))
     try {
-      const full = join(dir, name)
-      if (!full.startsWith(dir) || !statSync(full).isFile()) {
+      const full = resolve(root, name)
+      if (!full.startsWith(root + sep) || !statSync(full).isFile()) {
         res.writeHead(404).end('not found')
         return
       }

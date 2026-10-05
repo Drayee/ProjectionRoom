@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { decodeFrame, encodeControl, type Bytes, type DecodedMedia } from '../types/codec'
+import { MEDIA_HEADER_BYTES, decodeFrame, encodeControl, encodeMediaFrame, type Bytes, type DecodedMedia } from '../types/codec'
 import type { PeerControl, SignalPayload } from '../types/protocol'
 
 export interface PeerRuntime {
@@ -37,6 +37,8 @@ export function useWebRTC(opts: {
   const channels = new Map<string, RTCDataChannel>()
   const pendingCandidates = new Map<string, RTCIceCandidateInit[]>()
   const pingTimers = new Map<string, number>()
+  /** 正在重组的分片（键 `<peerId>#<chunkIndex>`）：高码率素材的大分片会走这里。 */
+  const reassembly = new Map<string, { kind: number; parts: Bytes[]; bytes: number; next: number }>()
 
   let statsTimer: number | undefined
 
@@ -109,9 +111,56 @@ export function useWebRTC(opts: {
         return
       }
       if (decoded.media) {
-        opts.onMedia(peerId, decoded.media)
+        const media = reassemble(peerId, decoded.media)
+        if (media) {
+          opts.onMedia(peerId, media)
+        }
       }
     }
+  }
+
+  /**
+   * 接收端重组：把被切开的分片拼回一个完整 chunk。
+   *
+   * 单帧（未分片）走零拷贝快路径，直接交给上层 —— 低码率素材的绝大多数分片都在这里。
+   * 只有真的要重组时才发生一次内存拷贝（高码率素材的大分片）。
+   */
+  function reassemble(peerId: string, media: DecodedMedia): DecodedMedia | null {
+    const key = `${peerId}#${media.chunkIndex}`
+
+    if (media.fragmentIndex === 0 && !media.more) {
+      reassembly.delete(key)
+      return media
+    }
+
+    const pending = reassembly.get(key) ?? { kind: media.kind, parts: [] as Bytes[], bytes: 0, next: 0 }
+    // 通道是 ordered 的，正常不会乱序；真乱序就丢弃这一轮，等上层超时重取。
+    if (media.fragmentIndex !== pending.next) {
+      reassembly.delete(key)
+      return null
+    }
+    pending.parts.push(media.payload)
+    pending.bytes += media.payload.length
+    pending.next += 1
+
+    // 防御：单个 chunk 重组上限 32MB（正常最大也就几 MB），避免异常输入吃内存。
+    if (pending.bytes > 32 * 1024 * 1024) {
+      reassembly.delete(key)
+      return null
+    }
+    if (media.more) {
+      reassembly.set(key, pending)
+      return null
+    }
+
+    reassembly.delete(key)
+    const merged = new Uint8Array(pending.bytes)
+    let offset = 0
+    for (const part of pending.parts) {
+      merged.set(part, offset)
+      offset += part.length
+    }
+    return { kind: pending.kind, chunkIndex: media.chunkIndex, fragmentIndex: 0, more: false, payload: merged }
   }
 
   function handleControl(peerId: string, msg: PeerControl) {
@@ -246,6 +295,59 @@ export function useWebRTC(opts: {
     }
   }
 
+  /**
+   * 单个 DataChannel 消息里能装多少分片数据。
+   *
+   * 上限来自 SCTP 协商（Chrome↔Chrome 是 256KiB，规范默认 64KiB）。
+   * 这里取 64KiB 封顶：分片小一点、条数多一点，跨浏览器更稳，进度也更平滑。
+   */
+  function fragmentPayloadSize(channel: RTCDataChannel): number {
+    // maxMessageSize 是较新的属性，TS 的 lib.dom 还没有它；老浏览器上取不到就用规范默认值。
+    const negotiated = (channel as RTCDataChannel & { maxMessageSize?: number }).maxMessageSize
+    const limit = typeof negotiated === 'number' && negotiated > 0 ? negotiated : 65535
+    return Math.max(4096, Math.min(limit, 65536) - MEDIA_HEADER_BYTES)
+  }
+
+  /** 背压：缓冲积压太多就先等它排空，否则 send() 会直接抛（消息发不出去）。 */
+  async function waitForDrain(channel: RTCDataChannel, fragmentBytes: number): Promise<void> {
+    const limit = Math.max(4 * fragmentBytes, 262144)
+    const deadline = performance.now() + 5000
+    while (channel.bufferedAmount > limit && channel.readyState === 'open' && performance.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 10))
+    }
+  }
+
+  /**
+   * 发送一个分片（可能被切成多条 DataChannel 消息）。
+   *
+   * 为什么必须切：DataChannel 单条消息超过协商上限时 `send()` 会**抛异常**。
+   * 高码率素材的单个分片可以到 1–2MB（比如一个大 I 帧），
+   * 于是"整片发不出去 → 观众一直缓冲 → 却什么都不报"。
+   */
+  async function sendMedia(peerId: string, kind: number, chunkIndex: number, payload: Uint8Array): Promise<boolean> {
+    const channel = channels.get(peerId)
+    if (!channel || channel.readyState !== 'open') {
+      return false
+    }
+
+    const size = fragmentPayloadSize(channel)
+    const total = Math.max(1, Math.ceil(payload.length / size))
+    for (let i = 0; i < total; i += 1) {
+      if (channel.readyState !== 'open') {
+        return false
+      }
+      await waitForDrain(channel, size)
+      const start = i * size
+      const slice = payload.subarray(start, Math.min(payload.length, start + size))
+      try {
+        channel.send(encodeMediaFrame(kind, chunkIndex, slice, i, i < total - 1))
+      } catch {
+        return false
+      }
+    }
+    return true
+  }
+
   function broadcast(data: Bytes): number {
     let sent = 0
     for (const peerId of channels.keys()) {
@@ -366,6 +468,7 @@ export function useWebRTC(opts: {
     connect,
     handleSignal,
     send,
+    sendMedia,
     broadcast,
     openChannels,
     close,

@@ -9,7 +9,7 @@ import { useSyncClock } from '../composables/useSyncClock'
 import { useWebRTC } from '../composables/useWebRTC'
 import { useTopology } from '../composables/useTopology'
 import { segmentIndexAt } from '../types/media'
-import { KIND_INIT, KIND_MEDIA, encodeControl, encodeMediaFrame, type DecodedMedia } from '../types/codec'
+import { KIND_INIT, KIND_MEDIA, encodeControl, type DecodedMedia } from '../types/codec'
 import { Action, T } from '../types/protocol'
 import type { MediaIndex } from '../types/media'
 import type {
@@ -136,6 +136,9 @@ export const useRoomStore = defineStore('room', () => {
   const syncMode = ref('idle')
   const syncResets = ref(0)
   const chunkErrors = ref(0)
+  /** 取数失败与应答情况的环形日志：排障时先看这两个（以前失败是静默的）。 */
+  const fetchFailures = ref<string[]>([])
+  const serveLog = ref<string[]>([])
   const bufferedAhead = ref(0)
   const videoEl = shallowRef<HTMLVideoElement | null>(null)
 
@@ -466,6 +469,7 @@ export const useRoomStore = defineStore('room', () => {
     const index = msg.idx
 
     if (!rtc.send(peerId, encodeControl({ t: 'chunk', rid: msg.rid, idx: index }))) {
+      noteServe(`分片 ${index}: 通道不可用，未受理`)
       return
     }
 
@@ -479,12 +483,21 @@ export const useRoomStore = defineStore('room', () => {
       payload = chunkStore.get(index)
     }
     if (!payload) {
+      // 这条以前是静默的：观众只会"一直缓冲"，谁也看不出是本地没有这一片。
+      noteServe(`分片 ${index}: 本地没有这一片（NOT_FOUND）`)
       rtc.send(peerId, encodeControl({ t: 'err', rid: msg.rid, idx: index, code: 'NOT_FOUND' }))
       return
     }
 
     await throttleWait(payload.byteLength)
-    rtc.send(peerId, encodeMediaFrame(index === 0 ? KIND_INIT : KIND_MEDIA, index, payload))
+    // 发送失败必须记账：以前这里不检查返回值，于是"发不出去"和"没收到"看起来一模一样。
+    // 分片由 rtc.sendMedia 按 DataChannel 单条消息上限切开、带背压地发。
+    const sent = await rtc.sendMedia(peerId, index === 0 ? KIND_INIT : KIND_MEDIA, index, payload)
+    if (!sent) {
+      noteServe(`分片 ${index}: 发送失败（${payload.byteLength} 字节，通道 ${rtc.openChannels().length} 条）`)
+      return
+    }
+    noteServe(`分片 ${index}: 已发送 ${payload.byteLength} 字节`)
   }
 
   // ---------- 验收钩子（仅调试用，生产路径不设置）----------
@@ -746,6 +759,7 @@ export const useRoomStore = defineStore('room', () => {
         const peerId = topology.pickParent(index)
         if (!peerId) {
           chunkErrors.value += 1
+          noteFetchFailure(`分片 ${index}: 没有可用父节点`)
           return
         }
         topology.noteAttempt(index)
@@ -758,10 +772,22 @@ export const useRoomStore = defineStore('room', () => {
         }
       }
       flushOrdered()
-    } catch {
+    } catch (err) {
       // 超时/失败：下一次 tick 会重新请求（M3 会在这里转投其他父节点）。
+      // 但**必须留痕**：以前这里是空的 catch，于是"一片都没成功"在界面上完全看不出来。
       chunkErrors.value += 1
+      noteFetchFailure(`分片 ${index}: ${(err as Error).message ?? '未知失败'}`)
     }
+  }
+
+  /** 取数失败的环形日志（只留最近几条，够定位就行）。 */
+  function noteFetchFailure(text: string) {
+    fetchFailures.value = [...fetchFailures.value.slice(-7), `${Math.round(performance.now())}:${text}`]
+  }
+
+  /** 应答请求的环形日志：主播/中继侧"到底发出去没有"。 */
+  function noteServe(text: string) {
+    serveLog.value = [...serveLog.value.slice(-7), `${Math.round(performance.now())}:${text}`]
   }
 
   /** 严格按序号写入播放器：MSE 需要单调递增的时间戳，乱序 append 会报错。 */
@@ -1350,6 +1376,8 @@ export const useRoomStore = defineStore('room', () => {
     syncMode,
     syncResets,
     chunkErrors,
+    fetchFailures,
+    serveLog,
     bufferedAhead,
     peerCount,
     // 注意：必须是函数。Pinia setup store 返回对象里的普通值只在创建时求值一次，

@@ -12,14 +12,14 @@
  * 为什么用两个浏览器实例而不是两个标签页：同一个 Chrome 里的后台标签会被冻结/节流，
  * 既会让 CDP evaluate 挂死，也会把 200ms 的同步循环拖成 1s —— 那测的就不是同步精度了。
  *
- * 用法：
- *   node tools/verify-m2.mjs --media <分片目录> [--client http://127.0.0.1:5173] [--duration 300]
+ * 用法（在仓库根目录执行）：
+ *   node test/script/verify-m2.mjs [--media test/resource/short_video/cut] [--duration 20]
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { extname, join } from 'node:path'
+import { extname, join, resolve, sep } from 'node:path'
 
 // ---------- 参数 ----------
 const argv = process.argv.slice(2)
@@ -30,8 +30,9 @@ function arg(name, fallback) {
 
 const CLIENT_URL = arg('client', 'http://127.0.0.1:5173')
 const SERVER_URL = arg('server', 'http://127.0.0.1:8080')
-const MEDIA_DIR = arg('media')
-const DURATION_S = Number(arg('duration', '45'))
+// 默认用仓库自带的测试资源；素材只有 25s，所以默认观察时长也短。
+const MEDIA_DIR = arg('media', 'test/resource/short_video/cut')
+const DURATION_S = Number(arg('duration', '20'))
 const BASE_PORT = Number(arg('port', '9333'))
 const CHECK_CONTROLS = !argv.includes('--no-controls')
 
@@ -254,12 +255,15 @@ async function openTarget(port, label) {
  */
 function startMediaServer(dir) {
   const types = { '.json': 'application/json', '.mp4': 'video/mp4', '.m4s': 'video/iso.segment' }
+  // 规范化后再比较（与 lib/browser.mjs 同一处修正）：Windows 上 join() 会把 'a/b' 变成 'a\\b'，
+  // 拿它跟未规范化的 dir 做 startsWith 永远为假 —— 所有文件 404，表现为页面里 "Failed to fetch"。
+  const root = resolve(dir)
 
   const server = createServer((req, res) => {
     const name = decodeURIComponent((req.url ?? '/').replace(/^\/+/, ''))
     try {
-      const full = join(dir, name)
-      if (!full.startsWith(dir) || !statSync(full).isFile()) {
+      const full = resolve(root, name)
+      if (!full.startsWith(root + sep) || !statSync(full).isFile()) {
         res.writeHead(404).end('not found')
         return
       }
@@ -441,7 +445,12 @@ async function main() {
           intervalMs: 100,
         }).catch(() => false)
 
-        await host.evaluateNoWait('window.__pr.store.seekTo(120)')
+        // 跳转目标必须落在素材时长之内：仓库自带的素材只有 25s，
+        // 硬编码 120s 会跳到片尾之外，于是"跳转跟随"恒判失败（脚本假设了长素材，不是产品问题）。
+        const mediaDuration = Number((await host.snapshot()).media.totalDuration) || 120
+        const seekTarget = Number(Math.min(120, Math.max(5, mediaDuration * 0.5)).toFixed(1))
+        console.log(`跳转目标 ${seekTarget}s（素材总长 ${mediaDuration.toFixed(1)}s）`)
+        await host.evaluateNoWait(`window.__pr.store.seekTo(${seekTarget})`)
         const seekTrace = []
         for (let i = 0; i < 12; i += 1) {
           await sleep(500)
@@ -460,7 +469,7 @@ async function main() {
           })
         }
         controls.seekTrace = seekTrace
-        controls.seekDeltaSeconds = Number(Math.abs(seekTrace[seekTrace.length - 1].viewerCt - 120).toFixed(2))
+        controls.seekDeltaSeconds = Number(Math.abs(seekTrace[seekTrace.length - 1].viewerCt - seekTarget).toFixed(2))
 
         await host.evaluateNoWait('window.__pr.store.play()')
         controls.resumeFollowed = await waitFor(

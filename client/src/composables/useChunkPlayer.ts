@@ -1,5 +1,6 @@
 import { ref, shallowRef } from 'vue'
 import { segmentRange, type MediaIndex } from '../types/media'
+import { KIND_INIT } from '../types/codec'
 
 /**
  * MediaSource 播放器（SPEC §4.2）。
@@ -123,7 +124,9 @@ export function useChunkPlayer() {
   /** 把一段分片排入写入队列。init 段与媒体分片走同一个队列，顺序由调用方保证。 */
   function append(type: number, payload: Uint8Array<ArrayBuffer>) {
     queue.push(payload)
-    if (type === 0x01) {
+    // 以前这里写的是 0x01（那是控制消息的 kind），于是 initAppended 永远是 false，
+    // flushOrdered 每个 tick（200ms）都会把 init 段重灌一遍。
+    if (type === KIND_INIT) {
       initAppended.value = true
     }
     pump()

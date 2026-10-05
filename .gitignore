@@ -41,3 +41,9 @@ pnpm-debug.log*
 .dsh-vision-router/
 /segment-ui.png
 
+# ---- 测试资源 ----
+# 脚本（test/script）入库；素材留在本地：big/middle 合计 4.1GB，
+# 且分片 *.m4s 本来就被上面的规则忽略，提交半套夹具只会让人以为能用。
+# 需要复核别人的验收结果时，用 test/script/verify-*.mjs 指向自己的分片目录。
+/test/resource/
+
