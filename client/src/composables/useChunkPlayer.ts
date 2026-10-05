@@ -132,8 +132,31 @@ export function useChunkPlayer() {
     pump()
   }
 
+  /**
+   * 安全读取已缓冲区间。
+   *
+   * SourceBuffer 可能在任何时刻被"从 MediaSource 上摘掉"（元素被替换、MediaSource 被回收，
+   * 或上一次 attach 留下的旧 buffer 还没释放）。此后读 `.buffered` 会抛 InvalidStateError，
+   * 而这个读取点在 100ms/200ms 的定时器里 —— 一条错误就会把控制台刷满，
+   * 门控、缓冲判断与同步环也跟着一起失效（用户实测：用一键脚本切出来的目录进房后刷屏）。
+   * 这里统一兜住，并顺手把 attached 置回 false，让调度器走"重新挂载"的自愈路径。
+   */
+  function safeBuffered(): TimeRanges | null {
+    if (!sourceBuffer || !mediaSource || mediaSource.readyState !== 'open') {
+      return null
+    }
+    try {
+      return sourceBuffer.buffered
+    } catch {
+      note('buffered:SourceBuffer 已被摘除，标记为未挂载')
+      attached.value = false
+      ready.value = false
+      return null
+    }
+  }
+
   function bufferedEnd(): number {
-    const ranges = sourceBuffer?.buffered
+    const ranges = safeBuffered()
     if (!ranges || ranges.length === 0) {
       return 0
     }
@@ -142,7 +165,7 @@ export function useChunkPlayer() {
 
   /** 当前位置前方的可播时长（秒），是抖动缓冲的健康度指标。 */
   function bufferedAhead(time: number): number {
-    const ranges = sourceBuffer?.buffered
+    const ranges = safeBuffered()
     if (!ranges) {
       return 0
     }
@@ -156,7 +179,7 @@ export function useChunkPlayer() {
 
   /** 某个时间区间是否已被完整缓冲（末端给 50ms 容差：append 的边界不总是严丝合缝）。 */
   function rangeBuffered(start: number, end: number): boolean {
-    const ranges = sourceBuffer?.buffered
+    const ranges = safeBuffered()
     if (!ranges) {
       return false
     }
@@ -230,7 +253,10 @@ export function useChunkPlayer() {
     }
 
     const ranges: Array<[number, number]> = []
-    const buffered = sourceBuffer.buffered
+    const buffered = safeBuffered()
+    if (!buffered) {
+      return
+    }
     for (let i = 0; i < buffered.length; i += 1) {
       ranges.push([buffered.start(i), buffered.end(i)])
     }
@@ -248,7 +274,7 @@ export function useChunkPlayer() {
 
   /** 在已缓冲区间内跳到最接近 target 的关键帧位置（不清缓冲，代价最低）。 */
   function jumpWithinBuffer(target: number): boolean {
-    const ranges = sourceBuffer?.buffered
+    const ranges = safeBuffered()
     if (!ranges || !video.value) {
       return false
     }
