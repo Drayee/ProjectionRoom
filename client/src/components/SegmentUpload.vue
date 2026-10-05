@@ -187,6 +187,36 @@ function applyError(err: SegmentApiError) {
   ffmpegMissing.value = err.ffmpegMissing
 }
 
+/** 服务端的时长上限（与 internal/config 默认值一致）：本地先判，省得白传几个 GB。 */
+const MAX_UPLOAD_DURATION_SEC = 60 * 60
+
+/**
+ * 本地读时长：临时 `<video>` 读 metadata，不占内存、不上传。
+ * 容器不被浏览器识别（或超时）时返回 null，交给服务端去判，不挡用户。
+ */
+function probeLocalMedia(file: File): Promise<{ durationSec: number | null }> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file)
+    const el = document.createElement('video')
+    el.preload = 'metadata'
+
+    let settled = false
+    const done = (durationSec: number | null) => {
+      if (settled) return
+      settled = true
+      URL.revokeObjectURL(url)
+      el.removeAttribute('src')
+      resolve({ durationSec })
+    }
+
+    el.onloadedmetadata = () => done(Number.isFinite(el.duration) ? el.duration : null)
+    el.onerror = () => done(null)
+    // 有些容器浏览器根本解不了（例如 mkv 里的 AV1），metadata 永远不来，别把按钮卡死。
+    window.setTimeout(() => done(null), 4000)
+    el.src = url
+  })
+}
+
 async function start() {
   const picked = file.value
   if (!picked || busy.value || writing.value) return
@@ -201,6 +231,17 @@ async function start() {
   controller = new AbortController()
 
   try {
+    // 上传前先本地读时长：服务端的时长上限只有在文件传完之后才判得了，
+    // 而为了被拒先传 4GB 是纯粹的浪费（142 分钟的素材就是这么被拒的）。
+    const local = await probeLocalMedia(picked)
+    if (local.durationSec !== null && local.durationSec > MAX_UPLOAD_DURATION_SEC) {
+      phase.value = 'failed'
+      errorText.value =
+        `这个视频约 ${Math.round(local.durationSec / 60)} 分钟，超过服务端 ${Math.round(MAX_UPLOAD_DURATION_SEC / 60)} 分钟的上限，` +
+        `没必要白传一遍。请自行按下面的「本地切片教程」切好，或换一段更短的视频。`
+      return
+    }
+
     const submitted = await submitSegmentJob(picked, {
       onUploadProgress: (percent) => {
         uploadPercent.value = percent

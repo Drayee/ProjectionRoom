@@ -198,13 +198,45 @@ node test/script/verify-m3.mjs --nodes 4 --host-uplink 12000000 --uplink 1=12000
 node test/script/verify-m3.mjs --media ./room-media --nodes 4 --host-uplink 800000 --uplink 1=6000000
 ```
 
+### 诊断脚本（两端取证）
+
+验收脚本只给 PASS/FAIL；排障时用这两个把两端状态并列打出来：
+
+```bash
+# 观众拿不到分片：连接/请求/应答/门控/播放器 + 取数失败原因与主播应答日志
+node test/script/diag-chunks.mjs
+
+# 房主控制的时序（200ms 采样）：control=按钮暂停 / native=原生控件暂停 / join-order=观众先入房后开播
+node test/script/diag-control.mjs --scenario native
+
+# 写入本地目录分阶段计时（zip 解析 vs 逐文件写入、重复写快路径）
+node test/script/diag-write.mjs
+```
+
+### 大文件 / 真实场景
+
+`test/resource/` 下的素材（大体积二进制，已 gitignore）：
+
+| 素材 | 规格 | 说明 |
+| :--- | :--- | :--- |
+| `short_video/cut` | 25s / 26 片 / 4.5Mbps | 验收脚本默认素材（已切好，含 index.json） |
+| `middle_mkv_video.mkv` | 2.9min H.264+AAC | 中等长度 |
+| `middle_mp4_video.mkv` | 13.4min H.264+AAC / 111MB | **真实大文件**：实测服务端 2.0s 切出 578 片、单次 zip 111.7MiB、下载 2.9s |
+| `big_mp4_video.mp4` | 142min AV1+Opus / 3.9GB | 超过 60min 配额，应被拒（前端会先本地判时长，不白传） |
+
+```bash
+# 大文件端到端：上传 → 服务端切片 → 取产物，打印每阶段耗时与产物形态
+node test/script/verify-large.mjs
+node test/script/verify-large.mjs --source test/resource/big_mp4_video.mp4   # 预期被配额拒绝
+```
+
+
 脚本会启动**两个独立的 Chrome 实例**（不能是同一实例的两个标签页：后台标签会被冻结/节流，
 既会让 CDP 调用挂死，也会把 200ms 的同步循环拖成 1s，那测的就不是同步精度了），
 分别扮演主播与观众，然后测量起播耗时、全程偏差分布、暂停/跳转/继续的跟随情况，
 并输出 `PASS` / `FAIL`。
 
-页面通过 `window.__pr.snapshot()` 暴露结构化状态快照（`client/src/debug.ts`），
-脚本只读快照、不抠 DOM 文本。
+页面通过 `window.__pr.snapshot()` 暴露结构化状态快照（`client/src/debug.ts`），脚本只读快照、不抠 DOM 文本。
 
 ---
 
