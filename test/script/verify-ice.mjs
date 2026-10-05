@@ -15,22 +15,29 @@
  * 都包含配置里的 TURN 条目 → PASS。注意这**只证明配置送达**，不证明 TURN 能中继媒体
  *（那需要一台真实 coturn）。
  */
-import { argOf, createRoom, findChrome, openTarget, seedAndEnter, sleep, startChrome, startMediaServer } from './lib/browser.mjs'
+import { argOf, createRoom, findChrome, openTarget, seedAndEnter, sleep, startChrome, startMediaServer, waitFor } from './lib/browser.mjs'
 
 const argv = process.argv.slice(2)
 const SERVER_URL = argOf(argv, 'server', 'http://127.0.0.1:8094')
 const CLIENT_URL = argOf(argv, 'client', SERVER_URL)
 const TURN_HINT = argOf(argv, 'turn', 'turn:')
+/** 强制只走中继：把 host/srflx 候选全禁掉，能连通就只可能是 TURN 在转发。 */
+const RELAY_ONLY = argv.includes('--relay-only')
 const BASE_PORT = Number(argOf(argv, 'port', '9900'))
 
 /** 在页面加载前挂钩 RTCPeerConnection，把每次构造的 iceServers 记下来。 */
 const HOOK = `(() => {
+  const relayOnly = ${RELAY_ONLY};
   const Original = window.RTCPeerConnection;
   window.__iceCaptured = [];
   window.RTCPeerConnection = class extends Original {
     constructor(config) {
-      window.__iceCaptured.push(JSON.parse(JSON.stringify(config || {})));
-      super(config);
+      const cfg = Object.assign({}, config || {});
+      // --relay-only：只允许 relay 候选。此时 DataChannel 还能建起来，
+      // 就说明媒体确实是从 TURN 服务器转发的（没有别的路径可走）。
+      if (relayOnly) cfg.iceTransportPolicy = 'relay';
+      window.__iceCaptured.push(JSON.parse(JSON.stringify(cfg)));
+      super(cfg);
     }
   };
 })()`
@@ -77,8 +84,24 @@ async function main() {
   const pcGotServers = captured.some((c) => Array.isArray(c.iceServers) && c.iceServers.length > 0)
   const apiToStore = JSON.stringify(apiServers) === JSON.stringify(storeServers)
 
-  console.log(`\n判定依据：api→store 一致=${apiToStore}  PC 拿到 iceServers=${pcGotServers}  含 TURN=${hasTurn}`)
-  const pass = apiServers.length > 0 && apiToStore && pcGotServers && hasTurn
+  // --relay-only：连通性就是"中继可用"的证据（没有 host/srflx 候选可走）
+  let relayed = null
+  if (RELAY_ONLY) {
+    relayed = await waitFor(
+      async () => {
+        const s = await viewer.snapshot()
+        return s.p2p.openChannels >= 1
+      },
+      { label: '仅中继下建立通道', timeoutMs: 20000, intervalMs: 300 },
+    ).catch(() => false)
+    console.log(`仅中继模式下 DataChannel 建起: ${relayed}`)
+  }
+
+  console.log(
+    `\n判定依据：api→store 一致=${apiToStore}  PC 拿到 iceServers=${pcGotServers}  含 TURN=${hasTurn}` +
+      (RELAY_ONLY ? `  仅中继连通=${relayed}` : ''),
+  )
+  const pass = apiServers.length > 0 && apiToStore && pcGotServers && hasTurn && (!RELAY_ONLY || relayed === true)
   console.log(`判定：${pass ? 'PASS' : 'FAIL'}`)
   process.exitCode = pass ? 0 : 1
 
