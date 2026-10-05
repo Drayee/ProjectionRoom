@@ -30,6 +30,7 @@ import {
 import { extractZipToDirectory } from '../api/segmentZip'
 import { pickDirectory, supportsFileSystemAccess } from '../api/fileSystemAccess'
 import { useRoomStore } from '../stores/room'
+import SliceScriptPanel from './SliceScriptPanel.vue'
 
 const store = useRoomStore()
 
@@ -57,6 +58,8 @@ const writeDone = ref(0)
 const writeTotal = ref(0)
 const writeCurrent = ref('')
 const publishNotice = ref('')
+/** 「重新切片」是破坏性动作：先内联确认一次，别让一次误点丢掉已经切好的产物。 */
+const resliceConfirm = ref(false)
 
 let controller: AbortController | null = null
 
@@ -95,6 +98,37 @@ const stateText = computed(() => {
       return ''
   }
 })
+
+/** 主按钮文案：进行中态直接写在按钮上，不用用户去猜为什么点不动。 */
+const startLabel = computed(() => {
+  switch (phase.value) {
+    case 'uploading':
+      return '正在上传…'
+    case 'queued':
+      return '排队中…'
+    case 'running':
+      return '切片中…'
+    case 'done':
+      return '重新切片'
+    default:
+      return '上传并切片'
+  }
+})
+
+/** 主按钮：已切完时先要一次确认，其余情况直接开跑。 */
+function onPrimary() {
+  if (phase.value === 'done') {
+    resliceConfirm.value = true
+    return
+  }
+  resliceConfirm.value = false
+  void start()
+}
+
+function confirmReslice() {
+  resliceConfirm.value = false
+  void start()
+}
 
 onMounted(async () => {
   reachable.value = (await probeSegmentService()) ? 'ok' : 'unavailable'
@@ -151,6 +185,7 @@ function resetRun() {
   ffmpegMissing.value = false
   notice.value = ''
   publishNotice.value = ''
+  resliceConfirm.value = false
   writeDone.value = 0
   writeTotal.value = 0
   writeCurrent.value = ''
@@ -273,6 +308,11 @@ async function start() {
 
 /** 上传中 = 取消上传；排队/切片中 = 停止轮询（服务端作业不受影响）。 */
 function cancel() {
+  controller?.abort()
+}
+
+/** 取消写入：中止后续取产物与写盘；已经落进目录的文件不会回滚（重新写入会覆盖）。 */
+function cancelWrite() {
   controller?.abort()
 }
 
@@ -443,7 +483,7 @@ async function writeAndPublish() {
 
     <p class="muted small" v-if="reachable === 'unavailable'">
       连不上 /api/v1/segment/jobs：后端 Go 服务没起来，或者 Vite 没代理 /api。上传与切片暂时不可用，
-      但下面的「本地切片教程」照旧可用。
+      但下面的「一键切片脚本」与「本地切片教程」都只用浏览器本地能力，照旧可用。
     </p>
     <div class="row" v-if="reachable === 'unavailable'">
       <button @click="recheck">重新检测</button>
@@ -464,13 +504,27 @@ async function writeAndPublish() {
       </div>
 
       <div class="row">
-        <button class="primary" :disabled="!file || busy || writing" @click="start">
-          {{ phase === 'done' ? '重新切片' : '上传并切片' }}
+        <button
+          class="primary"
+          :disabled="!file || busy || writing"
+          :aria-busy="busy"
+          @click="onPrimary"
+        >
+          {{ startLabel }}
         </button>
-        <button v-if="busy" @click="cancel">
+        <button v-if="busy" type="button" @click="cancel">
           {{ phase === 'uploading' ? '取消上传' : '停止轮询' }}
         </button>
         <span class="muted small" v-if="busy">服务器同时只切 2 个、最多排 8 个，人均 3 个作业/分钟。</span>
+        <span class="muted small" v-else-if="phase === 'done'">
+          重新切片会重新上传源视频、丢掉当前这份产物（服务器产物本来也只保留 30 分钟）。
+        </span>
+      </div>
+
+      <div class="row confirm-row" v-if="resliceConfirm">
+        <span class="warn-text small">确定要重新切片吗？当前进度与产物会被丢弃。</span>
+        <button class="primary" type="button" @click="confirmReslice">确认重新切片</button>
+        <button type="button" @click="resliceConfirm = false">取消</button>
       </div>
 
       <div class="progress-block" v-if="busy || phase === 'done'">
@@ -546,14 +600,24 @@ async function writeAndPublish() {
             <span class="mono">{{ writeDone }} / {{ writeTotal }}</span>
           </div>
           <div class="bar"><div class="fill" :style="{ width: writePercent + '%' }"></div></div>
+          <div class="row">
+            <button type="button" @click="cancelWrite">取消写入</button>
+            <span class="muted small">
+              取消后已经写进目录的文件会留下（重新写入会覆盖），也不会发布到房间。
+            </span>
+          </div>
         </div>
 
         <p class="ok-text small" v-if="publishNotice">{{ publishNotice }}</p>
       </div>
     </template>
 
+    <!-- 一键切片脚本：与「本地切片教程」并列的推荐路径。
+         纯前端生成，不依赖 /api —— 服务端不可用时本节照样可用（它在 v-else 之外）。 -->
+    <SliceScriptPanel />
+
     <details class="tutorial" ref="tutorialEl">
-      <summary>本机没有 ffmpeg？本地切片教程（不占用服务器）</summary>
+      <summary>本机没有 ffmpeg？本地切片教程（手写命令，不占用服务器）</summary>
 
       <p class="muted small">
         本机装了 ffmpeg 时优先本地切：更快，也不占服务器磁盘与 CPU。产物格式与服务端完全一致，
@@ -660,6 +724,16 @@ p.muted.small {
 
 .progress-block {
   margin: 8px 0;
+}
+
+.confirm-row {
+  border-left: 2px solid var(--accent-2);
+  padding-left: 10px;
+  margin: 8px 0;
+}
+
+.warn-text {
+  color: var(--accent-2);
 }
 
 .progress-line {

@@ -1,0 +1,366 @@
+<script setup lang="ts">
+// 诊断抽屉：把原先只存在于 window.__pr.snapshot() 里的排障信息搬到界面上。
+//
+// 设计取舍：
+//   - 默认收起（<details> 不带 open）：这些日志每 3s 就可能新增，默认展开会刷屏，
+//     把真正要看的状态挤走；需要排障时展开、复制一份发出来即可。
+//   - 只读、不提供清空：日志是环形缓冲（store 里各留最近 8 条），清空会让"复现一次"
+//     这件事变得没法复盘；要重新取证就刷新页面。
+//   - 复制的是**纯文本报告**：用户把它贴进 issue / 群里，比截图有用得多。
+
+import { computed, onBeforeUnmount, ref } from 'vue'
+import { useRoomStore } from '../stores/room'
+import { copyText } from '../utils/clipboard'
+
+const store = useRoomStore()
+const copyState = ref<'idle' | 'ok' | 'failed'>('idle')
+let timer: number | undefined
+
+function memberName(id: string): string {
+  if (!id) return '—'
+  return store.members.find((m) => m.id === id)?.displayName ?? id.slice(0, 6)
+}
+
+function humanBps(bps: number): string {
+  if (!bps) return '未测得'
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(2)} Mbps`
+  return `${Math.round(bps / 1000)} kbps`
+}
+
+const peers = computed(() => [...store.peers.values()])
+const openChannels = computed(() => peers.value.filter((peer) => peer.channelOpen).length)
+const player = computed(() => store.playerDebugState())
+
+const connectionText = computed(() => {
+  switch (store.connection) {
+    case 'open':
+      return '信令已连接'
+    case 'connecting':
+      return '正在连接信令（会自动重连）'
+    case 'closed':
+      return '信令已断开，正在自动重连'
+    default:
+      return '未连接'
+  }
+})
+
+/** 上游链路：观众说"上游"，主播说"观众通道"。 */
+const upstreamText = computed(() => {
+  if (store.isHost) {
+    return `P2P ${peers.value.length} 条（已开通道 ${openChannels.value}）· 上行估计 ${humanBps(store.uploadCapacityBps)}`
+  }
+  if (store.primaryParentId) {
+    return `主父 ${memberName(store.primaryParentId)} · 已开通道 ${openChannels.value}/${peers.value.length}`
+  }
+  return `等待分配上游 · 已开通道 ${openChannels.value}/${peers.value.length}`
+})
+
+const lagText = computed(() => {
+  if (store.isHost) return '不适用（主播是源）'
+  if (store.lagNotice) return store.lagNotice
+  if (Math.abs(store.lagSec) < 0.5) return '与主播基本同步'
+  return store.lagSec > 0
+    ? `落后主播 ${store.lagSec.toFixed(1)}s`
+    : `领先主播 ${Math.abs(store.lagSec).toFixed(1)}s`
+})
+
+const gateText = computed(() => {
+  if (store.isHost) return '不适用（主播是源）'
+  if (!store.gated) return '已开闸'
+  return (
+    `加载中：${store.gateReason || '等待缓冲'} · 连续 ${store.gateBufferedSegments}/${store.gateThresholdSegments} 片` +
+    ` · 已等 ${store.gateWaitedSec.toFixed(0)}s（不设超时）`
+  )
+})
+
+const clockText = computed(() => {
+  if (store.isHost) return '不适用（主播是源）'
+  return (
+    `样本就绪 ${store.clockReady ? '是' : '否'} · 偏差 ${(store.drift * 1000).toFixed(0)}ms` +
+    ` · 偏移 ${Math.round(store.offsetMs)}ms（本跳 ${Math.round(store.hopOffsetMs)} + 父 ${Math.round(store.parentOffsetMs)}）`
+  )
+})
+
+const topologyText = computed(() => {
+  const parts = [`模式 ${store.topologyMode}`, `深度 ${store.topologyDepth}`]
+  if (store.primaryParentId) parts.push(`主父 ${memberName(store.primaryParentId)}`)
+  if (store.backupParentIds.length > 0) {
+    parts.push(`备用父 ${store.backupParentIds.map(memberName).join('、')}`)
+  }
+  if (store.childrenIds.length > 0) parts.push(`下游 ${store.childrenIds.length} 个`)
+  if (store.distributorId) parts.push(`分发节点 ${memberName(store.distributorId)}`)
+  if (store.lastDistributorChange) parts.push(`最近换防 ${store.lastDistributorChange}`)
+  return parts.join(' · ')
+})
+
+const topologyReason = computed(() => store.topologyReason || '服务端还没下发分配依据')
+
+const playerText = computed(() => {
+  const state = player.value
+  return (
+    `已挂载 ${state.attached ? '是' : '否'} · 就绪 ${state.ready ? '是' : '否'}` +
+    ` · 待追加 ${state.queued} 片 · init ${state.initAppended ? '已写入' : '未写入'}` +
+    ` · 卡顿 ${state.stalls} 次 · MediaSource ${state.mediaSourceState || '—'}`
+  )
+})
+
+const mediaText = computed(() => {
+  const index = store.mediaIndex
+  if (!index) return '尚未加载分片索引'
+  return (
+    `${index.mimeType} · ${index.segments.length} 段 · ${index.totalDuration.toFixed(1)}s` +
+    ` · ${(index.totalBytes / 1024 / 1024).toFixed(1)} MiB`
+  )
+})
+
+const runtimeText = computed(
+  () =>
+    `交付 ${store.delivered} · 超时 ${store.timedOut} · 取数失败 ${store.chunkErrors}` +
+    ` · p95 交付 ${store.p95DeliveryMs}ms · 跳转重灌 ${store.syncResets} 次 · 丢弃非主父进度 ${store.rejectedProgress} 条`,
+)
+
+/** 复制出去的纯文本报告：按"先状态、后日志"排，日志保持时间顺序。 */
+const report = computed(() => {
+  const lines: string[] = []
+  lines.push('ProjectionRoom 诊断报告')
+  lines.push(`时间: ${new Date().toISOString()}`)
+  lines.push(`房间: ${store.roomId || '—'}  角色: ${store.isHost ? '主播' : '观众'}  客户端: ${store.clientId || '—'}`)
+  lines.push(`连接: ${connectionText.value}  已加入: ${store.joined}  错误: ${store.lastError || '无'}`)
+  lines.push(`上游: ${upstreamText.value}`)
+  lines.push(`同步: ${clockText.value}  滞后: ${lagText.value}`)
+  lines.push(`门控: ${gateText.value}`)
+  lines.push(`播放器: ${playerText.value}`)
+  lines.push(`媒体: ${mediaText.value}`)
+  lines.push(`计数: ${runtimeText.value}`)
+  lines.push(`拓扑: ${topologyText.value}`)
+  lines.push(`分配依据: ${topologyReason.value}`)
+  for (const peer of peers.value) {
+    lines.push(
+      `  节点 ${memberName(peer.id)}(${peer.id.slice(0, 8)}) 连接=${peer.connection} 通道=${peer.channelOpen ? '开' : '关'} rtt=${peer.rttMs}ms`,
+    )
+  }
+  lines.push('')
+  lines.push(`--- 取数失败（最近 ${store.fetchFailures.length} 条）---`)
+  lines.push(...(store.fetchFailures.length ? store.fetchFailures : ['（无）']))
+  lines.push('')
+  lines.push(`--- 服务端应答（最近 ${store.serveLog.length} 条）---`)
+  lines.push(...(store.serveLog.length ? store.serveLog : ['（无）']))
+  lines.push('')
+  lines.push(`--- 生命周期（最近 ${store.lifecycle.length} 条）---`)
+  lines.push(...(store.lifecycle.length ? store.lifecycle : ['（无）']))
+  return lines.join('\n')
+})
+
+async function copyReport() {
+  const done = await copyText(report.value)
+  copyState.value = done ? 'ok' : 'failed'
+  if (timer !== undefined) window.clearTimeout(timer)
+  timer = window.setTimeout(() => (copyState.value = 'idle'), 2500)
+}
+
+onBeforeUnmount(() => {
+  if (timer !== undefined) window.clearTimeout(timer)
+})
+</script>
+
+<template>
+  <details class="diag" data-testid="diagnostics-drawer">
+    <summary>
+      <span>诊断 / 排障日志</span>
+      <span class="muted tiny">（默认收起：这里的日志会持续刷新，避免刷屏）</span>
+      <span class="muted tiny mono">
+        连接 {{ store.connection }} · P2P {{ peers.length }} · 取数失败 {{ store.chunkErrors }}
+      </span>
+    </summary>
+
+    <div class="body">
+      <div class="toolbar">
+        <button type="button" data-testid="diag-copy" @click="copyReport">复制诊断报告</button>
+        <span class="muted small" v-if="copyState === 'ok'">已复制，贴进反馈里即可。</span>
+        <span class="muted small warn-text" v-else-if="copyState === 'failed'">
+          剪贴板不可用（非 HTTPS 或被拒）：请手动选中下面的文本复制。
+        </span>
+        <span class="muted small" v-else>日志是环形缓冲，只保留最近几条。</span>
+      </div>
+
+      <div class="kv">
+        <span class="k">房间连接</span>
+        <span class="v">{{ connectionText }}<template v-if="!store.joined"> · 未加入房间</template></span>
+
+        <span class="k">上游链路</span>
+        <span class="v">{{ upstreamText }}</span>
+
+        <span class="k">与主播的差</span>
+        <span class="v" :class="{ warn: Math.abs(store.lagSec) > 2 && !store.isHost }">{{ lagText }}</span>
+
+        <span class="k">门控</span>
+        <span class="v">{{ gateText }}</span>
+
+        <span class="k">时钟</span>
+        <span class="v">{{ clockText }}</span>
+
+        <span class="k">播放器</span>
+        <span class="v">{{ playerText }}</span>
+
+        <span class="k">媒体</span>
+        <span class="v">{{ mediaText }}</span>
+
+        <span class="k">计数</span>
+        <span class="v">{{ runtimeText }}</span>
+
+        <span class="k">拓扑</span>
+        <span class="v">{{ topologyText }}</span>
+
+        <span class="k">分配依据</span>
+        <span class="v">{{ topologyReason }}</span>
+
+        <span class="k">节点</span>
+        <span class="v">
+          <template v-if="peers.length === 0">暂无 P2P 连接</template>
+          <template v-else>
+            <span v-for="peer in peers" :key="peer.id" class="peer mono">
+              {{ memberName(peer.id) }} · {{ peer.connection }} ·
+              {{ peer.channelOpen ? '通道开' : '通道关' }} · {{ peer.rttMs }}ms
+            </span>
+          </template>
+        </span>
+      </div>
+
+      <div class="logs">
+        <section>
+          <h5>取数失败（{{ store.fetchFailures.length }}）</h5>
+          <ul class="mono">
+            <li v-for="line in [...store.fetchFailures].reverse()" :key="line">{{ line }}</li>
+            <li v-if="store.fetchFailures.length === 0" class="muted">（无：这一路没有失败记录）</li>
+          </ul>
+        </section>
+
+        <section>
+          <h5>服务端应答（{{ store.serveLog.length }}）</h5>
+          <ul class="mono">
+            <li v-for="line in [...store.serveLog].reverse()" :key="line">{{ line }}</li>
+            <li v-if="store.serveLog.length === 0" class="muted">（无）</li>
+          </ul>
+        </section>
+
+        <section>
+          <h5>生命周期（{{ store.lifecycle.length }}）</h5>
+          <ul class="mono">
+            <li v-for="line in [...store.lifecycle].reverse()" :key="line">{{ line }}</li>
+            <li v-if="store.lifecycle.length === 0" class="muted">（无）</li>
+          </ul>
+        </section>
+      </div>
+    </div>
+  </details>
+</template>
+
+<style scoped>
+.diag {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 6px 10px;
+}
+
+summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+summary .mono {
+  margin-left: auto;
+}
+
+.body {
+  margin-top: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+
+/* 抽屉是房间页的页脚，展开时不能把播放器挤没：内部自己滚。 */
+.diag[open] .body {
+  max-height: 42vh;
+  overflow: auto;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 4px 10px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.kv .k {
+  color: var(--text-dim);
+}
+
+.kv .v {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.kv .warn,
+.warn-text {
+  color: var(--accent-2);
+}
+
+.peer {
+  display: inline-block;
+  margin-right: 10px;
+  white-space: nowrap;
+}
+
+.logs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.logs h5 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.logs ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 140px;
+  overflow: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.logs li {
+  word-break: break-all;
+}
+
+.small {
+  font-size: 12px;
+}
+
+.tiny {
+  font-size: 11px;
+}
+</style>

@@ -116,9 +116,12 @@ async function joinRoom() {
           <label>房间密码（可留空）</label>
           <input v-model="createPassword" type="password" placeholder="留空表示谁都能进" />
         </div>
-        <button class="primary" :disabled="busy" @click="createRoom">创建房间</button>
+        <button class="primary" :disabled="busy" :aria-busy="busy" @click="createRoom">
+          {{ busy ? '创建中…' : '创建房间' }}
+        </button>
         <p class="muted note">
-          创建后会拿到 6 位房间码。视频分片与同步链路在 M2 接入，本阶段先跑通房间、成员与房主控制。
+          创建后会拿到 6 位房间码。进房后选好分片目录即可开播：分片由主播通过 WebRTC 直连分发，
+          服务器不在视频链路上。本机没有 ffmpeg 时，主播页里有「服务端切片」与「一键切片脚本」两条路。
         </p>
       </section>
 
@@ -132,7 +135,9 @@ async function joinRoom() {
           <label>房间密码（若主播设置了）</label>
           <input v-model="joinPassword" type="password" placeholder="无密码可留空" />
         </div>
-        <button class="primary" :disabled="busy" @click="joinRoom">加入房间</button>
+        <button class="primary" :disabled="busy" :aria-busy="busy" @click="joinRoom">
+          {{ busy ? '加入中…' : '加入房间' }}
+        </button>
       </section>
     </div>
   </div>

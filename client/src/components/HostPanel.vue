@@ -8,6 +8,9 @@ const seekTarget = ref('')
 const dirInput = ref<HTMLInputElement | null>(null)
 /** 服务端切片面板默认收起：不选它就不占地方，也不影响原有的"选择分片目录"流程。 */
 const segmentOpen = ref(false)
+/** 进行中态：按钮必须自己说清楚"正在干什么"，别让用户以为点不动。 */
+const seeking = ref(false)
+const starting = ref(false)
 
 const canControl = computed(() => store.isHost && store.joined)
 
@@ -26,6 +29,15 @@ const mediaText = computed(() => {
   const index = store.mediaIndex
   if (!index) return ''
   return `${index.mimeType} · ${index.segments.length} 段 · ${(index.totalBytes / 1024 / 1024).toFixed(1)} MiB`
+})
+
+/** 主播侧的状态一句话：未选片 / 读取中 / 挂载中 / 播放中 / 已暂停。 */
+const stateText = computed(() => {
+  if (store.mediaError) return '开播失败'
+  if (store.mediaLoading) return '正在读取分片目录…'
+  if (!store.mediaIndex) return '未选片'
+  if (!store.videoReady) return '正在挂载播放器…'
+  return store.playback.paused ? '已暂停' : '播放中'
 })
 
 const uploadText = computed(() => {
@@ -48,9 +60,24 @@ async function onDirectoryChosen(event: Event) {
 
 async function seek() {
   const seconds = Number(seekTarget.value)
-  if (!Number.isFinite(seconds) || seconds < 0) return
-  await store.seekTo(seconds)
-  seekTarget.value = ''
+  if (!Number.isFinite(seconds) || seconds < 0 || seeking.value) return
+  seeking.value = true
+  try {
+    await store.seekTo(seconds)
+    seekTarget.value = ''
+  } finally {
+    seeking.value = false
+  }
+}
+
+async function startPlay() {
+  if (starting.value) return
+  starting.value = true
+  try {
+    await store.play()
+  } finally {
+    starting.value = false
+  }
 }
 
 function changeRate(event: Event) {
@@ -76,30 +103,49 @@ function changeRate(event: Event) {
         multiple
         @change="onDirectoryChosen"
       />
-      <button :disabled="!store.joined" @click="pickDirectory">选择分片目录</button>
+      <button :disabled="!store.joined || store.mediaLoading" @click="pickDirectory">
+        {{ store.mediaLoading ? '正在读取分片…' : '选择分片目录' }}
+      </button>
       <span v-if="mediaText" class="muted mono small">{{ mediaText }}</span>
-      <span v-else class="muted small">未选片（先用 segmenter 预处理视频）</span>
+      <span v-else class="muted small">
+        未选片：用 segmenter 预处理视频，或展开下面的「一键切片脚本」自己切一个目录。
+      </span>
     </div>
 
     <p class="error-text" v-if="store.mediaError">{{ store.mediaError }}</p>
 
-    <!-- 本机没有 ffmpeg 的兜底入口：默认收起，展开后是上传 + 服务端切片面板。 -->
+    <!-- 本机没有 ffmpeg 的兜底入口：默认收起，展开后是上传 + 服务端切片面板 + 一键脚本。 -->
     <div class="segment-entry">
       <button class="segment-toggle" @click="segmentOpen = !segmentOpen">
-        {{ segmentOpen ? '收起服务端切片' : '本机没有 ffmpeg？交给服务器切片' }}
+        {{ segmentOpen ? '收起服务端切片' : '本机没有 ffmpeg？交给服务器切片 / 生成一键脚本' }}
       </button>
       <SegmentUpload v-if="segmentOpen" />
     </div>
 
     <div class="controls">
-      <button v-if="store.playback.paused" class="primary" :disabled="!canControl || !store.mediaIndex" @click="store.play()">
-        播放
+      <button
+        v-if="store.playback.paused"
+        class="primary"
+        :disabled="!canControl || !store.mediaIndex || starting"
+        :aria-busy="starting"
+        @click="startPlay"
+      >
+        {{ starting ? '准备中…' : '播放' }}
       </button>
       <button v-else :disabled="!canControl" @click="store.pause()">暂停</button>
 
       <div class="seek">
-        <input v-model="seekTarget" type="number" min="0" step="1" placeholder="秒" :disabled="!canControl" />
-        <button :disabled="!canControl || seekTarget === ''" @click="seek">跳转</button>
+        <input
+          v-model="seekTarget"
+          type="number"
+          min="0"
+          step="1"
+          placeholder="秒"
+          :disabled="!canControl || !store.mediaIndex || seeking"
+        />
+        <button :disabled="!canControl || !store.mediaIndex || seekTarget === '' || seeking" @click="seek">
+          {{ seeking ? '跳转中…' : '跳转' }}
+        </button>
       </div>
 
       <label class="rate">
@@ -114,7 +160,12 @@ function changeRate(event: Event) {
       </label>
     </div>
 
+    <p class="muted small hint" v-if="!store.mediaIndex">
+      跳转与播放要等分片目录选好之后才能用；跳转会清空缓冲并重建，观众端会跟着一起跳。
+    </p>
+
     <div class="metrics mono small">
+      <span class="badge mono" :class="{ ok: stateText === '播放中' }">{{ stateText }}</span>
       <span class="badge mono">seq {{ store.playback.seq }}</span>
       <span>P2P {{ store.peerCount }} 连接</span>
       <span>上行 {{ uploadText }}</span>
@@ -187,6 +238,12 @@ button.segment-toggle {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .seek {
