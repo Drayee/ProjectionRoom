@@ -3,6 +3,7 @@ package config
 import (
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -371,6 +372,70 @@ func TestHostGraceEnvRejectsInvalid(t *testing.T) {
 			t.Setenv(envRoomHostGrace, v)
 			if _, err := Load(); err == nil {
 				t.Fatalf("PR_ROOM_HOST_GRACE=%q 应当报错", v)
+			}
+		})
+	}
+}
+
+// TestRoomMaxDepthDefaults 锁定分发树深度上限的默认值：3（PR_MAX_DEPTH 未设置时）。
+//
+// 从 4 收到 3 的依据：产品目标为「延迟与卡顿优先」。每跳中继实测给端到端多加
+// 58–78ms（docs/ALGORITHM.md §2.1 的实测表），4 跳最坏再叠约 300ms；
+// 而多出来的那一层在十几人的房间里很少真的换来容量（对价见 SPEC §6.2）。
+func TestRoomMaxDepthDefaults(t *testing.T) {
+	if DefaultRoomMaxDepth != 3 {
+		t.Fatalf("默认深度上限应为 3，实际 %d", DefaultRoomMaxDepth)
+	}
+	if MinRoomMaxDepth != 1 || MaxRoomMaxDepth != 6 {
+		t.Fatalf("允许范围应为 [1,6]，实际 [%d,%d]", MinRoomMaxDepth, MaxRoomMaxDepth)
+	}
+	if got := Default().Room.MaxDepth; got != DefaultRoomMaxDepth {
+		t.Fatalf("Default() 的深度上限应为 %d，实际 %d", DefaultRoomMaxDepth, got)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 不应失败: %v", err)
+	}
+	if cfg.Room.MaxDepth != 3 {
+		t.Fatalf("未配置 PR_MAX_DEPTH 时深度上限应为 3，实际 %d", cfg.Room.MaxDepth)
+	}
+}
+
+// TestRoomMaxDepthEnvOverride 锁定 PR_MAX_DEPTH：范围 [1,6] 的两端都必须认。
+func TestRoomMaxDepthEnvOverride(t *testing.T) {
+	for _, want := range []int{1, 2, 3, 4, 5, 6} {
+		t.Run(strconv.Itoa(want), func(t *testing.T) {
+			t.Setenv(envRoomMaxDepth, strconv.Itoa(want))
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("PR_MAX_DEPTH=%d 不应报错: %v", want, err)
+			}
+			if cfg.Room.MaxDepth != want {
+				t.Fatalf("PR_MAX_DEPTH=%d 覆盖失败，实际 %d", want, cfg.Room.MaxDepth)
+			}
+		})
+	}
+}
+
+// TestRoomMaxDepthEnvRejectsInvalid 锁定越界与非法值必须明确报错，不静默回退：
+// 深度写小会把观众挡在房外（Unassigned 变多），写大会把延迟预算翻一倍，
+// 两者都必须立刻可见，而不是"配错了和配对了在运行期看起来一样"。
+func TestRoomMaxDepthEnvRejectsInvalid(t *testing.T) {
+	for _, v := range []string{
+		"0",   // 0 等于除主播外一个人都放不下
+		"-1",  // 负数
+		"7",   // 超过上限
+		"12",  // 同上
+		"abc", // 非整数
+		"2.5", // 非整数
+		"3层",  // 带单位
+	} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv(envRoomMaxDepth, v)
+			if _, err := Load(); err == nil {
+				t.Fatalf("PR_MAX_DEPTH=%q 应当报错（允许范围 [1,6]）", v)
 			}
 		})
 	}

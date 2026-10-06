@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -736,5 +738,111 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 	viewer.send(model.Envelope{Type: model.TypeChat, Text: "我还在"})
 	if chat := viewer.readUntil(model.TypeChat); chat.Text != "我还在" {
 		t.Fatalf("容量收缩不应影响既有成员: %+v", chat)
+	}
+}
+
+// TestMaxDepthFromEnvDrivesAssignment 是 PR_MAX_DEPTH 的端到端检查（与 TestHostGraceFromEnvDrivesLifecycle 同型）：
+// 环境变量 → config.Load → usecase.NewManager → Room.Create → ReassignTopology → Assign → 下发载荷。
+//
+// 为什么必须到这一层：usecase 的单测只能证明"值进了 Options 之后"的行为，
+// 而"配置真的从环境变量走到了分配器与下发报文里"只有走一次真实 gin + WebSocket + protobuf 才能证明。
+//
+// 拓扑：主播 4 Mbps（K0=1 → 单链）、relay 5 Mbps（2 个子节点位）、三个无上行叶子。
+// 于是树只能是 host → relay(1) → l1/l2(2) → l3(3)，深度上限成为唯一的裁决者。
+func TestMaxDepthFromEnvDrivesAssignment(t *testing.T) {
+	for _, tc := range []struct {
+		maxDepth int
+		// wantL3 是第三个叶子应落的深度；0 表示"安置不下"。
+		wantL3 int
+	}{
+		{maxDepth: 2, wantL3: 0},
+		{maxDepth: 3, wantL3: 3},
+	} {
+		t.Run(fmt.Sprintf("PR_MAX_DEPTH=%d", tc.maxDepth), func(t *testing.T) {
+			t.Setenv("PR_MAX_DEPTH", strconv.Itoa(tc.maxDepth))
+
+			srv, cfg := newTestServerFromEnv(t)
+			if cfg.Room.MaxDepth != tc.maxDepth {
+				t.Fatalf("PR_MAX_DEPTH=%d 应落到配置上，实际 %d", tc.maxDepth, cfg.Room.MaxDepth)
+			}
+
+			roomID := createRoom(t, srv.URL, "")
+
+			host := dial(t, srv, roomID, "host-1")
+			host.join("主播", model.RoleHost, "")
+			host.readUntil(model.TypeJoined)
+
+			relay := dial(t, srv, roomID, "relay-1")
+			relay.join("转发", model.RoleViewer, "")
+			relay.readUntil(model.TypeJoined)
+
+			leaves := make([]*wsClient, 0, 3)
+			for _, id := range []string{"l1", "l2", "l3"} {
+				c := dial(t, srv, roomID, id)
+				c.join(id, model.RoleViewer, "")
+				c.readUntil(model.TypeJoined)
+				leaves = append(leaves, c)
+			}
+
+			// 所有人先进房（未实测时准入闸门放行），再上报实测上行触发重算。
+			index := sampleIndex(2_000_000)
+			host.send(model.Envelope{Type: model.TypeMediaIndex, MediaIndex: &index})
+			host.send(model.Envelope{Type: model.TypeMetrics, Metrics: &model.Metrics{UploadCapacityBps: 4_000_000, RTTMs: 10}})
+			relay.send(model.Envelope{Type: model.TypeMetrics, Metrics: &model.Metrics{UploadCapacityBps: 5_000_000, RTTMs: 20}})
+
+			// 请求-响应式读取当前拓扑：未安置的成员拿不到拓扑，服务端会回 NOT_JOINED ——
+			// 这正是"安置不下"在客户端侧的可观察形态。
+			requestTopology := func(c *wsClient) model.Envelope {
+				c.send(model.Envelope{Type: model.TypeTopologyRequest})
+				return c.readUntil(model.TypeTopology, model.TypeError)
+			}
+
+			// 轮询到 l1 落到第 2 层：这一步同时证明 relay 的 metrics 已经触发过重算。
+			// 不直接读一次容量广播的原因：两条连接各有自己的读循环，队列里那条可能还是上一步的。
+			var l1Topo *model.TopologyAssignment
+			deadline := time.Now().Add(testTimeout)
+			for time.Now().Before(deadline) && l1Topo == nil {
+				if env := requestTopology(leaves[0]); env.Topology != nil && env.Topology.Depth == 2 {
+					l1Topo = env.Topology
+					continue
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if l1Topo == nil {
+				t.Fatalf("等待 l1 落到第 2 层超时（PR_MAX_DEPTH=%d）", tc.maxDepth)
+			}
+			if l1Topo.MaxDepth != tc.maxDepth {
+				t.Fatalf("下发载荷里的 maxDepth 应为配置值 %d，实际 %d", tc.maxDepth, l1Topo.MaxDepth)
+			}
+
+			if env := requestTopology(host); env.Topology == nil || env.Topology.Depth != 0 || env.Topology.MaxDepth != tc.maxDepth {
+				t.Fatalf("主播应为深度 0 且 maxDepth=%d，实际 %+v", tc.maxDepth, env.Topology)
+			}
+			if env := requestTopology(relay); env.Topology == nil ||
+				env.Topology.Depth != 1 || env.Topology.PrimaryID != "host-1" || env.Topology.MaxDepth != tc.maxDepth {
+				t.Fatalf("relay 应为深度 1、挂在主播下，实际 %+v", env.Topology)
+			}
+			if env := requestTopology(leaves[1]); env.Topology == nil || env.Topology.Depth != 2 {
+				t.Fatalf("l2 应落在第 2 层，实际 %+v", env.Topology)
+			}
+
+			l3 := requestTopology(leaves[2])
+			if tc.wantL3 == 0 {
+				// 需要深度 3 才能安置 → 在上限 2 之下必须"未安置"，而不是突破上限继续挂。
+				if l3.Topology != nil {
+					t.Fatalf("PR_MAX_DEPTH=2 时 l3 不应拿到拓扑（需要深度 3），实际 %+v", l3.Topology)
+				}
+				if l3.Type != model.TypeError || l3.Code != model.CodeNotJoined {
+					t.Fatalf("未安置的成员请求拓扑应收到 NOT_JOINED，实际 %+v", l3)
+				}
+			} else {
+				if l3.Topology == nil || l3.Topology.Depth != tc.wantL3 {
+					t.Fatalf("PR_MAX_DEPTH=3 时 l3 应落在第 %d 层，实际 %+v", tc.wantL3, l3.Topology)
+				}
+				if l3.Topology.MaxDepth != tc.maxDepth {
+					t.Fatalf("l3 载荷里的 maxDepth 应为 %d，实际 %d", tc.maxDepth, l3.Topology.MaxDepth)
+				}
+			}
+		})
 	}
 }

@@ -854,6 +854,113 @@ func TestDegradedAloneDoesNotReplan(t *testing.T) {
 	}
 }
 
+// setupDeepChainRoom 搭一条"只能往下加深"的链：主播 4 Mbps（K0=1 → 单链模式），
+// relay 5 Mbps（2 个位），三个叶子没有上行 —— 所以拓扑只能 host → relay → l1/l2 → l3。
+// 深度上限因此成为唯一的裁决者：上限 3 时 l3 落在第 3 层，上限 2 时 l3 安置不下。
+//
+// 所有成员都在上报实测上行**之前**进房：准入闸门只按实测容量开闸（SPEC §6.2），
+// 先测后进会让后面的人直接被 ErrFull 挡住，测的就不是深度了。
+func setupDeepChainRoom(t *testing.T, maxDepth int) (*Manager, *fakeBus, *Room) {
+	t.Helper()
+
+	m, bus := newTestManager(t, 16)
+	// Manager 持的是同一个 cfg 指针，Room 在 Create 里读取它 → 必须在 Create 之前设好。
+	m.cfg.Room.MaxDepth = maxDepth
+
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	for _, id := range []string{"relay", "l1", "l2", "l3"} {
+		if err := m.Join(r.ID, id, id, model.RoleViewer, ""); err != nil {
+			t.Fatalf("%s 进房失败: %v", id, err)
+		}
+	}
+	index := sampleMediaIndex(2_000_000)
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
+		t.Fatalf("发布索引失败: %v", err)
+	}
+
+	// 主播实测 4 Mbps → K0=1 → 单链；relay 实测 5 Mbps → 它有 2 个位。
+	if err := m.UpdateMetrics(r.ID, "host", model.Metrics{UploadCapacityBps: 4_000_000, RTTMs: 10}); err != nil {
+		t.Fatalf("主播上报失败: %v", err)
+	}
+	if err := m.UpdateMetrics(r.ID, "relay", model.Metrics{UploadCapacityBps: 5_000_000, RTTMs: 20}); err != nil {
+		t.Fatalf("relay 上报失败: %v", err)
+	}
+
+	return m, bus, r
+}
+
+// TestRoomHonorsConfiguredMaxDepth 锁定 PR_MAX_DEPTH 真的接到了**真实调用点**：
+// 配置 2 时任何成员深度都不超过 2，放不下的进 Unassigned（而不是突破上限继续加深）；
+// 配置 3（默认）时同一个成员正好落在第 3 层。
+// 同时校验下发给客户端的 MaxDepth 字段用的是同一个值 —— 两边不一致会让客户端按另一套上限理解。
+func TestRoomHonorsConfiguredMaxDepth(t *testing.T) {
+	_, bus, r := setupDeepChainRoom(t, 2)
+
+	r.mu.Lock()
+	plan := r.plan
+	r.mu.Unlock()
+
+	deepest := 0
+	for id, a := range plan.Assignments {
+		if a.Depth > deepest {
+			deepest = a.Depth
+		}
+		if a.Depth > 2 {
+			t.Fatalf("MaxDepth=2 时节点 %s 深度 %d 超限", id, a.Depth)
+		}
+	}
+	if deepest != 2 {
+		t.Fatalf("链上应当铺满到第 2 层，实际最深 %d", deepest)
+	}
+	if len(plan.Unassigned) != 1 || plan.Unassigned[0] != "l3" {
+		t.Fatalf("MaxDepth=2 时 l3 应进 Unassigned，实际 %v", plan.Unassigned)
+	}
+	if _, ok := plan.Assignments["l3"]; ok {
+		t.Fatal("未安置的 l3 不应出现在分配表里")
+	}
+	if got := bus.lastDirectOfType(t, "l1", model.TypeParentAssignment).Topology.MaxDepth; got != 2 {
+		t.Fatalf("下发的 maxDepth 应为配置值 2，实际 %d", got)
+	}
+
+	// 配置 3：同一个人应当被安置在第 3 层。
+	_, bus3, r3 := setupDeepChainRoom(t, 3)
+
+	r3.mu.Lock()
+	plan3 := r3.plan
+	r3.mu.Unlock()
+
+	if len(plan3.Unassigned) != 0 {
+		t.Fatalf("MaxDepth=3 时不应有人安置不下，实际 %v", plan3.Unassigned)
+	}
+	if got := plan3.Assignments["l3"].Depth; got != 3 {
+		t.Fatalf("MaxDepth=3 时 l3 应落在第 3 层，实际深度 %d", got)
+	}
+	if got := bus3.lastDirectOfType(t, "l3", model.TypeParentAssignment).Topology.MaxDepth; got != 3 {
+		t.Fatalf("下发的 maxDepth 应为配置值 3，实际 %d", got)
+	}
+}
+
+// TestRoomMaxDepthFallsBackToDefault 锁定"没配"与"配成 0"都不会把上限变成 0：
+// 0 会让除主播外一个人都放不下，那是配置事故而不是配置项。
+func TestRoomMaxDepthFallsBackToDefault(t *testing.T) {
+	m, _ := newTestManager(t, 16)
+	m.cfg.Room.MaxDepth = 0
+
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if got := r.maxDepth(); got != DefaultMaxDepth {
+		t.Fatalf("MaxDepth 未配置时应退回 %d，实际 %d", DefaultMaxDepth, got)
+	}
+}
+
 // TestStallReplanIsRateLimited 覆盖换路限流：连续卡顿上报不能变成"每几秒搬一次家"。
 func TestStallReplanIsRateLimited(t *testing.T) {
 	m, bus := newTestManager(t, 16)

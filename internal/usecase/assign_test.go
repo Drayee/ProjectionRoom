@@ -1,8 +1,11 @@
 package usecase
 
 import (
+	"sort"
 	"strings"
 	"testing"
+
+	"ProjectionRoom/internal/config"
 )
 
 func parts(items ...Participant) []Participant {
@@ -20,6 +23,14 @@ func host(uploadBps int64) Participant {
 
 func viewer(id string, order int, uploadBps int64) Participant {
 	return Participant{ID: id, UploadBps: uploadBps, Order: order}
+}
+
+// viewerRTT 是带实测 RTT 的观众：延迟优先的评分里 RTT 是第一序参量，
+// 因此需要它才能构造"同余量、不同 RTT"的用例。
+func viewerRTT(id string, order int, uploadBps int64, rttMs float64) Participant {
+	p := viewer(id, order, uploadBps)
+	p.RTTMs = rttMs
+	return p
 }
 
 // assertTreeSane 检查分配结果满足所有硬约束。
@@ -506,5 +517,302 @@ func TestAssignAvoidPrimaryFallsBackWhenOnlyOption(t *testing.T) {
 	}
 	if len(plan.Unassigned) != 0 {
 		t.Fatalf("不应有未安置节点，实际 %v", plan.Unassigned)
+	}
+}
+
+// ---------- 延迟优先：权重重排（行为变更） ----------
+//
+// 这一组用例锁定的是**一次刻意的行为变更**：产品目标已明确为「延迟与卡顿优先、观众跨运营商」，
+// 因此父节点评分从"余量 0.5 / RTT 0.3 / 稳定性 0.2"改为"RTT 0.5 / 稳定性 0.25 / 余量 0.25"。
+// 原来那些"余量优先"的期望值不是被放宽了，而是被**反向**锁死：
+// 同样的候选集合，旧权重要选高 RTT 的父节点，新权重必须选低 RTT 的那个。
+
+// scoreLegacySpareFirst 是本次改动**之前**的评分公式（余量优先）。
+//
+// 它只活在测试里，用于打印前后对照表、证明"选择结果确实按目标翻转了"；
+// 生产代码里已经不存在这个公式（见 allocNode.score）。
+func scoreLegacySpareFirst(n *allocNode) float64 {
+	if n.slots <= 0 {
+		return 0
+	}
+	spareRatio := float64(n.spare()) / float64(n.slots)
+	rttScore := 1.0 / (1.0 + n.rtt/100.0)
+	stability := n.stability
+	if stability <= 0 {
+		stability = 1
+	}
+	return spareRatio*0.5 + rttScore*0.3 + stability*0.2
+}
+
+// bestByScoreFn 返回按给定评分最高的节点 id 与分数，并列时取加入顺序靠前者
+// （与 bestParentByScore 的遍历口径一致）。
+func bestByScoreFn(nodes map[string]*allocNode, score func(*allocNode) float64) (string, float64) {
+	ids := make([]string, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	sort.SliceStable(ids, func(i, j int) bool {
+		if nodes[ids[i]].order != nodes[ids[j]].order {
+			return nodes[ids[i]].order < nodes[ids[j]].order
+		}
+		return ids[i] < ids[j]
+	})
+
+	best, bestScore := "", 0.0
+	for _, id := range ids {
+		if s := score(nodes[id]); best == "" || s > bestScore {
+			best, bestScore = id, s
+		}
+	}
+	return best, bestScore
+}
+
+// TestScoreWeightsLatencyFirstFlipsChoice 是本次行为变更的核心证据：
+// 同一组候选（A 余量 0.9 / RTT 180ms、B 余量 0.5 / RTT 30ms、C 余量 0.6 / RTT 60ms）
+// 在旧权重下选 A（余量最大但最慢），在新权重下必须选 B（最快）。
+func TestScoreWeightsLatencyFirstFlipsChoice(t *testing.T) {
+	nodes := map[string]*allocNode{
+		"A": {id: "A", order: 1, depth: 1, slots: 10, used: 1, rtt: 180, stability: 1}, // 余量 0.9
+		"B": {id: "B", order: 2, depth: 1, slots: 10, used: 5, rtt: 30, stability: 1},  // 余量 0.5
+		"C": {id: "C", order: 3, depth: 1, slots: 10, used: 4, rtt: 60, stability: 1},  // 余量 0.6
+	}
+
+	t.Log("候选人 | 余量占比 | RTT(ms) | 旧公式（余量0.5/RTT0.3/稳定性0.2） | 新公式（RTT0.5/稳定性0.25/余量0.25）")
+	for _, id := range []string{"A", "B", "C"} {
+		n := nodes[id]
+		t.Logf("%s | %.2f | %3.0f | %.4f | %.4f",
+			id, float64(n.spare())/float64(n.slots), n.rtt, scoreLegacySpareFirst(n), n.score())
+	}
+
+	legacyBest, _ := bestByScoreFn(nodes, scoreLegacySpareFirst)
+	newBest, _ := bestByScoreFn(nodes, func(n *allocNode) float64 { return n.score() })
+	t.Logf("旧权重选择 = %s；新权重选择 = %s", legacyBest, newBest)
+
+	// 这是一次行为变更：旧权重下这里必然选 A（余量 0.9*0.5 直接压过 RTT 劣势）。
+	if legacyBest != "A" {
+		t.Fatalf("对照前提不成立：旧公式应当选 A（余量最大），实际 %q", legacyBest)
+	}
+	// 新权重必须选低 RTT 的 B：RTT 0.5 的权重让 30ms 对 180ms 的差距（0.206）压过余量差距（0.10）。
+	if newBest != "B" {
+		t.Fatalf("新权重应选低 RTT 的 B，实际 %q", newBest)
+	}
+
+	// 生产侧的真实选择函数也必须给出 B（上面只是公式对照，这里走 bestParentByScore）。
+	candidate := Participant{ID: "x", Order: 9}
+	opts := Options{StreamBps: 1, MaxDepth: 3}
+	if got := bestParentByScore(nodes, candidate, opts, ""); got != "B" {
+		t.Fatalf("bestParentByScore 应选低 RTT 的 B，实际 %q", got)
+	}
+}
+
+// TestAssignLatencyFirstPicksLowerRTTEveryStep 是同一条行为变更的端到端版本：
+// 走真实 Assign（真实容量模型、真实广度优先），用三个父节点的**余量差异**复现同一个取舍。
+//
+// 房间：主播 8 Mbps（K0=3）→ A/B/C 占满主播的三个位，x1/x2/x3 逐层下挂：
+//
+//	A 20Mbps → 8 位，RTT 180ms（余量最多但最慢）
+//	B  5Mbps → 2 位，RTT  30ms（最快，但很快就只剩一半余量）
+//	C  8Mbps → 3 位，RTT  60ms
+//
+// 旧权重：x1→B、x2→C，然后 A 凭"余量 1.0 × 0.5"把 x3 抢走（A 的 RTT 劣势被余量盖过）。
+// 新权重：x1→B、x2→C，x3 仍然挂 B —— 快的那条路即使余量只剩 0.5 也优先。
+func TestAssignLatencyFirstPicksLowerRTTEveryStep(t *testing.T) {
+	participants := parts(
+		host(8_000_000), // K0 = floor(8*0.8/2) = 3
+		viewerRTT("A", 2, 20_000_000, 180),
+		viewerRTT("B", 3, 5_000_000, 30),
+		viewerRTT("C", 4, 8_000_000, 60),
+		viewerRTT("x1", 5, 0, 0),
+		viewerRTT("x2", 6, 0, 0),
+		viewerRTT("x3", 7, 0, 0),
+	)
+	opts := Options{StreamBps: 2_000_000}
+
+	plan := Assign("host", participants, opts)
+
+	for _, id := range []string{"A", "B", "C"} {
+		if a := plan.Assignments[id]; a.PrimaryID != "host" || a.Depth != 1 {
+			t.Fatalf("%s 应先占满主播的直连位（depth=1），实际 %+v", id, a)
+		}
+	}
+	if got := plan.Assignments["x1"].PrimaryID; got != "B" {
+		t.Fatalf("x1 应在同余量下选低 RTT 的 B，实际 %q", got)
+	}
+	if got := plan.Assignments["x2"].PrimaryID; got != "C" {
+		t.Fatalf("x2 应在 B 的余量降到 0.5 后选 C（RTT 60ms，余量 1.0），实际 %q", got)
+	}
+	// 关键断言（旧权重在这里给出 A，余量 1.0 压过 150ms 的 RTT 劣势）。
+	if got := plan.Assignments["x3"].PrimaryID; got != "B" {
+		t.Fatalf("x3 应继续选最快的 B（新权重：RTT 优先），实际 %q", got)
+	}
+	if len(plan.Unassigned) != 0 {
+		t.Fatalf("不应有未安置节点，实际 %v", plan.Unassigned)
+	}
+	assertTreeSane(t, plan, participants, opts)
+}
+
+// TestAssignStillHardExcludesFullParent 锁定那条不能被权重绕过的硬约束：
+// spare() <= 0 的父节点直接出局，无论它的 RTT 多好。权重只表达偏好，
+// 越界由硬排除负责 —— 否则"最快"的父节点会被挂到过载，反过来变成卡顿源头。
+func TestAssignStillHardExcludesFullParent(t *testing.T) {
+	participants := parts(
+		host(5_000_000),                      // K0 = 2
+		viewerRTT("fast", 2, 5_000_000, 5),   // 2 位，RTT 5ms（会被填满）
+		viewerRTT("slow", 3, 5_000_000, 500), // 2 位，RTT 500ms
+		viewerRTT("f1", 4, 0, 10),
+		viewerRTT("f2", 5, 0, 10),
+		viewerRTT("x", 6, 0, 10),
+	)
+	opts := Options{StreamBps: 2_000_000}
+
+	plan := Assign("host", participants, opts)
+
+	// 前置条件：fast 的两个位被 f1/f2 占满（它 RTT 最低，评分也最高）。
+	if got := plan.Assignments["f1"].PrimaryID; got != "fast" {
+		t.Fatalf("前置条件不成立：f1 应挂在最快的 fast 下，实际 %q", got)
+	}
+	if got := plan.Assignments["f2"].PrimaryID; got != "fast" {
+		t.Fatalf("前置条件不成立：f2 应挂在最快的 fast 下，实际 %q", got)
+	}
+	if spare := NodeCapacity(5_000_000, 2_000_000) - 2; spare != 0 {
+		t.Fatalf("前置条件不成立：fast 的余量应为 0，实际 %d", spare)
+	}
+
+	if got := plan.Assignments["x"].PrimaryID; got != "slow" {
+		t.Fatalf("fast 的余量已为 0，x 必须落到 slow（哪怕它 RTT 500ms），实际 %q", got)
+	}
+	if len(plan.Unassigned) != 0 {
+		t.Fatalf("余量犹在的 slow 足以安置 x，不应有未安置节点：%v", plan.Unassigned)
+	}
+	assertTreeSane(t, plan, participants, opts)
+}
+
+// TestAssignStabilityBreaksRTTTie 锁定稳定性权重仍然参与：
+// 两个候选 RTT 与余量都一样时，稳定性高的那个胜出（0.25 的权重足以分胜负）。
+func TestAssignStabilityBreaksRTTTie(t *testing.T) {
+	participants := parts(
+		host(5_000_000), // K0 = 2
+		viewerRTT("steady", 2, 5_000_000, 40),
+		viewerRTT("flaky", 3, 5_000_000, 40),
+		viewerRTT("x", 4, 0, 40),
+	)
+	// Stability 为 0 视为"未知、不惩罚"，所以这里给两个**都已知**的值。
+	participants[1].Stability = 0.95
+	participants[2].Stability = 0.30
+	opts := Options{StreamBps: 2_000_000}
+
+	plan := Assign("host", participants, opts)
+
+	if got := plan.Assignments["x"].PrimaryID; got != "steady" {
+		t.Fatalf("RTT 与余量相同时应选稳定性更高的 steady，实际 %q", got)
+	}
+	assertTreeSane(t, plan, participants, opts)
+}
+
+// TestAssignMaxDepthOverflowGoesUnassigned 锁定深度上限的两半语义：
+// 放得下的继续加深到上限为止；放不下的进 Unassigned，而不是突破上限继续挂。
+//
+// 场景：K0=1 → 单链模式；每个转发节点只有 1 个位（2.5 Mbps 上行 / 2 Mbps 码率）。
+// 于是拓扑只能是一条链：host → R1(1) → R2(2) → R3(3) → R4(4)。
+func TestAssignMaxDepthOverflowGoesUnassigned(t *testing.T) {
+	newParticipants := func() []Participant {
+		return parts(
+			host(4_000_000),
+			viewer("R1", 2, 2_500_000),
+			viewer("R2", 3, 2_500_000),
+			viewer("R3", 4, 2_500_000),
+			viewer("R4", 5, 2_500_000),
+		)
+	}
+	stream := int64(2_000_000)
+
+	// 默认上限是 3：R4 需要深度 4，必须进 Unassigned（旧默认 4 会把它塞进第 4 层）。
+	def := Assign("host", newParticipants(), Options{StreamBps: stream})
+	for id, a := range def.Assignments {
+		if a.Depth > DefaultMaxDepth {
+			t.Fatalf("节点 %s 深度 %d 超过默认上限 %d", id, a.Depth, DefaultMaxDepth)
+		}
+	}
+	if got := def.Assignments["R3"].Depth; got != 3 {
+		t.Fatalf("R3 应正好落在第 3 层，实际深度 %d", got)
+	}
+	if len(def.Unassigned) != 1 || def.Unassigned[0] != "R4" {
+		t.Fatalf("默认上限 3 时 R4 应进 Unassigned（而不是继续加深），实际 %v", def.Unassigned)
+	}
+
+	// 显式放宽到 4：同一个人应当被安置在第 4 层，Unassigned 清空。
+	wide := Assign("host", newParticipants(), Options{StreamBps: stream, MaxDepth: 4})
+	if got := wide.Assignments["R4"].Depth; got != 4 {
+		t.Fatalf("MaxDepth=4 时 R4 应落在第 4 层，实际深度 %d", got)
+	}
+	if len(wide.Unassigned) != 0 {
+		t.Fatalf("MaxDepth=4 时不应有未安置节点，实际 %v", wide.Unassigned)
+	}
+
+	// 收到 2：R3 就已经放不下了，超限成员同样是 Unassigned，而不是被塞进第 3 层。
+	narrow := Assign("host", newParticipants(), Options{StreamBps: stream, MaxDepth: 2})
+	for id, a := range narrow.Assignments {
+		if a.Depth > 2 {
+			t.Fatalf("MaxDepth=2 时节点 %s 深度 %d 超限", id, a.Depth)
+		}
+	}
+	if len(narrow.Unassigned) != 2 {
+		t.Fatalf("MaxDepth=2 时 R3/R4 都应进 Unassigned，实际 %v", narrow.Unassigned)
+	}
+	for _, id := range narrow.Unassigned {
+		if _, placed := narrow.Assignments[id]; placed {
+			t.Fatalf("未安置的 %s 不应同时出现在分配表里", id)
+		}
+	}
+}
+
+// TestDefaultMaxDepthMatchesConfigDefault 防漂移：算法侧兜底默认值（Options.MaxDepth<=0 时用）
+// 必须与配置侧默认值（PR_MAX_DEPTH 未设置时用）一致 ——
+// 否则"直接调用 Assign"与"经过服务器的真实路径"会给出两棵不同的树，而且只有生产环境能看出来。
+func TestDefaultMaxDepthMatchesConfigDefault(t *testing.T) {
+	if DefaultMaxDepth != 3 {
+		t.Fatalf("默认深度上限应为 3（延迟优先，4 跳最坏多 ~300ms），实际 %d", DefaultMaxDepth)
+	}
+	if DefaultMaxDepth != config.DefaultRoomMaxDepth {
+		t.Fatalf("usecase.DefaultMaxDepth=%d 与 config.DefaultRoomMaxDepth=%d 必须一致",
+			DefaultMaxDepth, config.DefaultRoomMaxDepth)
+	}
+	if got := (Options{}).withDefaults().MaxDepth; got != DefaultMaxDepth {
+		t.Fatalf("Options.MaxDepth<=0 应退回默认值 %d，实际 %d", DefaultMaxDepth, got)
+	}
+	// 显式配置必须原样生效（含 1 与 6 这两个边界值）。
+	for _, want := range []int{1, 2, 5, 6} {
+		if got := (Options{MaxDepth: want}).withDefaults().MaxDepth; got != want {
+			t.Fatalf("Options.MaxDepth=%d 应原样生效，实际 %d", want, got)
+		}
+	}
+}
+
+// TestDepthCapTradesCapacityForLatency 把"深度从 4 收到 3"的对价量化出来：
+// 链式退化场景下少一层就是少一层容量。这不是缺陷，是本次取舍的**代价**，
+// 所以要有一条断言把它钉住（免得有人以为收深度是纯赚）。
+func TestDepthCapTradesCapacityForLatency(t *testing.T) {
+	// 1 个主播 + 1 个分发节点 + 每个转发节点 2 个位，够铺满 4 层。
+	build := func() []Participant {
+		items := []Participant{host(4_000_000), viewer("R1", 2, 5_000_000)}
+		for i := 0; i < 14; i++ {
+			items = append(items, viewer("v"+string(rune('a'+i)), i+3, 5_000_000))
+		}
+		return parts(items...)
+	}
+	opts3 := Options{StreamBps: 2_000_000, MaxDepth: 3}
+	opts4 := Options{StreamBps: 2_000_000, MaxDepth: 4}
+
+	p3 := Assign("host", build(), opts3)
+	p4 := Assign("host", build(), opts4)
+
+	t.Logf("MaxDepth=3: 已安置=%d 未安置=%d FreeSlots=%d GateSlots=%d",
+		len(p3.Assignments), len(p3.Unassigned), p3.FreeSlots, p3.GateSlots)
+	t.Logf("MaxDepth=4: 已安置=%d 未安置=%d FreeSlots=%d GateSlots=%d",
+		len(p4.Assignments), len(p4.Unassigned), p4.FreeSlots, p4.GateSlots)
+
+	if len(p4.Assignments) <= len(p3.Assignments) {
+		t.Fatalf("第 4 层本应换到更多安置名额（这正是代价所在）：depth3=%d depth4=%d",
+			len(p3.Assignments), len(p4.Assignments))
 	}
 }

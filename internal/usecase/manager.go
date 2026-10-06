@@ -49,6 +49,17 @@ func NewManager(cfg *config.Config, bus Broadcaster) *Manager {
 	return &Manager{cfg: cfg, bus: bus, rooms: make(map[string]*Room)}
 }
 
+// roomMaxDepth 返回新建房间应使用的分发树深度上限（PR_MAX_DEPTH → RoomConfig.MaxDepth）。
+//
+// 配置为 0（例如测试里手搓的 Config）时退回算法默认值 —— 与 Options.withDefaults 同语义：
+// "没配"和"配成 0"都不会把树的深度上限变成 0（那会让除主播外一个人都放不下）。
+func (m *Manager) roomMaxDepth() int {
+	if m.cfg.Room.MaxDepth <= 0 {
+		return DefaultMaxDepth
+	}
+	return m.cfg.Room.MaxDepth
+}
+
 // Create 创建房间；roomID 留空时自动生成 6 位房间码。
 // 房间在主播进房前就已存在，这样观众只会拿到 ROOM_NOT_READY 而不是 ROOM_NOT_FOUND。
 func (m *Manager) Create(roomID, password string, streamBps int64) (*Room, error) {
@@ -75,12 +86,14 @@ func (m *Manager) Create(roomID, password string, streamBps int64) (*Room, error
 		Password:     password,
 		StreamBps:    streamBps,
 		CreatedAt:    time.Now(),
+		MaxDepth:     m.roomMaxDepth(),
 		members:      make(map[string]*Member),
 		avoidPrimary: make(map[string]string),
 		lastPlayback: model.PlaybackState{Paused: true, Rate: 1},
 	}
 	m.rooms[roomID] = r
-	log.Printf("room %s: 已创建（密码保护=%t，码率估计=%d bps）", roomID, password != "", streamBps)
+	log.Printf("room %s: 已创建（密码保护=%t，码率估计=%d bps，深度上限=%d）",
+		roomID, password != "", streamBps, r.MaxDepth)
 
 	return r, nil
 }
@@ -503,6 +516,7 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 	previous := r.plan
 	plan := Assign(r.HostID, r.participantsLocked(), Options{
 		StreamBps:           r.StreamBps,
+		MaxDepth:            r.maxDepth(),
 		PreviousDistributor: previous.DistributorID,
 	})
 	r.plan = plan
@@ -532,7 +546,7 @@ func (m *Manager) ReassignTopology(roomID string, force bool) {
 			Mode:          string(plan.Mode),
 			DistributorID: plan.DistributorID,
 			Reason:        plan.Reason,
-			MaxDepth:      DefaultMaxDepth,
+			MaxDepth:      r.maxDepth(),
 		}
 		outbound = append(outbound, model.Envelope{
 			Type:     model.TypeParentAssignment,

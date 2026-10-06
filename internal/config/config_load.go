@@ -14,7 +14,9 @@ const (
 	envMaxMembers       = "PR_MAX_MEMBERS"
 	envDefaultStreamBps = "PR_DEFAULT_STREAM_BPS"
 	// envRoomHostGrace 是主播断线宽限期，接受 45s / 2m 这类 Go 时长字符串。
-	envRoomHostGrace  = "PR_ROOM_HOST_GRACE"
+	envRoomHostGrace = "PR_ROOM_HOST_GRACE"
+	// envRoomMaxDepth 是分发树深度上限。
+	envRoomMaxDepth   = "PR_MAX_DEPTH"
 	envSTUNURLs       = "PR_STUN_URLS"
 	envAllowedOrigins = "PR_ALLOWED_ORIGINS"
 
@@ -116,6 +118,20 @@ const (
 	MaxHostGrace     = 10 * time.Minute
 )
 
+// 分发树深度上限（PR_MAX_DEPTH）。
+//
+// DefaultRoomMaxDepth = 3：产品目标为「延迟与卡顿优先」。每跳中继实测增加 58–78ms
+// 端到端延迟（docs/ALGORITHM.md §2.1），4 跳最坏再叠约 300ms。
+//
+// MinRoomMaxDepth = 1 与 MaxRoomMaxDepth = 6 是**允许范围**，不是推荐值：
+// 1 表示所有观众直连主播（只允许 K0 ≥ 人数时才成立，超出的人会进 Unassigned）；
+// 6 之上单链退化（SPEC §6.2 硬约束 3）的延迟已经比"降码率 / 减少人数"更贵。
+const (
+	DefaultRoomMaxDepth = 3
+	MinRoomMaxDepth     = 1
+	MaxRoomMaxDepth     = 6
+)
+
 // Default 返回面向本机开发的默认配置。
 // 注意：服务端不传输任何视频字节，这里的 DefaultStreamBps 只用于容量预判。
 func Default() *Config {
@@ -126,6 +142,7 @@ func Default() *Config {
 			DefaultStreamBps: 2_000_000,
 			SafetyFactor:     0.8,
 			HostGrace:        DefaultHostGrace,
+			MaxDepth:         DefaultRoomMaxDepth,
 		},
 		Signal: SignalConfig{
 			WriteTimeout: 10 * time.Second,
@@ -260,9 +277,10 @@ func applyStaticEnv(sc *StaticConfig) error {
 	return nil
 }
 
-// applyRoomEnv 应用房间生命周期的环境变量覆盖（目前只有 PR_ROOM_HOST_GRACE）。
+// applyRoomEnv 应用房间生命周期的环境变量覆盖（PR_ROOM_HOST_GRACE、PR_MAX_DEPTH）。
 // 与其它配置一致：非法取值直接报错，不做静默回退 —— 宽限期写错会让"主播掉线"
-// 要么等于立刻销毁房间（0），要么等于房间几乎不回收（>10m），都必须立刻可见。
+// 要么等于立刻销毁房间（0），要么等于房间几乎不回收（>10m），都必须立刻可见；
+// 深度写错则会让"延迟预算"或"房间容量"悄悄换一个量级。
 func applyRoomEnv(rc *RoomConfig) error {
 	if v := os.Getenv(envRoomHostGrace); v != "" {
 		d, err := time.ParseDuration(v)
@@ -273,6 +291,14 @@ func applyRoomEnv(rc *RoomConfig) error {
 			return fmt.Errorf("config: %s 必须落在 (0, %s] 区间, got %q", envRoomHostGrace, MaxHostGrace, v)
 		}
 		rc.HostGrace = d
+	}
+	if v := os.Getenv(envRoomMaxDepth); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < MinRoomMaxDepth || n > MaxRoomMaxDepth {
+			return fmt.Errorf("config: %s 必须是 [%d,%d] 区间内的整数, got %q",
+				envRoomMaxDepth, MinRoomMaxDepth, MaxRoomMaxDepth, v)
+		}
+		rc.MaxDepth = n
 	}
 	return nil
 }

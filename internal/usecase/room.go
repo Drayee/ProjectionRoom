@@ -83,7 +83,7 @@ func (m *Member) info() model.MemberInfo {
 
 // Room 的并发保护：members / order / HostID / Seq / lastPlayback / MediaIndex
 // 与实测度量、主播离线宽限期状态（hostOffline / hostGraceTimer / closed）的所有读写都必须持 mu；
-// 只读字段（ID/CreatedAt/Password）构造后不再变更。
+// 只读字段（ID/CreatedAt/Password/MaxDepth）构造后不再变更。
 type Room struct {
 	mu sync.Mutex
 
@@ -94,6 +94,10 @@ type Room struct {
 	HostID string
 	// StreamBps 是容量模型的码率输入：主播发布索引前用配置估计值，之后用索引里的实测码率。
 	StreamBps int64
+	// MaxDepth 是分发树的深度上限，来自 PR_MAX_DEPTH（config.RoomConfig.MaxDepth）。
+	// 分配（Assign）与下发（parent-assignment.MaxDepth）都必须用同一个值，
+	// 否则客户端按 A 理解、服务端按 B 建树。
+	MaxDepth int
 	// MediaIndex 是主播发布的分片索引，一经设定即锁定（SPEC §8.1）。
 	MediaIndex *model.Index
 
@@ -249,6 +253,16 @@ func (r *Room) participantsLocked() []Participant {
 	return out
 }
 
+// maxDepth 返回本房间实际使用的深度上限。
+// Room.MaxDepth 由 PR_MAX_DEPTH 决定；未设置（<=0，例如直接构造 Room 的测试）时
+// 退回算法默认值，语义与 Options.withDefaults 一致。
+func (r *Room) maxDepth() int {
+	if r.MaxDepth <= 0 {
+		return DefaultMaxDepth
+	}
+	return r.MaxDepth
+}
+
 // topologyLocked 生成某个成员的拓扑下发内容（调用方需持锁）。
 func (r *Room) topologyLocked(peerID string) *model.TopologyAssignment {
 	a, ok := r.plan.Assignments[peerID]
@@ -264,7 +278,7 @@ func (r *Room) topologyLocked(peerID string) *model.TopologyAssignment {
 		Mode:          string(r.plan.Mode),
 		DistributorID: r.plan.DistributorID,
 		Reason:        r.plan.Reason,
-		MaxDepth:      DefaultMaxDepth,
+		MaxDepth:      r.maxDepth(),
 	}
 }
 

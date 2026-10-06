@@ -59,6 +59,14 @@ type RoomConfig struct {
 	// 只会拿到 ROOM_NOT_FOUND，房间码彻底作废、观众全掉。
 	// 宽限期内房间只保留元数据（几 KB），主播凭同一房间码 + 密码重连即可恢复。
 	HostGrace time.Duration
+	// MaxDepth 是分发树的深度上限（PR_MAX_DEPTH，默认 3，允许 [1,6]）。
+	//
+	// 为什么默认从 4 收到 3：产品目标已明确为「延迟与卡顿优先」。
+	// 每跳中继实测给端到端多加 58–78ms（docs/ALGORITHM.md §2.1），4 跳最坏再叠 ~300ms，
+	// 而多出来的那一层在十几人的房间里很少真的换来容量。深度与容量是对价关系，
+	// 所以留成配置项：需要更大的房间时显式抬高，而不是默认让所有人替少数场景买单。
+	// 分配侧的兜底常量是 usecase.DefaultMaxDepth，两者必须一致。
+	MaxDepth int
 }
 
 // SignalConfig 控制 WebSocket 信令层的超时与限额。

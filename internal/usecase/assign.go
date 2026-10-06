@@ -7,7 +7,35 @@ import (
 )
 
 // DefaultMaxDepth 是拓扑深度上限（SPEC §6.1）：限制端到端延迟与故障半径。
-const DefaultMaxDepth = 4
+//
+// 为什么是 3 而不是原来的 4：产品目标已经明确为「延迟与卡顿优先、观众跨运营商」。
+// 每跳中继实测给端到端额外加上 58–78ms（docs/ALGORITHM.md §2.1 的实测表，
+// 深度 1/2/3 偏差 max 78/58/74ms），4 跳最坏再叠约 300ms —— 那已经落在
+// 「能感觉到的卡顿」区间里，而第 4 层换来的容量在真机房间（十几人）里通常用不满。
+//
+// 只有一个数字为默认值：服务器侧由 config.RoomConfig.MaxDepth 承载（PR_MAX_DEPTH，
+// 范围 [1,6]），这里保留同名兜底是为了让「直接调用 Assign」与「走服务器」得到同一棵树；
+// 两者一致性由 TestDefaultMaxDepthMatchesConfigDefault 守住。
+const DefaultMaxDepth = 3
+
+// 父节点评分的三个权重（SPEC §6.5），和为 1。
+//
+// 为什么 RTT 拿最高权重（0.5）：目标是延迟与卡顿优先，而跨运营商正是 RTT 方差最大的
+// 场景 —— 同一层里 30ms 与 180ms 的父节点，决定的是起播快慢与追帧能否追上；
+// 余量再多也补不回这 150ms（余量只影响「还能不能再多挂一个人」）。
+//
+// 为什么余量仍然保留 0.25、并且额外保留一条硬排除（spare() <= 0 直接出局）：
+// 只按 RTT 排序会把新节点持续挂到同一个最快的父节点上，直到把它压垮 ——
+// 它自己的 RTT 会立刻变差，反过来把整棵子树拖成卡顿。权重负责「偏好」，
+// 硬排除负责「不许越界」，两者分工不同、缺一不可。
+//
+// 为什么稳定性排第二（0.25）：RTT 相近时，「会不会掉线」比「还剩几个位」更值钱 ——
+// 重挂载本身就是一次可感知的卡顿。
+const (
+	weightRTT       = 0.50
+	weightStability = 0.25
+	weightSpare     = 0.25
+)
 
 // DefaultMaxBackups 是每个节点的备用父数量上限（SPEC §6.1）。
 const DefaultMaxBackups = 2
@@ -110,9 +138,9 @@ func (n *allocNode) spare() int { return n.slots - n.used }
 
 // score 在同深度候选之间比较"谁更适合当父节点"。
 //
-// 权重向余量倾斜（SPEC §6.5 把 SpareCapacityRatio 放到最高权重）：
-// 只看速度的评分会把新节点持续挂到同一个最快的父节点上，直到把它压垮 ——
-// 那正是"一个节点拖慢所有节点"的成因。
+// 权重顺序 = 优先级顺序：RTT（延迟与卡顿优先）> 稳定性 > 余量。
+// 形状 1/(1+rtt/100)（100ms → 0.5）**保持原样**：它是单调有界映射，
+// 换成别的形状等于同时改变"从多少 ms 起算差"，那是另一次行为变更，不混在这轮里。
 func (n *allocNode) score() float64 {
 	if n.slots <= 0 {
 		return 0
@@ -123,7 +151,7 @@ func (n *allocNode) score() float64 {
 	if stability <= 0 {
 		stability = 1
 	}
-	return spareRatio*0.5 + rttScore*0.3 + stability*0.2
+	return rttScore*weightRTT + stability*weightStability + spareRatio*weightSpare
 }
 
 // Assign 计算整棵分发树。
@@ -131,7 +159,7 @@ func (n *allocNode) score() float64 {
 // 规则（SPEC §6.1–§6.3）：
 //   - 主播的上行决定 K0；K0 ≥ 2 用扇出模式，K0 ≤ 1 用单链分发模式；
 //   - 单链模式先选出分发节点 D（按实测上行），主播只连 D 一个，其余人挂在 D 的子树下；
-//   - 分配是广度优先 + 最大余量优先，深度不超过 MaxDepth；
+//   - 分配是广度优先 + 同层按 score（RTT 优先）择父，深度不超过 MaxDepth；
 //   - 已经挂在某个父节点下、且该父节点仍有余量时保持不变（避免抖动）。
 func Assign(hostID string, participants []Participant, opts Options) Plan {
 	opts = opts.withDefaults()
@@ -348,7 +376,7 @@ func Assign(hostID string, participants []Participant, opts Options) Plan {
 
 // chooseParent 挑选父节点，规则是"先浅后优"：
 //  1. 在所有还有余量、且深度允许的节点里取**深度最小**的一层 —— 树越浅，跳数与故障半径越小；
-//  2. 同一层内再按 score 选（余量占比优先，其次 RTT、稳定性）；
+//  2. 同一层内再按 score 选（RTT 优先，其次稳定性、余量占比）；
 //  3. 已经挂着的父节点只要还有余量就继续用 —— 重挂载的代价远高于收益。
 //
 // 例外是 AvoidPrimary（卡顿换路的软排除）：它连"继续用现任"的捷径都取消，
