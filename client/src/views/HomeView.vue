@@ -43,7 +43,9 @@ async function createRoom() {
 
     const data = (await resp.json()) as CreateRoomResponse
     localStorage.setItem(NAME_KEY, name)
-    store.setIceServers(data.iceServers ?? [])
+    // 响应里除了 iceServers 还有 ttlSeconds/expiresAt/probe：一起存下来，
+    // 进房后的 /api/ice 才能正确判断"列表到底变没变"（变了才 setConfiguration + ICE restart）。
+    store.applyIceResponse(data, 'POST /api/rooms')
     remember(data.roomId, createPassword.value, 'host')
     await router.push(`/room/${data.roomId}`)
   } catch (err) {

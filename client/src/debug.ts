@@ -1,4 +1,5 @@
 import { useRoomStore } from './stores/room'
+import { classifyAddress, isCrossNetworkUsable } from './utils/iceCandidate'
 
 /**
  * 给自动化验收用的只读快照钩子（window.__pr）。
@@ -120,6 +121,57 @@ export interface DebugSnapshot {
     sourceBufferCount: number
     hasObjectUrl: boolean
   }
+  /**
+   * ICE 配置缓存（打洞优化 ①②）：TTL、到期时刻、刷新次数、最近一次刷新原因与探测分数。
+   * `restartCount` 是"列表真的变了才重启 ICE"的反面证据：列表没变时它必须不增长。
+   */
+  ice: {
+    ttlSeconds: number
+    expiresAt: number
+    refreshCount: number
+    changeCount: number
+    failedRefreshCount: number
+    lastRefreshReason: string
+    lastRefreshAt: number
+    nextRefreshAt: number
+    refreshMarginSec: number
+    lastError: string
+    serverUrls: string[]
+    scores: Array<{ url: string; rttMs: number; ok: boolean; score: number; selected?: boolean }>
+    restartCount: number
+    restartLog: string[]
+    /** 我是发起方（offer 由我发）的连接数：ICE restart 只会发生在它们身上。 */
+    initiatedPeers: number
+  }
+  /** IPv6 直连的地址族诊断（"IPv6 直连有没有生效"靠它验证）。 */
+  ipv6: {
+    hasGlobalLocal: boolean
+    families: { v4: number; v6Global: number; v6LinkLocal: number; v6Ula: number; unknown: number }
+    remoteFamilies: { v4: number; v6Global: number; v6LinkLocal: number; v6Ula: number; unknown: number }
+    filtered: number
+    filteredSamples: string[]
+    samples: string[]
+    /** host 候选地址是否被 mDNS 混淆藏起来（解释了选中候选对为什么是 unknown）。 */
+    mdnsHidden: boolean
+    /** 独立采样（临时 PC）看到的候选：真实连接秒连时会漏掉全局 IPv6，靠它兜底。 */
+    sampler: {
+      runs: number
+      families: { v4: number; v6Global: number; v6LinkLocal: number; v6Ula: number; unknown: number }
+      samples: string[]
+    }
+  }
+  /** 选中候选对：null = 还没建立成功任何一对候选。 */
+  selectedPair: {
+    peerId: string
+    localType: string
+    remoteType: string
+    family: string
+    remoteFamily: string
+    protocol: string
+    localAddress: string
+    remoteAddress: string
+    rttMs: number
+  } | null
   errors: {
     last: string
     media: string
@@ -212,6 +264,14 @@ export function installDebugHook(): void {
           roomClosed: store.roomClosed,
         },
         player: store.playerDebugState(),
+        ice: {
+          ...store.iceDiagnostics(),
+          restartCount: store.iceRestartCount,
+          restartLog: [...store.iceRestartLog],
+          initiatedPeers: store.initiatedPeerCount(),
+        },
+        ipv6: store.ipv6Diagnostics(),
+        selectedPair: store.selectedPairInfo(),
         topology: {
           mode: store.topologyMode,
           depth: store.topologyDepth,
@@ -245,6 +305,13 @@ export function installDebugHook(): void {
      * 用于确定性复现"断线超过宽限期"。
      */
     holdSignaling: (hold: boolean) => store.holdSignaling(hold),
+    /**
+     * 验收钩子：把候选地址分类器暴露出来。
+     * 为什么要暴露纯函数：链路本地/ULA 候选在一台有公网 IPv6 的机器上**根本收集不到**，
+     * 只靠真实候选无法证明"过滤判据生效"。分类器是确定性函数，可以直接喂样本断言。
+     */
+    iceClassify: (address: string) => classifyAddress(address),
+    iceCrossNetworkUsable: (address: string) => isCrossNetworkUsable(classifyAddress(address)),
   }
 
   ;(window as unknown as { __pr?: typeof api }).__pr = api

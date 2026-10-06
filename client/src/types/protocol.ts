@@ -170,7 +170,24 @@ export interface PeerControl {
   parentOffsetMs?: number
 }
 
-export interface CreateRoomResponse {
+/**
+ * ICE 部分（`POST /api/rooms` 与 `GET /api/ice` 同构，纯加法扩展）。
+ *
+ * 服务端每约 60 秒按探测结果重算下发的 STUN 列表（最多 4 条，Google/Cloudflare 为粘性条目），
+ * 所以客户端必须按 ttlSeconds 周期重拉；`probe.scores` 是这次下发的依据（可观测、可复现）。
+ */
+export interface IceResponsePart {
+  iceServers?: RTCIceServer[]
+  ttlSeconds?: number
+  expiresAt?: number
+  probe?: {
+    probedAt?: number
+    intervalSeconds?: number
+    scores?: Array<{ url: string; rttMs: number; ok: boolean; score: number; selected?: boolean }>
+  }
+}
+
+export interface CreateRoomResponse extends IceResponsePart {
   roomId: string
   iceServers: RTCIceServer[]
   capacity: Capacity

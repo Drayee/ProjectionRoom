@@ -119,6 +119,57 @@ const runtimeText = computed(
     ` · p95 交付 ${store.p95DeliveryMs}ms · 跳转重灌 ${store.syncResets} 次 · 丢弃非主父进度 ${store.rejectedProgress} 条`,
 )
 
+/**
+ * ICE 配置（TTL 缓存 + 刷新）。
+ * 重点是"列表变了才连"：刷新次数会随 TTL 一直涨，而重启次数只应该在列表真的变了时才涨。
+ */
+const iceText = computed(() => {
+  const ice = store.iceDiagnostics()
+  if (ice.refreshCount === 0) return '尚未拉到 ICE 配置（等待 /api/ice）'
+  const scores = ice.scores
+    .filter((s) => s.ok)
+    .slice(0, 4)
+    .map((s) => `${hostOf(s.url)} ${s.rttMs}ms${s.selected ? '*' : ''}`)
+    .join(' · ')
+  return (
+    `TTL ${ice.ttlSeconds}s（余量 ${ice.refreshMarginSec}s）· 距到期 ${store.iceSecondsUntilExpiry()}s` +
+    ` · 刷新 ${ice.refreshCount} 次（列表变化 ${ice.changeCount} · ICE 重启 ${store.iceRestartCount}）` +
+    ` · 最近 ${ice.lastRefreshReason || '—'}` +
+    (ice.failedRefreshCount > 0 ? ` · 刷新失败 ${ice.failedRefreshCount}` : '') +
+    (scores ? ` · 探测 ${scores}` : '')
+  )
+})
+
+/** IPv6 直连的地址族分布：全局 IPv6 有没有真的拿到、有没有候选被判为不可跨网而没发出去。 */
+const ipv6Text = computed(() => {
+  const state = store.ipv6Diagnostics()
+  const f = state.families
+  const r = state.remoteFamilies
+  const s = state.sampler.families
+  const verdict = state.hasGlobalLocal ? '全局 IPv6 可用' : '没有全局 IPv6（不按 IPv6 直连对待）'
+  return (
+    `${verdict} · 本机候选 IPv4 ${f.v4} / IPv6 全局 ${f.v6Global} / 链路本地 ${f.v6LinkLocal} / ULA ${f.v6Ula}` +
+    ` · 对端 IPv4 ${r.v4} / IPv6 全局 ${r.v6Global}` +
+    ` · 已挡下不可跨网候选 ${state.filtered} 条` +
+    ` · 独立采样 ${state.sampler.runs} 次（全局 ${s.v6Global} / 链路本地 ${s.v6LinkLocal}）` +
+    (state.mdnsHidden ? ' · host 地址被 mDNS 隐藏（看 srflx）' : '')
+  )
+})
+
+/** 选中候选对：`family=v6-global` 才是"IPv6 直连真的生效了"。 */
+const selectedPairText = computed(() => {
+  const pair = store.selectedPairInfo()
+  if (!pair) return '尚未建立成功的候选对（等 P2P 连通）'
+  return (
+    `${pair.family || 'unknown'} · ${pair.localType} ${pair.localAddress || '（地址不可见）'}` +
+    ` ↔ ${pair.remoteType} ${pair.remoteAddress || '（地址不可见）'} · ${pair.protocol} · rtt ${pair.rttMs}ms`
+  )
+})
+
+function hostOf(url: string): string {
+  return url.replace(/^[a-z0-9+.-]+:\/\//i, '').split('/')[0] ?? url
+}
+
 /** 复制出去的纯文本报告：按"先状态、后日志"排，日志保持时间顺序。 */
 const report = computed(() => {
   const lines: string[] = []
@@ -134,6 +185,12 @@ const report = computed(() => {
   lines.push(`计数: ${runtimeText.value}`)
   lines.push(`拓扑: ${topologyText.value}`)
   lines.push(`分配依据: ${topologyReason.value}`)
+  lines.push(`ICE: ${iceText.value}`)
+  lines.push(`IPv6: ${ipv6Text.value}`)
+  lines.push(`选中候选对: ${selectedPairText.value}`)
+  for (const line of store.iceRestartLog) {
+    lines.push(`  ICE restart ${line}`)
+  }
   for (const peer of peers.value) {
     lines.push(
       `  节点 ${memberName(peer.id)}(${peer.id.slice(0, 8)}) 连接=${peer.connection} 通道=${peer.channelOpen ? '开' : '关'} rtt=${peer.rttMs}ms`,
@@ -213,6 +270,15 @@ onBeforeUnmount(() => {
 
         <span class="k">分配依据</span>
         <span class="v">{{ topologyReason }}</span>
+
+        <span class="k">ICE 配置</span>
+        <span class="v" data-testid="diag-ice">{{ iceText }}</span>
+
+        <span class="k">IPv6 直连</span>
+        <span class="v" data-testid="diag-ipv6">{{ ipv6Text }}</span>
+
+        <span class="k">选中候选对</span>
+        <span class="v" data-testid="diag-selected-pair">{{ selectedPairText }}</span>
 
         <span class="k">节点</span>
         <span class="v">

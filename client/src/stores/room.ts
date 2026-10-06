@@ -7,6 +7,7 @@ import { useChunkRequester } from '../composables/useChunkRequester'
 import { useChunkPlayer } from '../composables/useChunkPlayer'
 import { useSyncClock } from '../composables/useSyncClock'
 import { useWebRTC } from '../composables/useWebRTC'
+import { useIceConfig, type IcePayload, type IceSnapshot } from '../composables/useIceConfig'
 import { useTopology } from '../composables/useTopology'
 import { segmentIndexAt } from '../types/media'
 import { KIND_INIT, KIND_MEDIA, encodeControl, type DecodedMedia } from '../types/codec'
@@ -152,8 +153,36 @@ export const useRoomStore = defineStore('room', () => {
   const hostId = ref('')
   const lastError = ref('')
   const roomClosed = ref('')
-  const iceServers = ref<RTCIceServer[]>([])
   const needsGesture = ref(false)
+
+  /**
+   * ICE 配置的 TTL 缓存与刷新（打洞优化 ①②）。
+   *
+   * 三件事必须一起成立，少一件都是"看起来优化了、实际没生效"：
+   *   - 按服务端给的 TTL 周期重拉（列表每约 60s 会随探测结果变）；
+   *   - 列表没变只续期，**不碰**正在跑的连接；
+   *   - 列表变了先 setConfiguration，再**只让发起方**（下游子节点）ICE restart。
+   * 父节点侧的"用最新列表"由 applyIceConfiguration（推到所有 PC）+ 应答前的
+   * setConfiguration 保证，它绝不主动 restart。
+   */
+  const iceConfig = useIceConfig({
+    fetchPayload: fetchIcePayload,
+    onChanged: (servers, info) => {
+      const applied = rtc.applyIceConfiguration(servers)
+      noteLifecycle(
+        `ICE 列表变化（第 ${iceConfig.changeCount.value} 次）：已更新 ${applied} 个 PeerConnection` +
+          (info.urlsChanged ? '，随后由发起方重启 ICE' : '（仅凭证变化，不重启 ICE）'),
+      )
+      // 拿到列表就顺手采一次本机候选：真实连接可能靠 mDNS host 候选秒连、
+      // 导致 Chrome 提前结束收集，"本机有没有可跨网的全局 IPv6"就再也看不出来。
+      void rtc.sampleLocalCandidates(servers)
+      if (info.urlsChanged) {
+        safe('ICE restart', restartIceForNewList())
+      }
+    },
+    log: (text) => noteLifecycle(text),
+  })
+  const iceServers = iceConfig.servers
 
   // ---------- 断线恢复（缺陷 1：主播断线不再等于房间永久销毁）----------
   /** 主播离线等待态（观众侧）：已进房、且成员表里没有 role==='host' 的成员。 */
@@ -722,11 +751,9 @@ export const useRoomStore = defineStore('room', () => {
             // 409 = 房间已存在（ErrRoomExists），与 200 等价地视为"房间已就绪"。
             noteLifecycle(`房间 ${creds.roomId} 已就绪（HTTP ${resp.status}），重新进房`)
             rebuildState.value = 'idle'
-            const data = (await resp.json().catch(() => null)) as
-              | { iceServers?: RTCIceServer[] }
-              | null
+            const data = (await resp.json().catch(() => null)) as IcePayload | null
             // 新房间的响应里有 ICE 配置（409 时没有）：拿到就更新，拿不到沿用旧的。
-            if (data?.iceServers?.length) setIceServers(data.iceServers)
+            if (data?.iceServers?.length) applyIceResponse(data, 'POST /api/rooms（重建）')
             rejoinNow()
             return
           }
@@ -1750,26 +1777,35 @@ export const useRoomStore = defineStore('room', () => {
 
   // ---------- 对外动作 ----------
   /**
-   * 拉取服务端的 ICE 配置（STUN/TURN）。
+   * 拉一次 `/api/ice`。
    *
-   * 为什么必须主动拉：`POST /api/rooms` 的响应里带 iceServers，但**直接通过分享链接进房**
-   * 的人不会经过那个调用，`joined` 信封里也没有这个字段 —— 结果 PeerConnection 用
-   * `{iceServers: []}` 构造，**配好的 TURN 永远不生效**，对称 NAT 下就是"进得去房间、
-   * 一直缓冲 0 片"。这条是实测抓到的（test/script/verify-ice.mjs）。
-   * 拿不到也不能挡住进房：退化成只用 host candidate，局域网/本机仍可用。
+   * 为什么必须主动拉：`POST /api/rooms` 的响应里带 ICE 配置，但**直接通过分享链接进房**
+   * 的人不会经过那个调用，`joined` 信封里也没有这些字段 —— 结果 PeerConnection 用
+   * `{iceServers: []}` 构造，配好的 STUN 永远不生效，对称 NAT 下就是"进得去房间、
+   * 一直缓冲 0 片"（test/script/verify-ice.mjs 抓到的）。这条是实测结论，不是推测。
+   * 时序由 useIceConfig 负责：失败退避重试，绝不挡住进房。
    */
-  async function loadIceServers(): Promise<void> {
-    if (iceServers.value.length > 0) return
-    try {
-      const resp = await fetch('/api/ice')
-      if (!resp.ok) return
-      const body = (await resp.json()) as { iceServers?: RTCIceServer[] }
-      if (Array.isArray(body.iceServers) && body.iceServers.length > 0) {
-        setIceServers(body.iceServers)
-      }
-    } catch {
-      // 忽略：没有 ICE 配置时 WebRTC 仍可在本机/局域网直连
+  async function fetchIcePayload(): Promise<IcePayload> {
+    const resp = await fetch('/api/ice')
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`)
     }
+    return (await resp.json()) as IcePayload
+  }
+
+  /**
+   * ICE restart：列表真的变了才走这里，而且**只有发起方**（下游子节点）会真的发出新 offer。
+   * 判定发起方由 useWebRTC 按"这条连接是不是我 connect() 出去的"来做，
+   * 所以这里不需要（也不应该）按角色判断。
+   */
+  async function restartIceForNewList(): Promise<void> {
+    const restarted = await rtc.restartInitiators('ICE 列表变化')
+    noteLifecycle(`ICE restart：${restarted} 条发起方连接，父节点侧只换配置不重启`)
+  }
+
+  /** 把一份 ICE 响应（`POST /api/rooms` 或 `/api/ice`）喂进缓存。 */
+  function applyIceResponse(payload: IcePayload, label: string): void {
+    iceConfig.seed(payload, label)
   }
 
   function enterRoom(creds: JoinCredentials) {
@@ -1789,7 +1825,11 @@ export const useRoomStore = defineStore('room', () => {
     hostJoinedOnce = false
 
     // 先把 ICE 配置拿到手再连：PC 是在 connectTo 时构造的，晚拿到就白建了。
-    safe('拉取 ICE 配置', loadIceServers())
+    // start() 会立刻拉一次并按 TTL 排下一次刷新，离开房间时由 stop() 收掉。
+    iceConfig.start()
+    // 主播页此前可能已经从 POST /api/rooms 拿到过列表（seed）：那时 onChanged 已经采过一次，
+    // 这里的判空是为了"没有列表就不空采"，采样本身有并发保护。
+    void rtc.sampleLocalCandidates(iceConfig.servers.value)
 
     signaling.connect(signalUrl(creds))
   }
@@ -1812,6 +1852,9 @@ export const useRoomStore = defineStore('room', () => {
     player.detach()
     chunkStore.reset()
     media.reset()
+    // ICE 刷新定时器必须在这里停掉：否则切房之后残留的定时器会继续打旧房间的 /api/ice，
+    // 并把旧房间的列表 setConfiguration 到新房间的连接上。
+    iceConfig.stop()
     requiredSegment = null
     nextAppend = 1
     signaling.close()
@@ -1980,8 +2023,26 @@ export const useRoomStore = defineStore('room', () => {
     await tryPlay()
   }
 
+  /**
+   * 兼容旧入口：只喂 iceServers（没有 TTL/探测信息时）。
+   * 新代码请用 applyIceResponse，把 ttlSeconds/expiresAt/probe 一起存下来。
+   */
   function setIceServers(servers: RTCIceServer[]) {
-    iceServers.value = servers
+    iceConfig.seed({ iceServers: servers }, 'setIceServers')
+  }
+
+  /** ICE 配置缓存的诊断快照（诊断抽屉、验收脚本、报告都用它）。 */
+  function iceDiagnostics(): IceSnapshot {
+    return iceConfig.snapshot()
+  }
+
+  /** IPv6 直连的地址族诊断：全局 IPv6 是否真的拿到、有没有候选被过滤掉。 */
+  function ipv6Diagnostics() {
+    return rtc.ipv6State()
+  }
+
+  function selectedPairInfo() {
+    return rtc.selectedPair.value
   }
 
   return {
@@ -2060,6 +2121,18 @@ export const useRoomStore = defineStore('room', () => {
     lastDistributorChange,
     peers: rtc.peers,
     uploadCapacityBps,
+    // ---- ICE 配置 TTL 与 IPv6 直连（打洞优化 ②③）----
+    iceServerUrls: () => iceConfig.snapshot().serverUrls,
+    iceDiagnostics,
+    ipv6Diagnostics,
+    selectedPairInfo,
+    iceRestartCount: rtc.restartCount,
+    iceRestartLog: rtc.restartLog,
+    initiatedPeerCount: rtc.initiatedCount,
+    iceRefreshCount: iceConfig.refreshCount,
+    iceChangeCount: iceConfig.changeCount,
+    iceLastRefreshReason: iceConfig.lastRefreshReason,
+    iceSecondsUntilExpiry: () => iceConfig.secondsUntilExpiry(),
     delivered: requester.delivered,
     timedOut: requester.timedOut,
     failedRequests: requester.failed,
@@ -2073,6 +2146,7 @@ export const useRoomStore = defineStore('room', () => {
     publishMediaFiles,
     setVideoElement,
     setIceServers,
+    applyIceResponse,
     sendChat,
     play,
     pause,
