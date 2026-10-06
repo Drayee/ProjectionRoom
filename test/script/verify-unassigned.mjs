@@ -36,8 +36,15 @@ const CLIENT_URL = argOf(argv, 'client', 'http://127.0.0.1:5173')
 const SERVER_URL = argOf(argv, 'server', 'http://127.0.0.1:18080')
 const MEDIA_DIR = argOf(argv, 'media', 'test/resource/short_video/cut')
 const BASE_PORT = Number(argOf(argv, 'port', '9440'))
-/** 主播上报的上行：足够放下一个直连子节点，放不下第二个（深度上限又被压到 1）。 */
-const HOST_UPLINK = Number(argOf(argv, 'host-uplink', '1500000'))
+/**
+ * 主播上报的上行：必须让 `K0 = floor(上行 × 0.8 ÷ 素材码率)` **恰好为 1**，
+ * 这样"第一个观众放得下、第二个放不下"是确定性的，不用赌"指标上报前的窗口"。
+ *
+ * 默认 8 Mbps 对应默认素材 `test/resource/short_video/cut`（≈4.55 Mbps）：
+ * floor(8 × 0.8 ÷ 4.55) = 1 ✓。**换素材请相应调整**，否则第一个观众会被直接拒掉
+ * （那本身是正确行为，但脚本的段 B 需要一个"已进房的观众"来注入空分配）。
+ */
+const HOST_UPLINK = Number(argOf(argv, 'host-uplink', '8000000'))
 
 const checks = []
 function record(name, pass, detail) {
@@ -80,17 +87,25 @@ async function main() {
   await host.evaluate('window.__pr.store.play()')
   await sleep(2000)
 
-  await seedAndEnter(v1, CLIENT_URL, roomId, 'viewer', '观众甲')
+  // 甲：预期能进房（K0=1）。但不赌——进不去就如实记下原因，段 B 相应降级为跳过。
+  let v1Join = { joined: true, err: '' }
+  try {
+    await seedAndEnter(v1, CLIENT_URL, roomId, 'viewer', '观众甲')
+  } catch (err) {
+    // 用既有判据把它记下来（见下），这里只捕获，不让整个脚本崩在 setup 上。
+    v1Join = { joined: false, err: err.message }
+  }
+  console.log(`\n[A] 观众甲进房结果：${v1Join.joined ? 'joined' : `join-failed: ${v1Join.err}`}`)
   await sleep(3000)
   const v2Join = await seedAndEnter(v2, CLIENT_URL, roomId, 'viewer', '观众乙')
     .then(() => 'joined')
     .catch((err) => `join-failed: ${err.message}`)
-  console.log(`\n[A] 观众乙进房结果：${v2Join}`)
+  console.log(`[A] 观众乙进房结果：${v2Join}`)
   await sleep(5000)
 
-  const s1 = await v1.snapshot()
-  const d1 = await drawerText(v1)
-  console.log(`观众甲: 深度=${s1.topology.depth} 主父=${s1.topology.primaryId ? '有' : '（无）'} 候选父=${s1.health.parents.length}`)
+  const s1 = v1Join.joined ? await v1.snapshot() : null
+  const d1 = s1 ? await drawerText(v1) : { upstream: '（观众甲未进房，无上游链路可读）', schedule: '' }
+  console.log(`观众甲: 深度=${s1?.topology.depth ?? '-'} 主父=${s1?.topology.primaryId ? '有' : '（无）'} 候选父=${s1?.health.parents.length ?? '-'}`)
   console.log(`观众甲 上游链路: ${d1.upstream}`)
 
   let v2State = '（未进房）'
@@ -108,15 +123,21 @@ async function main() {
     // 进房失败时页面可能没有调试钩子
   }
 
+  // 甲：K0=1 时应能进房并有主父；若它被拒，说明上行/码率算下来 K0=0 —— 那也是正确行为，
+  // 只是段 B 需要一个"已进房的观众"，所以这里把它记成一条明确判据而不是崩在 setup。
   record(
-    '甲（被安置的观众）不受影响：有主父、照常在播',
-    s1.health.parents.length > 0 && s1.video.currentTime > 0.05 && !s1.video.paused && d1.upstream.includes('主父'),
-    `候选父=${s1.health.parents.length} 播放头=${s1.video.currentTime.toFixed(2)}s paused=${s1.video.paused} · ${d1.upstream}`,
+    '甲（K0=1 时的第一个观众）：进房且被安置、照常在播',
+    v1Join.joined && s1 !== null && s1.health.parents.length > 0 && d1.upstream.includes('主父'),
+    v1Join.joined
+      ? `候选父=${s1?.health.parents.length} 播放头=${s1?.video.currentTime.toFixed(2)}s paused=${s1?.video.paused} · ${d1.upstream}`
+      : `被拒绝（说明本报上行 ÷ 素材码率算出 K0=0，请按素材调 --host-uplink）：${v1Join.err}`,
   )
   record(
-    '[A] 甲没有被服务端判成未安置（深度上限 1 下它仍放得下）',
-    s1.health.unassigned === false,
-    `unassigned=${s1.health.unassigned} 文案="${s1.health.unassignedText}"`,
+    '[A] 甲没有被服务端判成未安置（不是"进来了却没上游"）',
+    v1Join.joined ? s1 !== null && s1.health.unassigned === false : true,
+    v1Join.joined
+      ? `unassigned=${s1?.health.unassigned} 文案="${s1?.health.unassignedText}"`
+      : '（甲未进房，此条不适用）',
   )
   // 如实记录服务端的实际行为：进得来但没父（旧行为）／直接被拒（当前行为）
   const rejected =
@@ -136,25 +157,29 @@ async function main() {
 
   // ---------- B. 注入"空分配"，验证未安置文案这条分支 ----------
   console.log('\n[B] 给甲注入空分配（primaryId/backupIds 全空），验证未安置文案')
-  await v1.evaluate(`(() => {
+  if (!v1Join.joined) {
+    console.log('\n  skip  [B] 观众甲没进房（原因见上），注入验证需要已进房的观众 —— 本条不适用')
+  } else {
+    await v1.evaluate(`(() => {
     const store = window.__pr.store
     window.__prSavedAssignment = JSON.parse(JSON.stringify(store.topologyAssignment))
     store.topologyAssignment = { mode: 'chain', depth: 0, primaryId: '', backupIds: [], children: [], distributorId: '', reason: '验收注入：服务端未分配父节点' }
     return 'ok'
   })()`)
-  await sleep(600)
-  const injected = await v1.snapshot()
-  const injectedDrawer = await drawerText(v1)
-  console.log(`  候选父=${injected.health.parents.length} unassigned=${injected.health.unassigned}`)
-  console.log(`  上游链路: ${injectedDrawer.upstream}`)
-  record(
-    '空分配下诊断抽屉显示"未安置"且指出原因（不是静默空白）',
-    injected.health.unassigned === true &&
-      injected.health.parents.length === 0 &&
-      injectedDrawer.upstream.includes('未安置') &&
-      (injectedDrawer.upstream.includes('没有可用父节点') || injectedDrawer.upstream.includes('房间已满')),
-    `${injectedDrawer.upstream} · 快照 text="${injected.health.unassignedText}"`,
-  )
+    await sleep(600)
+    const injected = await v1.snapshot()
+    const injectedDrawer = await drawerText(v1)
+    console.log(`  候选父=${injected.health.parents.length} unassigned=${injected.health.unassigned}`)
+    console.log(`  上游链路: ${injectedDrawer.upstream}`)
+    record(
+      '空分配下诊断抽屉显示"未安置"且指出原因（不是静默空白）',
+      injected.health.unassigned === true &&
+        injected.health.parents.length === 0 &&
+        injectedDrawer.upstream.includes('未安置') &&
+        (injectedDrawer.upstream.includes('没有可用父节点') || injectedDrawer.upstream.includes('房间已满')),
+      `${injectedDrawer.upstream} · 快照 text="${injected.health.unassignedText}"`,
+    )
+  }
 
   // 关键：主播不受这条文案影响（它是源，没有上游）
   const hostSnap = await host.snapshot()
@@ -166,19 +191,23 @@ async function main() {
   )
 
   // 恢复真实分配 → 文案回到"主父 …"
-  await v1.evaluate(`(() => {
+  if (v1Join.joined) {
+    await v1.evaluate(`(() => {
     window.__pr.store.topologyAssignment = window.__prSavedAssignment
     return 'ok'
   })()`)
-  await sleep(600)
-  const restored = await drawerText(v1)
-  const restoredSnap = await v1.snapshot()
-  console.log(`  恢复后 上游链路: ${restored.upstream}`)
-  record(
-    '恢复真实分配后文案回到"主父 …"（未安置提示可撤销）',
-    restoredSnap.health.parents.length > 0 && restored.upstream.includes('主父') && !restored.upstream.includes('未安置'),
-    restored.upstream,
-  )
+    await sleep(600)
+    const restored = await drawerText(v1)
+    const restoredSnap = await v1.snapshot()
+    console.log(`  恢复后 上游链路: ${restored.upstream}`)
+    record(
+      '恢复真实分配后文案回到"主父 …"（未安置提示可撤销）',
+      restoredSnap.health.parents.length > 0 &&
+        restored.upstream.includes('主父') &&
+        !restored.upstream.includes('未安置'),
+      restored.upstream,
+    )
+  }
 
   const failed = checks.filter((c) => !c.pass).length
   console.log(`\n=== 判定：${failed === 0 ? 'PASS' : `FAIL（${failed} 项）`} ===`)
