@@ -961,6 +961,75 @@ func TestRoomMaxDepthFallsBackToDefault(t *testing.T) {
 	}
 }
 
+// TestJoinGateStopsWhenTreeIsActuallyFull 是空位口径收紧的**端到端**效果：
+// 树在深度上限处铺满后 GateSlots = 0，闸门按"现有成员数"收口，
+// 后来者拿到 ROOM_FULL（明确被拒），而不是"进得来但没有父节点"。
+//
+// **这是一次行为变更**：旧口径把最深一层的虚位也算进 GateSlots（本用例里是 4 个），
+// 于是闸门会一路放到 8 人 —— 多出来的 4 人永远拿不到 parent-assignment，
+// 前端也没有任何信号。有效座位数没变（还是 4），变的是那 4 个"只能干等"的人不再被放进来。
+func TestJoinGateStopsWhenTreeIsActuallyFull(t *testing.T) {
+	m, _ := newTestManager(t, 16)
+	m.cfg.Room.MaxDepth = 2 // 链只能铺到第 2 层
+
+	r, err := m.Create("", "", 0)
+	if err != nil {
+		t.Fatalf("创建房间失败: %v", err)
+	}
+	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+		t.Fatalf("主播进房失败: %v", err)
+	}
+	for _, id := range []string{"relay", "l1", "l2"} {
+		if err := m.Join(r.ID, id, id, model.RoleViewer, ""); err != nil {
+			t.Fatalf("%s 进房失败: %v", id, err)
+		}
+	}
+	index := sampleMediaIndex(2_000_000)
+	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
+		t.Fatalf("发布索引失败: %v", err)
+	}
+	// 主播 4 Mbps → K0=1 → 单链；relay 5 Mbps → 2 个位：host → relay → l1/l2 正好铺满 2 层。
+	if err := m.UpdateMetrics(r.ID, "host", model.Metrics{UploadCapacityBps: 4_000_000, RTTMs: 10}); err != nil {
+		t.Fatalf("主播上报失败: %v", err)
+	}
+	if err := m.UpdateMetrics(r.ID, "relay", model.Metrics{UploadCapacityBps: 5_000_000, RTTMs: 20}); err != nil {
+		t.Fatalf("relay 上报失败: %v", err)
+	}
+
+	r.mu.Lock()
+	plan := r.plan
+	limit := r.joinLimitLocked(16)
+	r.mu.Unlock()
+
+	if len(plan.Assignments) != 4 || len(plan.Unassigned) != 0 {
+		t.Fatalf("前置条件不成立：4 人应全部安置，实际 已安置=%d 未安置=%v", len(plan.Assignments), plan.Unassigned)
+	}
+	if plan.FreeSlots != 0 || plan.GateSlots != 0 {
+		t.Fatalf("铺满第 2 层后空位应为 0，实际 FreeSlots=%d GateSlots=%d", plan.FreeSlots, plan.GateSlots)
+	}
+	if limit != 4 {
+		t.Fatalf("闸门应按现有成员数收口（4），实际 %d", limit)
+	}
+
+	// 第 5 个人必须被明确拒绝，而不是进来干等。
+	if err := m.Join(r.ID, "late", "迟到观众", model.RoleViewer, ""); !errors.Is(err, ErrFull) {
+		t.Fatalf("树已满时应返回 ErrFull，实际 %v", err)
+	}
+
+	_, members, _, _, _ := r.Snapshot(16)
+	if len(members) != 4 {
+		t.Fatalf("房间人数不应变化：期望 4，实际 %d", len(members))
+	}
+	for _, mi := range members {
+		if mi.Role == model.RoleHost {
+			continue
+		}
+		if mi.PrimaryID == "" {
+			t.Fatalf("%s 进了房却没有父节点 —— 这正是旧口径「准入虚高」的病症", mi.ID)
+		}
+	}
+}
+
 // TestStallReplanIsRateLimited 覆盖换路限流：连续卡顿上报不能变成"每几秒搬一次家"。
 func TestStallReplanIsRateLimited(t *testing.T) {
 	m, bus := newTestManager(t, 16)

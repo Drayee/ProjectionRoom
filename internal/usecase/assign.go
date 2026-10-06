@@ -113,8 +113,10 @@ type Plan struct {
 	// 准入也只能退回配置里的硬上限 —— 猜出来的容量不能拿来开闸（SPEC §6.2、C15）。
 	Measured bool
 	// FreeSlots 是整棵树还空着的子节点位（含主播），按排布口径算（未实测节点按保守默认）。
+	// 只统计**还能收子节点**的节点（depth < MaxDepth）：最深一层的余量是虚位。
 	FreeSlots int
 	// GateSlots 是**只按实测容量**算出的空位，准入闸门用它。
+	// 与 FreeSlots 同口径，同样排除最深一层 —— 否则会放进安置不下的人。
 	GateSlots int
 	// Reason 说明模式与分发节点的选择依据，便于日志与前端展示。
 	Reason string
@@ -359,8 +361,17 @@ func Assign(hostID string, participants []Participant, opts Options) Plan {
 
 	// 剩余可用子节点位：FreeSlots 按排布口径（含未实测节点的保守默认），
 	// GateSlots 只认真实测容量 —— 后者才是准入闸门的依据。
+	//
+	// 两个口径都必须**排除处在最深一层的节点**：chooseParent 要求 n.depth+1 <= MaxDepth，
+	// 所以第 MaxDepth 层的节点一个子节点也收不了，它们的余量是"虚位"。
+	// 把虚位算进 FreeSlots 会让面板与日志报告不存在的容量；
+	// 算进 GateSlots 更糟 —— 准入闸门会放进一棵根本安置不下它们的树，
+	// 那些人拿不到 parent-assignment（进 Unassigned），而前端此前没有任何信号。
 	free, gate := 0, 0
 	for _, n := range nodes {
+		if n.depth >= opts.MaxDepth {
+			continue
+		}
 		if n.spare() > 0 {
 			free += n.spare()
 		}

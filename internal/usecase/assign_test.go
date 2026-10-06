@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -815,4 +816,259 @@ func TestDepthCapTradesCapacityForLatency(t *testing.T) {
 		t.Fatalf("第 4 层本应换到更多安置名额（这正是代价所在）：depth3=%d depth4=%d",
 			len(p3.Assignments), len(p4.Assignments))
 	}
+
+	// 空位口径收紧后（只算能收子节点的节点），这两种拓扑都已经是"真满"：
+	// 最深一层塞满了转发节点，它们的余量一个也用不出去。
+	// **这是一次行为变更**：旧口径在这两种拓扑上分别虚报 8 / 16 个空位（第 3 层 / 第 4 层的虚位），
+	// 准入闸门据此会放进安置不下的人。
+	for _, tc := range []struct {
+		name          string
+		plan          Plan
+		opts          Options
+		members       []Participant
+		wantDeepest   int
+		wantPlaceable int
+	}{
+		{"MaxDepth=3", p3, opts3, build(), 3, 8},
+		{"MaxDepth=4", p4, opts4, build(), 4, 16},
+	} {
+		deepest := 0
+		for _, a := range tc.plan.Assignments {
+			if a.Depth > deepest {
+				deepest = a.Depth
+			}
+		}
+		if deepest != tc.wantDeepest {
+			t.Fatalf("%s：前置条件不成立，最深应为 %d，实际 %d", tc.name, tc.wantDeepest, deepest)
+		}
+		if len(tc.plan.Assignments) != tc.wantPlaceable {
+			t.Fatalf("%s：应安置 %d 人，实际 %d", tc.name, tc.wantPlaceable, len(tc.plan.Assignments))
+		}
+		if tc.plan.FreeSlots != 0 || tc.plan.GateSlots != 0 {
+			t.Fatalf("%s：最深一层不贡献名额时，空位应为 0，实际 FreeSlots=%d GateSlots=%d",
+				tc.name, tc.plan.FreeSlots, tc.plan.GateSlots)
+		}
+		// 功能验证：再挂一个人必须安置不下（否则"0"才是过度收紧）。
+		if placed, _ := probePlacement(tc.members, tc.opts, 1); placed != 0 {
+			t.Fatalf("%s：FreeSlots=0 却有 %d 个探针被安置，说明空位被低估", tc.name, placed)
+		}
+	}
+}
+
+// probePlacement 追加 count 个无上行探针再算一遍，返回真正被安置的探针数与未安置的探针数。
+//
+// 这是"实际可安置人数"的功能化度量：探针不改变房间本身，只是问树"现在还能放下几个"。
+// 用它来验证 FreeSlots / GateSlots 不是虚位 —— 空位是"账"，探针安置是"实"。
+func probePlacement(participants []Participant, opts Options, count int) (placed, unassigned int) {
+	if count <= 0 {
+		return 0, 0
+	}
+
+	merged := make([]Participant, 0, len(participants)+count)
+	merged = append(merged, participants...)
+	for i := 0; i < count; i++ {
+		merged = append(merged, viewer(fmt.Sprintf("probe%02d", i), 1000+i, 0))
+	}
+
+	plan := Assign("host", merged, opts)
+	for i := 0; i < count; i++ {
+		if _, ok := plan.Assignments[fmt.Sprintf("probe%02d", i)]; ok {
+			placed++
+			continue
+		}
+		unassigned++
+	}
+	return placed, unassigned
+}
+
+// TestSlotsExcludeDeepestLayer 直接锁定新口径本身：
+// 处在最深一层（depth == MaxDepth）的节点一个子节点也收不了（chooseParent 要求 depth+1 <= MaxDepth），
+// 因此它们的余量**既不算 FreeSlots 也不算 GateSlots**。
+//
+// 链式 4 人（K0=1 → 单链，relay 只有 2 个位）在 MaxDepth=2 下正好铺满 1+1+2：
+//
+//	host(0) → relay(1) → l1/l2(2)，而 l1/l2 各自还有余量 —— 那是虚位。
+//	旧口径报 FreeSlots=GateSlots=4（全部虚高），新口径必须报 0。
+func TestSlotsExcludeDeepestLayer(t *testing.T) {
+	stream := int64(2_000_000)
+	chain4 := func() []Participant {
+		return parts(
+			host(4_000_000),
+			viewer("relay", 2, 5_000_000),
+			viewer("l1", 3, 5_000_000),
+			viewer("l2", 4, 5_000_000),
+		)
+	}
+
+	// 深度上限 2：l1/l2 处在最深一层，空位必须是 0。
+	tight := Options{StreamBps: stream, MaxDepth: 2}
+	plan := Assign("host", chain4(), tight)
+
+	if len(plan.Assignments) != 4 || len(plan.Unassigned) != 0 {
+		t.Fatalf("前置条件不成立：4 人应全部安置，实际 已安置=%d 未安置=%v",
+			len(plan.Assignments), plan.Unassigned)
+	}
+	if plan.Assignments["l1"].Depth != 2 {
+		t.Fatalf("前置条件不成立：l1 应落在最深一层（2），实际 %d", plan.Assignments["l1"].Depth)
+	}
+	if plan.FreeSlots != 0 || plan.GateSlots != 0 {
+		t.Fatalf("最深一层的余量是虚位，应为 0，实际 FreeSlots=%d GateSlots=%d", plan.FreeSlots, plan.GateSlots)
+	}
+	if placed, unassigned := probePlacement(chain4(), tight, 1); placed != 0 || unassigned != 1 {
+		t.Fatalf("FreeSlots=0 时应无人可安置，实际 安置=%d 未安置=%d", placed, unassigned)
+	}
+
+	// 对照组（防止"一律收紧"）：同样的 4 人、上限 3 时，l1/l2 在第 2 层还有子位，
+	// 那些位是真能用的 —— 4 个探针必须全部被安置。
+	roomy := Options{StreamBps: stream, MaxDepth: 3}
+	plan3 := Assign("host", chain4(), roomy)
+	if plan3.FreeSlots != 4 || plan3.GateSlots != 4 {
+		t.Fatalf("上限 3 时 l1/l2 各余 2 位，应为 4，实际 FreeSlots=%d GateSlots=%d", plan3.FreeSlots, plan3.GateSlots)
+	}
+	if placed, unassigned := probePlacement(chain4(), roomy, plan3.GateSlots); placed != plan3.GateSlots || unassigned != 0 {
+		t.Fatalf("GateSlots=%d 声称的空位必须真的能放人，实际 安置=%d 未安置=%d",
+			plan3.GateSlots, placed, unassigned)
+	}
+
+	// 边界值 MaxDepth=1（配置允许范围的下界）：所有观众都必须挂在深度 1，
+	// 于是除了主播自己的 K0 个位以外不可能再有空位 —— 深度 1 的节点同样不贡献名额。
+	tiny := Options{StreamBps: stream, MaxDepth: 1}
+	plan1 := Assign("host", chain4(), tiny)
+	if len(plan1.Assignments) != 2 || len(plan1.Unassigned) != 2 {
+		t.Fatalf("MaxDepth=1 时只应安置主播与唯一直连节点，实际 已安置=%d 未安置=%v",
+			len(plan1.Assignments), plan1.Unassigned)
+	}
+	if plan1.FreeSlots != 0 || plan1.GateSlots != 0 {
+		t.Fatalf("MaxDepth=1 时不应有任何空位，实际 FreeSlots=%d GateSlots=%d", plan1.FreeSlots, plan1.GateSlots)
+	}
+	if placed, _ := probePlacement(chain4(), tiny, 1); placed != 0 {
+		t.Fatalf("MaxDepth=1 时多进一个人应安置不下，实际安置了 %d 人", placed)
+	}
+}
+
+// TestGateSlotsAreAlwaysPlaceable 是空位口径的**契约测试**，覆盖三种拓扑：
+//
+//	① 链式 4 人（MaxDepth=2 / 3）
+//	② 弱上行链（10 人，默认深度 3）—— 每个转发节点只有 1 个位，拓扑被深度截断
+//	③ SPEC §6.2 的扇出例子：主播 12 Mbps（K0=4）+ 8 个 6 Mbps relay + 20 个 6 Mbps 叶子
+//
+// 两个方向都要成立，缺一不可：
+//   - 不虚高：声称多少空位，就真能安置多少人（探针实测）；
+//   - 不过度收紧：声称 0 空位时，多进一个人必须真的安置不下。
+func TestGateSlotsAreAlwaysPlaceable(t *testing.T) {
+	stream := int64(2_000_000)
+
+	weakChain := func(n int) []Participant {
+		items := make([]Participant, 0, n+1)
+		items = append(items, host(4_000_000))
+		for i := 1; i <= n; i++ {
+			// 2.5 Mbps / 2 Mbps → 每个转发节点只有 1 个子位：链只能逐跳向下。
+			items = append(items, viewer(fmt.Sprintf("R%d", i), i+1, 2_500_000))
+		}
+		return parts(items...)
+	}
+	fanout := func() []Participant {
+		items := []Participant{host(12_000_000)}
+		for i := 0; i < 8; i++ {
+			items = append(items, viewer(fmt.Sprintf("r%d", i), i+2, 6_000_000))
+		}
+		for i := 0; i < 20; i++ {
+			items = append(items, viewer(fmt.Sprintf("v%d", i), i+20, 6_000_000))
+		}
+		return parts(items...)
+	}
+	chain4 := func() []Participant {
+		return parts(
+			host(4_000_000),
+			viewer("relay", 2, 5_000_000),
+			viewer("l1", 3, 5_000_000),
+			viewer("l2", 4, 5_000_000),
+		)
+	}
+
+	cases := []struct {
+		name         string
+		participants []Participant
+		opts         Options
+	}{
+		{"①链式4人/上限2", chain4(), Options{StreamBps: stream, MaxDepth: 2}},
+		{"①链式4人/上限3", chain4(), Options{StreamBps: stream, MaxDepth: 3}},
+		{"②弱上行链10人/默认3", weakChain(9), Options{StreamBps: stream}},
+		{"③扇出例子/上限3", fanout(), Options{StreamBps: stream, MaxDepth: 3}},
+		{"③扇出例子/上限4", fanout(), Options{StreamBps: stream, MaxDepth: 4}},
+	}
+
+	t.Log("拓扑 | 已安置 | 未安置 | FreeSlots(实测可安置) | GateSlots(实测可安置)")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := Assign("host", tc.participants, tc.opts)
+
+			freePlaced, _ := probePlacement(tc.participants, tc.opts, plan.FreeSlots)
+			gatePlaced, _ := probePlacement(tc.participants, tc.opts, plan.GateSlots)
+			t.Logf("%s | %d | %d | %d(%d) | %d(%d)", tc.name,
+				len(plan.Assignments), len(plan.Unassigned), plan.FreeSlots, freePlaced, plan.GateSlots, gatePlaced)
+
+			if plan.GateSlots > plan.FreeSlots {
+				t.Fatalf("准入口径（只认实测）不应比排布口径更宽松：GateSlots=%d FreeSlots=%d",
+					plan.GateSlots, plan.FreeSlots)
+			}
+			if freePlaced != plan.FreeSlots {
+				t.Fatalf("FreeSlots=%d 是虚位：实际只能再安置 %d 人", plan.FreeSlots, freePlaced)
+			}
+			if gatePlaced != plan.GateSlots {
+				t.Fatalf("GateSlots=%d 是虚位：闸门放进来的人里有 %d 个安置不下",
+					plan.GateSlots, plan.GateSlots-gatePlaced)
+			}
+			if plan.GateSlots == 0 {
+				if placed, _ := probePlacement(tc.participants, tc.opts, 1); placed != 0 {
+					t.Fatalf("GateSlots=0 却还能安置 %d 人：空位被过度收紧", placed)
+				}
+			}
+		})
+	}
+}
+
+// TestFanoutExampleSlotAccounting 给 SPEC §6.2 的扇出例子钉一组具体数字：
+// 29 人（主播 + 8 relay + 20 叶子）在默认深度 3 下**正好铺满**（最深一层 16 个节点全是虚位），
+// 因此 FreeSlots/GateSlots 必须为 0；把上限放到 4，第 3 层的 32 个位才真的能用。
+//
+// 这组数字同时回答"闸门是否被过度收紧"：上限 3 时 0 空位对应"真的一个人也放不下"（探针实测）。
+func TestFanoutExampleSlotAccounting(t *testing.T) {
+	stream := int64(2_000_000)
+	build := func() []Participant {
+		items := []Participant{host(12_000_000)}
+		for i := 0; i < 8; i++ {
+			items = append(items, viewer(fmt.Sprintf("r%d", i), i+2, 6_000_000)) // K0=4，Ki=2
+		}
+		for i := 0; i < 20; i++ {
+			items = append(items, viewer(fmt.Sprintf("v%d", i), i+20, 6_000_000))
+		}
+		return parts(items...)
+	}
+
+	at3 := Options{StreamBps: stream, MaxDepth: 3}
+	p3 := Assign("host", build(), at3)
+	if len(p3.Assignments) != 29 || len(p3.Unassigned) != 0 {
+		t.Fatalf("29 人应全部安置在第 3 层以内，实际 已安置=%d 未安置=%v", len(p3.Assignments), p3.Unassigned)
+	}
+	if p3.FreeSlots != 0 || p3.GateSlots != 0 {
+		t.Fatalf("铺满后空位应为 0（第 3 层 16 个节点全是虚位），实际 FreeSlots=%d GateSlots=%d",
+			p3.FreeSlots, p3.GateSlots)
+	}
+	if placed, _ := probePlacement(build(), at3, 1); placed != 0 {
+		t.Fatalf("上限 3 且铺满时，多进一个人应安置不下，实际安置了 %d 人", placed)
+	}
+
+	at4 := Options{StreamBps: stream, MaxDepth: 4}
+	p4 := Assign("host", build(), at4)
+	if p4.FreeSlots != 32 || p4.GateSlots != 32 {
+		t.Fatalf("上限 4 时第 3 层的 16 个节点各余 2 位（真能用），应为 32，实际 FreeSlots=%d GateSlots=%d",
+			p4.FreeSlots, p4.GateSlots)
+	}
+	if placed, unassigned := probePlacement(build(), at4, p4.GateSlots); placed != 32 || unassigned != 0 {
+		t.Fatalf("上限 4 的 32 个空位必须真的能放人，实际 安置=%d 未安置=%d", placed, unassigned)
+	}
+
+	t.Logf("扇出例子：上限3 → 已安置=%d FreeSlots=%d GateSlots=%d；上限4 → 已安置=%d FreeSlots=%d GateSlots=%d",
+		len(p3.Assignments), p3.FreeSlots, p3.GateSlots, len(p4.Assignments), p4.FreeSlots, p4.GateSlots)
 }
