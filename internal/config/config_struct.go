@@ -3,7 +3,7 @@ package config
 import "time"
 
 // Config 是 ProjectionRoom 的运行时配置。
-// 默认值面向本机开发（SPEC §1.3：STUN/TURN/HTTPS 仅预留）。
+// 默认值面向本机开发（SPEC §1.3：HTTPS 仅预留；ICE 只用 STUN，TURN 已退役）。
 type Config struct {
 	Addr      string
 	Room      RoomConfig
@@ -118,10 +118,23 @@ type SegmentConfig struct {
 	FFmpegPath string
 }
 
-// ICEConfig 预留 STUN/TURN 配置，M1 只透传给前端，不参与信令逻辑。
+// ICEConfig 控制下发给浏览器的 ICE 配置。
+//
+// 这里**只有 STUN，没有 TURN**：TURN 已彻底退役，字段与 PR_TURN_* 环境变量一并删除
+// （原因、以及"什么条件下才该重新引入"见 README「为什么不再有 TURN」）。
+// 退役后列表里每一个条目都由服务端周期性实测打分，只把此刻真的能用的前 MaxSTUN 条下发，
+// 算法与打分公式见 internal/service/ice 与 docs/ALGORITHM.md §1.6。
 type ICEConfig struct {
+	// STUNURLs 是候选 STUN 列表，顺序即默认优先级（PR_STUN_URLS 可整体覆盖）。
 	STUNURLs []string
-	TURNURLs []string
-	TURNUser string
-	TURNPass string
+	// MaxSTUN 是单次下发给浏览器的 STUN 条数上限（PR_ICE_MAX_STUN，默认 4）。
+	//
+	// 为什么要有上限：候选收集对每条 STUN 是串行的，一条 4 秒无响应的服务器
+	// 就能把 srflx 收集拖慢一个数量级。宁可少给几条，也不给一条会卡住的。
+	MaxSTUN int
+	// ProbeInterval 是服务端重新探测一轮的周期（PR_ICE_PROBE_INTERVAL，默认 60s）。
+	ProbeInterval time.Duration
+	// TTL 是下发载荷的有效期（PR_ICE_TTL，默认 300s，允许范围 (0, 1h]）。
+	// 响应里的 ttlSeconds 与 expiresAt 都由它推导，且 expiresAt 每次响应现算。
+	TTL time.Duration
 }

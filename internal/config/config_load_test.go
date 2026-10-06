@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -36,6 +37,141 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if len(cfg.ICE.STUNURLs) != 2 || cfg.ICE.STUNURLs[1] != "stun:b:2" {
 		t.Fatalf("STUN 列表解析失败: %#v", cfg.ICE.STUNURLs)
+	}
+}
+
+// TestICEDefaults 锁定 ICE 下发的默认形态：7 条默认 STUN、上限 4、每 60s 重探、TTL 300s。
+//
+// 默认列表的**顺序**也在断言里：它既是探测列表，也是"首窗口还没跑完"时的下发顺序，
+// 因此顺序本身就是契约（实测最快的排前面）。
+func TestICEDefaults(t *testing.T) {
+	cfg := Default()
+	ic := cfg.ICE
+
+	want := []string{
+		"stun:stun.douyucdn.cn:18000",
+		"stun:stun.hitv.com:3478",
+		"stun:stun.chat.bilibili.com:3478",
+		"stun:stun.miwifi.com:3478",
+		"stun:stun.cloudflare.com:3478",
+		"stun:stun.l.google.com:19302",
+		"stun:stun.qq.com:3478",
+	}
+	if len(ic.STUNURLs) != len(want) {
+		t.Fatalf("默认 STUN 应为 %d 条，实际 %d：%#v", len(want), len(ic.STUNURLs), ic.STUNURLs)
+	}
+	for i, u := range want {
+		if ic.STUNURLs[i] != u {
+			t.Fatalf("默认 STUN 第 %d 条应为 %q，实际 %q", i+1, u, ic.STUNURLs[i])
+		}
+	}
+	if ic.MaxSTUN != 4 {
+		t.Fatalf("默认 MaxSTUN 应为 4，实际 %d", ic.MaxSTUN)
+	}
+	if ic.ProbeInterval != 60*time.Second {
+		t.Fatalf("默认探测周期应为 60s，实际 %v", ic.ProbeInterval)
+	}
+	if ic.TTL != 300*time.Second {
+		t.Fatalf("默认 TTL 应为 300s，实际 %v", ic.TTL)
+	}
+
+	// Load() 走同一条默认路径。
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 不应失败: %v", err)
+	}
+	if !reflect.DeepEqual(loaded.ICE, ic) {
+		t.Fatalf("Load() 的 ICE 默认值应与 Default() 一致：%+v vs %+v", loaded.ICE, ic)
+	}
+
+	// DefaultSTUNURLs 必须返回新切片：调用方会持有它，共享一份全局切片迟早被改坏。
+	a := DefaultSTUNURLs()
+	a[0] = "stun:mutated"
+	if b := DefaultSTUNURLs(); b[0] != want[0] {
+		t.Fatalf("DefaultSTUNURLs 返回了共享切片，已被改坏：%q", b[0])
+	}
+}
+
+// TestICEEnvOverride 锁定 PR_STUN_URLS / PR_ICE_MAX_STUN / PR_ICE_PROBE_INTERVAL / PR_ICE_TTL。
+func TestICEEnvOverride(t *testing.T) {
+	t.Setenv(envSTUNURLs, "stun:x:1, stun:y:2 , stun:x:1") // 顺带验证去重
+	t.Setenv(envICEMaxSTUN, "2")
+	t.Setenv(envICEProbeInterval, "30s")
+	t.Setenv(envICETTL, "5m")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 不应失败: %v", err)
+	}
+	if len(cfg.ICE.STUNURLs) != 2 || cfg.ICE.STUNURLs[1] != "stun:y:2" {
+		t.Fatalf("PR_STUN_URLS 覆盖/去重失败: %#v", cfg.ICE.STUNURLs)
+	}
+	if cfg.ICE.MaxSTUN != 2 {
+		t.Fatalf("PR_ICE_MAX_STUN 覆盖失败: %d", cfg.ICE.MaxSTUN)
+	}
+	if cfg.ICE.ProbeInterval != 30*time.Second {
+		t.Fatalf("PR_ICE_PROBE_INTERVAL 覆盖失败: %v", cfg.ICE.ProbeInterval)
+	}
+	if cfg.ICE.TTL != 5*time.Minute {
+		t.Fatalf("PR_ICE_TTL=5m 应解析为 300s，实际 %v", cfg.ICE.TTL)
+	}
+}
+
+// TestICETTLBoundaries TTL 的合法范围是 (0, 3600s]：两端都要验收，越界必须报错。
+func TestICETTLBoundaries(t *testing.T) {
+	okCases := []struct {
+		value string
+		want  time.Duration
+	}{
+		{"1s", time.Second},
+		{"300s", 300 * time.Second},
+		{"5m", 5 * time.Minute},
+		{"3600s", time.Hour}, // 上界本身合法
+		{"1h", time.Hour},
+	}
+	for _, tc := range okCases {
+		t.Run("ok/"+tc.value, func(t *testing.T) {
+			t.Setenv(envICETTL, tc.value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("PR_ICE_TTL=%q 不应报错: %v", tc.value, err)
+			}
+			if cfg.ICE.TTL != tc.want {
+				t.Fatalf("PR_ICE_TTL=%q 应为 %v，实际 %v", tc.value, tc.want, cfg.ICE.TTL)
+			}
+		})
+	}
+
+	for _, v := range []string{"0", "0s", "-1m", "30", "nope", "3601s", "2h", "1h1s"} {
+		t.Run("bad/"+v, func(t *testing.T) {
+			t.Setenv(envICETTL, v)
+			if _, err := Load(); err == nil {
+				t.Fatalf("PR_ICE_TTL=%q 应当报错（允许范围 (0, 1h]）", v)
+			}
+		})
+	}
+}
+
+// TestICEEnvRejectsInvalid 其余三个 ICE 变量的非法值同样必须明确报错。
+func TestICEEnvRejectsInvalid(t *testing.T) {
+	cases := []struct{ name, value string }{
+		{envICEMaxSTUN, "0"},   // 0 条等于不下发任何 STUN
+		{envICEMaxSTUN, "-1"},  // 负数
+		{envICEMaxSTUN, "abc"}, // 非整数
+		{envICEProbeInterval, "0"},
+		{envICEProbeInterval, "-30s"},
+		{envICEProbeInterval, "60"}, // 漏了单位
+		{envICEProbeInterval, "2h"}, // 超过 1h 上限
+		{envICEProbeInterval, "abc"},
+		{envSTUNURLs, ", ,"}, // 解析不出任何 URL
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
+			t.Setenv(tc.name, tc.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q 应当报错", tc.name, tc.value)
+			}
+		})
 	}
 }
 

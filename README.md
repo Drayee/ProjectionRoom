@@ -18,7 +18,7 @@ WebRTC DataChannel 直接分发给其他节点（P2P 树状分发 + 多父条带
 | M1 | 房间 / 信令 / 聊天 / 成员列表 / 房主控制 | ✅ 已验证 |
 | **M2** | **分片工具 + WebRTC 分发 + MediaSource 播放 + 播放同步** | ✅ **已验证（真实浏览器实测）** |
 | **M3** | **多层树 + 单链分发模式 + 多父条带化 + 抗慢节点** | **实现中**（A/B 已真机验证；C/D 待验证） |
-| M4 | 稳健性、监控面板、STUN/TURN 接入 | 待开始 |
+| M4 | 稳健性、监控面板、STUN 服务端探测与 TTL 下发（TURN 已彻底退役） | 部分实现（ICE 部分已落地） |
 
 ### 启动门控（加载不设超时）
 
@@ -226,10 +226,46 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 | `PR_ADDR` | `127.0.0.1:8080` | 监听地址 |
 | `PR_MAX_MEMBERS` | `16` | 房间成员硬上限（真实上限由实测上行算出的 `1+K0` 决定） |
 | `PR_DEFAULT_STREAM_BPS` | `2000000` | 尚未拿到 mediaIndex 时的码率估计 |
-| `PR_STUN_URLS` | `stun:stun.l.google.com:19302` | 逗号分隔 |
-| `PR_TURN_URLS` / `PR_TURN_USER` / `PR_TURN_PASS` | 空 | 直连失败时的中继（默认不启用） |
+| `PR_STUN_URLS` | 7 条（见下表） | 逗号分隔的 STUN 候选列表，整体覆盖默认值 |
+| `PR_ICE_MAX_STUN` | `4` | 单次下发给浏览器的 STUN 条数上限 |
+| `PR_ICE_PROBE_INTERVAL` | `60s` | 服务端重新探测一轮 STUN 的周期（上限 `1h`） |
+| `PR_ICE_TTL` | `300s` | `/api/ice` 与建房间响应里 ICE 载荷的有效期（允许范围 `(0, 1h]`） |
 | `PR_STATIC_DIR` | `client/dist` | 前端构建产物目录（相对**进程工作目录**解析，请在仓库根目录启动） |
 | `PR_SERVE_STATIC` | `true` | 是否由 Go 服务端托管前端页面（单端口部署的总开关） |
+
+默认 STUN 列表（顺序即默认优先级，2026-02 本机实测 UDP Binding Request 往返）：
+
+| STUN | 实测 RTT | 说明 |
+| :--- | :--- | :--- |
+| `stun:stun.douyucdn.cn:18000` | 11ms | |
+| `stun:stun.hitv.com:3478` | 32ms | |
+| `stun:stun.chat.bilibili.com:3478` | 46ms | |
+| `stun:stun.miwifi.com:3478` | 119ms | |
+| `stun:stun.cloudflare.com:3478` | 203ms | **粘性**：有 AAAA，负责 IPv6 srflx 候选 |
+| `stun:stun.l.google.com:19302` | 236ms ↔ 4s 超时 | **粘性**：有 AAAA；时好时坏 |
+| `stun:stun.qq.com:3478` | 4s 无响应 | 留在列表里由探测打分自然沉底/落选 |
+
+服务端每 `PR_ICE_PROBE_INTERVAL` 探一轮，按 RTT 与跨窗口成功率打分，
+只把最好的 `PR_ICE_MAX_STUN` 条下发（算法与公式见
+[`docs/ALGORITHM.md` §1.6](docs/ALGORITHM.md)）。`/api/ice` 与 `POST /api/rooms`
+的响应形状如下，`iceServers` 与退役 TURN 之前完全一致（只做加法）：
+
+```json
+{
+  "iceServers": [{"urls": "stun:stun.douyucdn.cn:18000"}],
+  "ttlSeconds": 300,
+  "expiresAt": 1760000000,
+  "probe": {
+    "probedAt": 1760000000,
+    "intervalSeconds": 60,
+    "scores": [
+      {"url": "stun:stun.douyucdn.cn:18000", "rttMs": 11, "ok": true, "score": 0.982, "selected": true}
+    ]
+  }
+}
+```
+
+`probe.scores` **覆盖全部候选**（不只下发的那几条），所以排障时能直接看出"某条为什么落选"。
 
 ---
 
@@ -283,9 +319,37 @@ cloudflared tunnel --url http://127.0.0.1:8080
    页面本身如果是 https，混用 `ws://` 会被浏览器按混合内容拦掉——这也是必须推导而不是硬编码的原因。
 2. **隧道只解决「页面 + 信令」，媒体仍然是 P2P。** 视频分片走 WebRTC DataChannel，
    不经过隧道，也不经过服务器（不变量 I1）。因此双向打洞失败时（对称 NAT、严格公司网络），
-   没有 TURN 就是连不上——`PR_TURN_*` 已预留但**默认不启用**，需要自备 TURN 并配置：
-   `PR_TURN_URLS=turn:your.turn:3478 PR_TURN_USER=... PR_TURN_PASS=...`。
-   隧道对 P2P 打洞没有任何帮助。
+   就是连不上——隧道对 P2P 打洞没有任何帮助。**TURN 已彻底退役**（原因见下），
+   所以现在的 ICE 配置里只有 STUN；打洞成功与否完全取决于双方的 NAT 类型。
+
+### 为什么不再有 TURN
+
+**已移除**：`PR_TURN_URLS` / `PR_TURN_USER` / `PR_TURN_PASS` 三个环境变量、
+`config.ICEConfig` 里的 TURN 字段，以及 `/api/ice`（与建房间响应）里的 `turn:` 条目。
+设置这三个环境变量现在是无声无息的空操作，`/api/ice` 里不会再出现任何 `turn:` 项。
+
+移除的原因（实测结论）：
+
+- 私有 TURN（`turn:10.23.170.132:3478`）对**公网观众不可达**：它是私网地址，且隧道不转发 UDP。
+  对公网观众而言它的存在只会让候选收集多等一轮超时，成本是负的。
+- 一台"只对主播一侧可达"的中继没有任何意义：中继必须双方都能连上才能转发媒体，
+  而 ICE 一旦把不可达的 TURN 收进候选，浏览器仍会在它上面浪费收集时间甚至把
+  `relay` 候选当成可用路径。
+- 没有可用 TURN 时，公开 STUN 列表的质量就成了打洞成功率的全部——所以本次同时把
+  "谁可用"的判断从浏览器搬到服务端（服务端探测 + 打分 + TTL 下发，见上表与
+  [`docs/ALGORITHM.md` §1.6](docs/ALGORITHM.md)）。
+
+**什么条件下才该重新引入 TURN**：同时满足下面三条才值得做，缺一条都会退化成
+"多一轮超时、零收益"：
+
+1. 有一台**公网可达**的中继（要有公网 IP 或域名的 VPS，且 UDP 3478 真的通得过；
+   纯 HTTP 隧道与只转 TCP 的反代都不行——TURN 靠 UDP 转发媒体）；
+2. 房间成员真的会落在对称 NAT / 严格公司网络下面（否则直连成功率本来就很高）；
+3. 接受中继的带宽成本（中继转发的是**视频字节**，这是唯一一处会让成本模型从 P2P
+   退回 CDN 的地方，与不变量 I1 直接冲突，必须是有意识的决策而不是顺手打开）。
+
+重新引入时不要恢复"字段留着不用"的半退役状态：要么按上面的条件实配并做真机验证，
+要么就保持现在的纯 STUN 形态。
 3. **分片上传/下载接口受隧道限制。** `/api/v1/segment/*` 的源文件上限是 **16 GiB**、
    作业时长上限 **60 分钟**（`PR_SEGMENT_MAX_SOURCE_BYTES` / `PR_SEGMENT_MAX_DURATION`），
    而隧道通常有自己的最大请求体与超时（很多免费隧道只有几十 MB / 30~100s），

@@ -25,7 +25,8 @@ import (
 //	                                                        未命中则回退 index.html（SPA 路由）
 //
 // 注意边界：这只解决「页面 + 信令」的可达性。媒体分发仍然是 peer 之间的 WebRTC 直连，
-// 隧道不参与媒体传输；打洞失败时没有 TURN（PR_TURN_*）就会连不上。
+// 隧道不参与媒体传输；打洞失败时有没有中继与隧道无关（TURN 已退役，
+// 原因与重新引入的条件见 README「为什么不再有 TURN」）。
 
 // immutableCacheControl 用于 Vite 产物：文件名里带内容 hash，内容永远不变，可以放心长缓存。
 const immutableCacheControl = "public, max-age=31536000, immutable"

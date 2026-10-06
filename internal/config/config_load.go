@@ -17,9 +17,11 @@ const (
 	envRoomHostGrace  = "PR_ROOM_HOST_GRACE"
 	envSTUNURLs       = "PR_STUN_URLS"
 	envAllowedOrigins = "PR_ALLOWED_ORIGINS"
-	envTURNURLs       = "PR_TURN_URLS"
-	envTURNUser       = "PR_TURN_USER"
-	envTURNPass       = "PR_TURN_PASS"
+
+	// ICE 下发的三件套：最多给几条、多久重探一次、载荷能用多久。
+	envICEMaxSTUN       = "PR_ICE_MAX_STUN"
+	envICEProbeInterval = "PR_ICE_PROBE_INTERVAL"
+	envICETTL           = "PR_ICE_TTL"
 
 	// 服务端切片服务的环境变量（前缀 PR_SEGMENT_，ffmpeg 路径单独用 PR_FFMPEG）。
 	envSegmentConcurrency   = "PR_SEGMENT_CONCURRENCY"
@@ -50,6 +52,56 @@ const (
 // import segment（queue.go 依赖 config，会形成 import 循环）。segment 与 cmd/segmenter
 // 都引用这个常量，因此默认值只有一处定义。
 const DefaultPackSize = 100
+
+// ICE 下发的默认值。
+//
+// 为什么 TTL 是 300s 而探测周期是 60s：TTL 不是"数据保鲜期"，而是"客户端该多久
+// 重新问一次服务端"。它比探测周期大几倍，是为了让客户端不必踩着探测窗口刷新；
+// 同时又足够短，使一次网络路径变化（换网关、切运营商）能在几分钟内反映到新房间里。
+const (
+	// DefaultICEMaxSTUN 是单次下发的 STUN 条数上限。
+	DefaultICEMaxSTUN = 4
+	// DefaultICEProbeInterval 是服务端重新探测一轮的周期。
+	DefaultICEProbeInterval = 60 * time.Second
+	// DefaultICETTL 是下发载荷的默认有效期。
+	DefaultICETTL = 300 * time.Second
+	// MaxICETTL 是 TTL 的上限：超过 1h 就等于"配了之后再也不用刷新"，
+	// 一旦某台 STUN 长期劣化，房间里的浏览器会一直拿着它。
+	MaxICETTL = time.Hour
+	// MaxICEProbeInterval 是探测周期的上限：探测本身很便宜（7 个 UDP 包），
+	// 周期长到超过 1h 就失去了"跟着网络路径变化走"的意义。
+	MaxICEProbeInterval = time.Hour
+)
+
+// DefaultSTUNURLs 返回默认的 STUN 列表，**顺序即默认优先级**。
+//
+// 返回新切片而不是共享变量：调用方（registry）会持有并可能改动它，
+// 共享一份全局切片迟早会被某个调用方就地改坏。
+//
+// 列表构成（2026-02 本机实测 UDP Binding Request 往返）：
+//
+//	stun.douyucdn.cn:18000      11ms    ✓
+//	stun.hitv.com:3478          32ms    ✓
+//	stun.chat.bilibili.com:3478 46ms    ✓
+//	stun.miwifi.com:3478        119ms   ✓
+//	stun.cloudflare.com:3478    203ms   ✓  （有 AAAA，粘性）
+//	stun.l.google.com:19302     236ms ↔ 4s 超时（时好时坏，粘性）
+//	stun.qq.com:3478            4s 无响应
+//
+// 最后一条刻意留着：它由服务端探测打分自然沉底/落选，而不是靠人工"把它删掉"。
+// 这样它对所有人都保留一个可观察的样本（probe.scores 里能看到它 ok=false），
+// 一旦哪天它恢复了，权重轮询会自动把它带回下发列表。
+func DefaultSTUNURLs() []string {
+	return []string{
+		"stun:stun.douyucdn.cn:18000",
+		"stun:stun.hitv.com:3478",
+		"stun:stun.chat.bilibili.com:3478",
+		"stun:stun.miwifi.com:3478",
+		"stun:stun.cloudflare.com:3478",
+		"stun:stun.l.google.com:19302",
+		"stun:stun.qq.com:3478",
+	}
+}
 
 // 主播断线宽限期（PR_ROOM_HOST_GRACE）。
 //
@@ -92,7 +144,10 @@ func Default() *Config {
 			AllowedOrigins: []string{"127.0.0.1:5173", "localhost:5173"},
 		},
 		ICE: ICEConfig{
-			STUNURLs: []string{"stun:stun.l.google.com:19302"},
+			STUNURLs:      DefaultSTUNURLs(),
+			MaxSTUN:       DefaultICEMaxSTUN,
+			ProbeInterval: DefaultICEProbeInterval,
+			TTL:           DefaultICETTL,
 		},
 		Segment: SegmentConfig{
 			Concurrency:            2,
@@ -143,23 +198,15 @@ func Load() (*Config, error) {
 		}
 		cfg.Room.DefaultStreamBps = n
 	}
-	if v := os.Getenv(envSTUNURLs); v != "" {
-		cfg.ICE.STUNURLs = splitList(v)
-	}
 	// 额外允许的 WebSocket 来源（逗号分隔，支持 *.example.com）。
 	// 同源（页面与 /ws 同端口）始终放行，所以这一项主要是给"前后端分离开发"或
 	// 需要从别的域名嵌页面进来的场景用。
 	if v := os.Getenv(envAllowedOrigins); v != "" {
 		cfg.Signal.AllowedOrigins = splitList(v)
 	}
-	if v := os.Getenv(envTURNURLs); v != "" {
-		cfg.ICE.TURNURLs = splitList(v)
-	}
-	if v := os.Getenv(envTURNUser); v != "" {
-		cfg.ICE.TURNUser = v
-	}
-	if v := os.Getenv(envTURNPass); v != "" {
-		cfg.ICE.TURNPass = v
+
+	if err := applyICEEnv(&cfg.ICE); err != nil {
+		return nil, err
 	}
 
 	if err := applySegmentEnv(&cfg.Segment); err != nil {
@@ -356,19 +403,62 @@ func positiveDuration(name, v string) (time.Duration, error) {
 	return d, nil
 }
 
-// ICEServers 把配置转换成 WebRTC 的 iceServers 结构（供前端直接使用）。
-func (c *Config) ICEServers() []map[string]any {
-	out := make([]map[string]any, 0, len(c.ICE.STUNURLs)+len(c.ICE.TURNURLs))
-	for _, u := range c.ICE.STUNURLs {
-		out = append(out, map[string]any{"urls": u})
-	}
-	for _, u := range c.ICE.TURNURLs {
-		entry := map[string]any{"urls": u}
-		if c.ICE.TURNUser != "" {
-			entry["username"] = c.ICE.TURNUser
-			entry["credential"] = c.ICE.TURNPass
+// applyICEEnv 应用 ICE 下发的环境变量覆盖。
+// 与其它配置一致：非法取值直接报错，不做静默回退 —— 把 MaxSTUN 写成 0、把 TTL 写成
+// "5"（漏了单位）都会让下发内容悄悄退化，必须在启动时立刻可见。
+//
+// 注意这里**没有 TURN**：TURN 字段与 PR_TURN_* 已随退役一并删除
+// （见 README「为什么不再有 TURN」）。设置 PR_TURN_* 现在是无声无息的空操作。
+func applyICEEnv(ic *ICEConfig) error {
+	if v := os.Getenv(envSTUNURLs); v != "" {
+		list := splitList(v)
+		if len(list) == 0 {
+			return fmt.Errorf("config: %s 不能解析出任何 URL, got %q", envSTUNURLs, v)
 		}
-		out = append(out, entry)
+		ic.STUNURLs = uniqueList(list)
+	}
+	if v := os.Getenv(envICEMaxSTUN); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return fmt.Errorf("config: %s 必须是 >=1 的整数, got %q", envICEMaxSTUN, v)
+		}
+		ic.MaxSTUN = n
+	}
+	if v := os.Getenv(envICEProbeInterval); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("config: %s 必须是 Go 时长（如 60s、2m）, got %q", envICEProbeInterval, v)
+		}
+		if d <= 0 || d > MaxICEProbeInterval {
+			return fmt.Errorf("config: %s 必须落在 (0, %s] 区间, got %q", envICEProbeInterval, MaxICEProbeInterval, v)
+		}
+		ic.ProbeInterval = d
+	}
+	if v := os.Getenv(envICETTL); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("config: %s 必须是 Go 时长（如 300s、5m）, got %q", envICETTL, v)
+		}
+		if d <= 0 || d > MaxICETTL {
+			return fmt.Errorf("config: %s 必须落在 (0, %s] 区间, got %q", envICETTL, MaxICETTL, v)
+		}
+		ic.TTL = d
+	}
+	return nil
+}
+
+// uniqueList 去掉重复项并保持首次出现的顺序。
+// 为什么要去重：重复的 STUN 会在 iceServers 里出现两条一模一样的条目，
+// 浏览器会白跑一轮重复的候选收集。
+func uniqueList(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
 	}
 	return out
 }

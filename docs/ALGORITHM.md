@@ -117,6 +117,63 @@ chunkStore 里 nextAppend 存在？ ──是──► appendBuffer(该片) → 
   起点不能低于 `nextAppend`（否则会把已淘汰的片反复重取，实测刷出上千次无谓交付）；
   终点必须以**播放头**为锚（以 `nextAppend` 为锚会让窗口一路前移，把整部片子拉完）。
 
+### 1.6 ICE 配置下发：服务端探测 → 打分 → 加权轮询 → TTL
+
+算法实现在 `internal/service/ice`，配置在 `internal/config`（`PR_ICE_*`）。
+它是"媒体链路之外唯一一处服务端主动发起的网络行为"，因此单独列在这里。
+
+**为什么由服务端挑**：候选收集对每条 STUN 是串行的——一条 4 秒无响应的服务器就能把
+srflx 收集拖慢一个数量级。实测默认列表里既有 11ms 的节点，也有一条 4 秒无响应的
+`stun.qq.com`，把整份列表原样丢给浏览器等于让它自己踩雷。所以"谁可用"在服务端判定。
+
+**四步**：
+
+```
+① 探测（每 PR_ICE_PROBE_INTERVAL，默认 60s，并发）
+   对每条 STUN 发一条 UDP Binding Request（RFC 5389，magic cookie 0x2112A442）
+   单条超时 1.5s；响应必须是**同一个事务**的 Binding Success → ok / rttMs
+   （并发而非串行：7 条默认列表的最坏耗时因此是 1.5s，而不是 10.5s）
+
+② 打分（纯函数，可单测）
+   rttScore   = 1 - min(rtt, 500ms) / 500ms            ∈ [0,1]
+   successRate = EWMA(上窗口, 本窗口, α = 0.5)          ∈ [0,1]
+   score      = 0.8 × rttScore + 0.2 × successRate
+   本轮失败（超时 / 报文不合法 / 解析失败）→ score = 0（不被历史成功率救回）
+   首个样本不做半衰：从来没失败过的服务器不会被误判成 0.75
+
+③ 选入（最多 PR_ICE_MAX_STUN 条，默认 4）
+   粘性优先：stun.l.google.com / stun.cloudflare.com 只要本轮应答就占位
+             （它们是列表里少数有 AAAA 的服务器，IPv6 srflx 候选靠它们）
+   剩余名额：非粘性且本轮可用的条目按权重 ∝ score 做平滑加权轮询（SWRR）
+             权重 = score + 0.05（给低分项留兜底份额，让它有机会回升）
+             权重为 0（本轮失败）的条目完全不参与
+   轮询状态跨窗口保留 → 相邻窗口通常只换 1~2 条，列表不会整体翻转
+             且同一段分数序列下的选择完全可复现（便于排障与单测）
+
+④ 下发
+   iceServers 顺序 = score 从高到低（同分按配置顺序）
+   载荷 = { iceServers, ttlSeconds, expiresAt, probe{ probedAt, intervalSeconds, scores } }
+   scores 覆盖**全部**候选（含落选者），所以"某条为什么没下发"是可以直接看出来的
+```
+
+**两个刻意的降级行为**（都在 `Registry.Payload` 的注释里）：
+
+- 第一个探测窗口还没跑完 → 下发**完整**配置列表，不是空列表（启动期不能空窗）。
+- 整轮探测全失败 → 同样退回完整配置列表。探测失败只说明"服务端此刻看不见这些 STUN"，
+  不代表观众看不见；给浏览器一个空列表等于直接放弃 srflx 候选，比给一份未筛选的列表更糟。
+  注意 `probe.scores` 仍然如实上报失败，降级只影响 `iceServers`，不粉饰探测结果。
+
+**TTL 与探测窗口是两个不同的东西**：`ttlSeconds`（默认 300s，`expiresAt` 每次响应现算）
+说的是"客户端该多久重新问一次服务端"，不是"探测数据的新鲜度"；后者由
+`probe.probedAt` + `intervalSeconds` 表达。TTL 比探测周期大几倍，是为了让客户端不必踩窗口。
+
+**边界**：探测从服务端发起，衡量的是"服务端 → STUN"的可达性，不是"观众 → STUN"；
+默认列表全是公网节点，两端高度相关。探测只走 IPv4（避免"有 AAAA 但没有 IPv6 出口"
+的误判），下发的 URL 原样保留，IPv6 由浏览器自己走。
+
+**TURN 已退役**：`iceServers` 里不会出现任何 `turn:` 条目（有测试断言）。
+原因与"什么条件下才该重新引入"见 README「为什么不再有 TURN」。
+
 ---
 
 ## 2. 同步算法
