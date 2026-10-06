@@ -227,7 +227,7 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 | `PR_MAX_MEMBERS` | `16` | 房间成员硬上限（真实上限由实测上行算出的 `1+K0` 决定） |
 | `PR_DEFAULT_STREAM_BPS` | `2000000` | 尚未拿到 mediaIndex 时的码率估计 |
 | `PR_STUN_URLS` | 7 条（见下表） | 逗号分隔的 STUN 候选列表，整体覆盖默认值 |
-| `PR_ICE_MAX_STUN` | `4` | 单次下发给浏览器的 STUN 条数上限 |
+| `PR_ICE_MAX_STUN` | `5` | 单次下发给浏览器的 STUN 条数上限（= 恒选 4 席 + 1 个轮询席位） |
 | `PR_ICE_PROBE_INTERVAL` | `60s` | 服务端重新探测一轮 STUN 的周期（上限 `1h`） |
 | `PR_ICE_TTL` | `300s` | `/api/ice` 与建房间响应里 ICE 载荷的有效期（允许范围 `(0, 1h]`） |
 | `PR_STATIC_DIR` | `client/dist` | 前端构建产物目录（相对**进程工作目录**解析，请在仓库根目录启动） |
@@ -245,9 +245,10 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 | `stun:stun.l.google.com:19302` | 236ms ↔ 4s 超时 | **粘性**：有 AAAA；时好时坏 |
 | `stun:stun.qq.com:3478` | 4s 无响应 | 留在列表里由探测打分自然沉底/落选 |
 
-服务端每 `PR_ICE_PROBE_INTERVAL` 探一轮，按 RTT 与跨窗口成功率打分，
-只把最好的 `PR_ICE_MAX_STUN` 条下发（算法与公式见
-[`docs/ALGORITHM.md` §1.6](docs/ALGORITHM.md)）。`/api/ice` 与 `POST /api/rooms`
+服务端每 `PR_ICE_PROBE_INTERVAL` 探一轮，按 RTT 与跨窗口成功率打分，然后按**延迟优先**选入：
+**实测最快的 2 条 + 本轮健康的粘性 2 条恒选**，剩下 `PR_ICE_MAX_STUN - 4 = 1` 个席位
+在次优候选里加权轮询（所以默认上限是 5；4 会让轮询剩 0 席）。算法与公式见
+[`docs/ALGORITHM.md` §1.6](docs/ALGORITHM.md)。`/api/ice` 与 `POST /api/rooms`
 的响应形状如下，`iceServers` 与退役 TURN 之前完全一致（只做加法）：
 
 ```json

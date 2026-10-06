@@ -210,35 +210,73 @@ func (r *Registry) ProbeOnce(ctx context.Context) {
 	r.latest = &window{probedAt: r.now(), scores: scores, selected: selected}
 }
 
+// fastestQuota 是"恒选席位"里按分数取的条数。
+//
+// 为什么要有它（延迟优先）：纯加权轮询下，上一窗口最快的两条也可能因为"轮到自己让位"
+// 而落选，客户端就少了一条实测最快的 STUN。实测最快的两条是**当轮已知最可靠的路径**，
+// 它们的价值高于"让低分项轮换一圈"；因此把最快两条升级为恒选，
+// 轮询只负责填剩下那些"次优但有希望回升"的名额。
+const fastestQuota = 2
+
 // selectURLs 决定本轮下发哪些 URL（在 r.mu 保护下调用，因为要改轮询状态）。
 //
-// 规则：
-//  1. 粘性条目（stun.l.google.com / stun.cloudflare.com）只要本轮应答就优先占位——
-//     它们是列表里少数有 AAAA 的服务器，IPv6 srflx 候选靠它们（见 stickyHosts 注释）。
-//  2. 剩余名额按分数加权轮询（权重跨窗口保留，失败条目不参与）。
-//  3. 最多 MaxSTUN 条：名额先给粘性条目，因此粘性条目多到超限时只取其中分数高的几条。
+// 席位分两类：
+//  1. 恒选（mandatory）
+//     - 按 score 降序的**最快 2 条**（只数本轮健康的）—— 延迟优先。
+//     - 本轮健康的粘性条目（stun.l.google.com / stun.cloudflare.com）—— 能力优先，
+//     它们是列表里少数有 AAAA 的服务器，IPv6 srflx 候选只能来自它们（见 stickyHosts）。
+//     不健康的条目既不占恒选席位，也不参与轮询。
+//  2. 轮询（SWRR，权重 ∝ score + 兜底小权重）
+//     名额 = MaxSTUN - len(恒选)，候选 = 本轮健康、且**没被恒选选中**的条目。
+//     状态跨窗口保留 → 同一段分数序列下可复现，相邻窗口只换 1~2 条。
+//
+// 硬上限：恒选条数可能超过 MaxSTUN（例如 MaxSTUN=3 时 2 快 + 2 粘性 = 4）。
+// 此时按 score 降序截断，即**最快的优先留下**；被截掉的粘性条目本轮不下发，
+// 但它仍在候选列表里，下一轮用自己的健康度继续竞争。
 func (r *Registry) selectURLs(stats []ScoreEntry) []string {
 	ordered := sortedByScore(stats)
 	limit := r.cfg.ICE.MaxSTUN
 
-	chosen := make(map[string]bool, limit)
+	// 先把恒选集合算成集合，再按 score 降序物化 —— 这样"截断"天然等价于
+	// "淘汰分数最低的恒选条目"，不需要额外排序。
+	mandatorySet := make(map[string]bool, limit)
+	fast := 0
 	for _, s := range ordered {
-		if len(chosen) >= limit {
-			break
+		if !s.OK {
+			continue
 		}
-		if s.OK && IsSticky(s.URL) {
-			chosen[s.URL] = true
+		if fast < fastestQuota {
+			mandatorySet[s.URL] = true
+			fast++
+		}
+		if IsSticky(s.URL) {
+			mandatorySet[s.URL] = true
 		}
 	}
 
-	if len(chosen) < limit {
+	mandatory := make([]string, 0, len(mandatorySet))
+	for _, s := range ordered {
+		if mandatorySet[s.URL] {
+			mandatory = append(mandatory, s.URL)
+		}
+	}
+	if len(mandatory) > limit {
+		mandatory = mandatory[:limit]
+	}
+
+	chosen := make(map[string]bool, limit)
+	for _, u := range mandatory {
+		chosen[u] = true
+	}
+
+	if remaining := limit - len(chosen); remaining > 0 {
 		cands := make([]weighted, 0, len(ordered))
 		for _, s := range ordered {
-			if s.OK && !IsSticky(s.URL) {
+			if s.OK && !chosen[s.URL] {
 				cands = append(cands, weighted{url: s.URL, w: weightOf(s.Score)})
 			}
 		}
-		for _, u := range r.rotate.pick(cands, limit-len(chosen)) {
+		for _, u := range r.rotate.pick(cands, remaining) {
 			chosen[u] = true
 		}
 	}

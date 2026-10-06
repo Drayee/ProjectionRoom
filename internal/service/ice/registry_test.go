@@ -119,20 +119,25 @@ func TestPayloadBeforeFirstWindowFallsBackToFullList(t *testing.T) {
 }
 
 // TestProbeOnceScoresAndSelects 是核心用例：真机实测的分数序列下，
-// 粘性条目必选、失败条目落选、总数不超过 MaxSTUN、顺序按分数从高到低。
+// 最快两条与粘性两条恒选、失败条目落选、总数不超过 MaxSTUN、顺序按分数从高到低。
 func TestProbeOnceScoresAndSelects(t *testing.T) {
 	urls := config.DefaultSTUNURLs()
-	reg, _ := newTestRegistry(t, urls, 4, defaultListResults())
+	// 默认上限 5 = 恒选 4（最快 2 + 粘性 2）+ 轮询 1。
+	reg, _ := newTestRegistry(t, urls, config.DefaultICEMaxSTUN, defaultListResults())
 
 	reg.ProbeOnce(context.Background())
 	p := reg.Payload()
 
 	selected := selectedURLs(p)
-	if len(selected) != 4 {
-		t.Fatalf("默认 MaxSTUN=4，实际下发 %d 条：%v", len(selected), selected)
+	if len(selected) != config.DefaultICEMaxSTUN {
+		t.Fatalf("默认 MaxSTUN=%d，实际下发 %d 条：%v", config.DefaultICEMaxSTUN, len(selected), selected)
 	}
 	if !contains(selected, urls[4]) || !contains(selected, urls[5]) {
 		t.Fatalf("粘性条目（cloudflare/google）应始终占位，实际 %v", selected)
+	}
+	// 延迟优先：实测最快的两条（douyucdn 11ms、hitv 32ms）必选。
+	if !contains(selected, urls[0]) || !contains(selected, urls[1]) {
+		t.Fatalf("最快的两条应恒选，实际 %v", selected)
 	}
 	if contains(selected, urls[6]) {
 		t.Fatalf("本轮无响应的 qq 不应出现在下发列表里，实际 %v", selected)
@@ -147,7 +152,7 @@ func TestProbeOnceScoresAndSelects(t *testing.T) {
 		t.Fatalf("0 分条目应排在 scores 末尾，实际末尾是 %q", got)
 	}
 
-	// 全量上报：7 条都要能看到（不只下发的那 4 条），否则排障时无从判断落选原因。
+	// 全量上报：7 条都要能看到（不只下发的那几条），否则排障时无从判断落选原因。
 	if len(p.Probe.Scores) != len(urls) {
 		t.Fatalf("scores 应覆盖全部 %d 条配置，实际 %d", len(urls), len(p.Probe.Scores))
 	}
@@ -196,7 +201,8 @@ func TestStickyKeptWhenItsScoreIsLow(t *testing.T) {
 		urls[3]: okObservation(urls[3], 460),
 		urls[4]: okObservation(urls[4], 480),
 	}
-	reg, _ := newTestRegistry(t, urls, 3, results)
+	// 上限 5：最快 2 + 粘性 2 恒选，剩 1 个轮询席位给 fast3 → 全部 5 条都能入选。
+	reg, _ := newTestRegistry(t, urls, 5, results)
 
 	reg.ProbeOnce(context.Background())
 	selected := selectedURLs(reg.Payload())
@@ -204,9 +210,8 @@ func TestStickyKeptWhenItsScoreIsLow(t *testing.T) {
 	if !contains(selected, urls[3]) || !contains(selected, urls[4]) {
 		t.Fatalf("粘性条目即使分数最低也必须入选，实际 %v", selected)
 	}
-	// 只剩 1 个名额给最快的非粘性条目。
-	if len(selected) != 3 || !contains(selected, urls[0]) {
-		t.Fatalf("剩余名额应给分数最高的非粘性条目，实际 %v", selected)
+	if len(selected) != 5 || !contains(selected, urls[0]) || !contains(selected, urls[1]) {
+		t.Fatalf("最快两条 + 粘性两条 + 1 个轮询席位应覆盖全部 5 条，实际 %v", selected)
 	}
 	// 分数上它们确实是最低的——"必选"来自规则，不是来自分数。
 	lowest := reg.Payload().Probe.Scores[len(reg.Payload().Probe.Scores)-1]
@@ -244,7 +249,7 @@ func TestMaxSTUNLimitsPayload(t *testing.T) {
 		allOK[u] = okObservation(u, 10*(i+1))
 	}
 
-	for _, max := range []int{1, 2, 4, 7} {
+	for _, max := range []int{1, 2, 4, 5, 7} {
 		reg, _ := newTestRegistry(t, urls, max, allOK)
 		reg.ProbeOnce(context.Background())
 
@@ -266,23 +271,152 @@ func TestMaxSTUNLimitsPayload(t *testing.T) {
 	}
 }
 
-// TestMaxSTUNGivesRoomToStickyFirst 名额被粘性条目占满时，剩下的名额为 0，
-// 且总数仍然不超过上限。
-func TestMaxSTUNGivesRoomToStickyFirst(t *testing.T) {
+// TestMandatoryTruncatedByMaxSTUN 锁定"恒选席位也可能超上限"的边界：
+// MaxSTUN=2 时恒选集合是「最快 2 条 ∪ 健康粘性 2 条」= 4 条，必须按 score 降序截断到 2 条，
+// 即**最快的优先留下**（粘性条目被挤掉，因为它们的分数最低）。
+func TestMandatoryTruncatedByMaxSTUN(t *testing.T) {
 	urls := config.DefaultSTUNURLs()
-	results := defaultListResults()
+	reg, _ := newTestRegistry(t, urls, 2, defaultListResults())
 
-	reg, _ := newTestRegistry(t, urls, 2, results)
 	reg.ProbeOnce(context.Background())
-
 	selected := selectedURLs(reg.Payload())
+
 	if len(selected) != 2 {
 		t.Fatalf("MaxSTUN=2 时应下发 2 条，实际 %v", selected)
 	}
+	// 实测最快两条：douyucdn(11ms)、hitv(32ms)。
+	if !contains(selected, urls[0]) || !contains(selected, urls[1]) {
+		t.Fatalf("上限不足时应保留分数最高的两条，实际 %v", selected)
+	}
 	for _, u := range selected {
-		if !IsSticky(u) {
-			t.Fatalf("两个名额应被粘性条目占满，实际 %v", selected)
+		if IsSticky(u) {
+			t.Fatalf("上限只有 2 时粘性条目应被截断（它们分数最低），实际 %v", selected)
 		}
+	}
+
+	// MaxSTUN=3：恒选 4 条截断到 3 —— 留下最快两条 + 分数较高的那条粘性（cloudflare 203ms）。
+	reg3, _ := newTestRegistry(t, urls, 3, defaultListResults())
+	reg3.ProbeOnce(context.Background())
+	selected3 := selectedURLs(reg3.Payload())
+
+	if len(selected3) != 3 {
+		t.Fatalf("MaxSTUN=3 时应下发 3 条，实际 %v", selected3)
+	}
+	if !contains(selected3, urls[4]) || contains(selected3, urls[5]) {
+		t.Fatalf("截断应按分数：保留 cloudflare(203ms) 而不是 google(236ms)，实际 %v", selected3)
+	}
+}
+
+// TestFastestTwoAlwaysSelected 是"延迟优先"的核心回归：实测最快的两条
+// **跨多个窗口都必须在下发列表里**，不允许因为轮询让位而消失。
+//
+// 前两轮之后，最快的两条会被轮询机制"冷落"（它们的累计权重最低），
+// 旧实现正是在这里把它们换了出去。
+func TestFastestTwoAlwaysSelected(t *testing.T) {
+	urls := config.DefaultSTUNURLs()
+	reg, _ := newTestRegistry(t, urls, config.DefaultICEMaxSTUN, defaultListResults())
+
+	for window := 1; window <= 5; window++ {
+		reg.ProbeOnce(context.Background())
+		selected := selectedURLs(reg.Payload())
+
+		if !contains(selected, urls[0]) || !contains(selected, urls[1]) {
+			t.Fatalf("第 %d 个窗口里最快的两条消失了：%v", window, selected)
+		}
+		if !contains(selected, urls[4]) || !contains(selected, urls[5]) {
+			t.Fatalf("第 %d 个窗口里健康的粘性条目消失了：%v", window, selected)
+		}
+		if contains(selected, urls[6]) {
+			t.Fatalf("第 %d 个窗口里失败的 qq 被选中了：%v", window, selected)
+		}
+	}
+}
+
+// TestRotationOnlyAmongNonMandatory 锁定轮询的边界：轮询只能在**非恒选**的候选里发生。
+//
+// 断言三件事：
+//   - 恒选四席（最快 2 + 粘性 2）每轮都在；
+//   - 多轮之后轮询席位确实换过人（否则"轮换回升"这条设计等于没有）；
+//   - 一个窗口内不出现重复条目。
+func TestRotationOnlyAmongNonMandatory(t *testing.T) {
+	urls := config.DefaultSTUNURLs()
+	reg, _ := newTestRegistry(t, urls, config.DefaultICEMaxSTUN, defaultListResults())
+
+	mandatory := map[string]bool{urls[0]: true, urls[1]: true, urls[4]: true, urls[5]: true}
+	// 只有这一个名额参与轮询。
+	rotating := []string{urls[2], urls[3]} // bilibili 46ms、miwifi 119ms
+	seen := map[string]bool{}
+
+	for window := 1; window <= 6; window++ {
+		reg.ProbeOnce(context.Background())
+		selected := selectedURLs(reg.Payload())
+
+		if len(selected) != config.DefaultICEMaxSTUN {
+			t.Fatalf("第 %d 个窗口应下发 %d 条，实际 %v", window, config.DefaultICEMaxSTUN, selected)
+		}
+		unique := map[string]bool{}
+		for _, u := range selected {
+			if unique[u] {
+				t.Fatalf("第 %d 个窗口出现重复条目：%v", window, selected)
+			}
+			unique[u] = true
+			if !mandatory[u] && !contains(rotating, u) {
+				t.Fatalf("第 %d 个窗口下发了既非恒选也不在轮询候选里的条目 %q：%v", window, u, selected)
+			}
+		}
+		for u := range mandatory {
+			if !unique[u] {
+				t.Fatalf("第 %d 个窗口缺少恒选条目 %q：%v", window, u, selected)
+			}
+		}
+		for _, u := range rotating {
+			if unique[u] {
+				seen[u] = true
+			}
+		}
+	}
+
+	// 轮询席位必须在多轮之间换过人，否则"低分项轮换回升"就没实现。
+	if len(seen) != len(rotating) {
+		t.Fatalf("6 个窗口里轮询席位应轮换到全部候选 %v，实际只出现过 %v", rotating, seen)
+	}
+}
+
+// TestMandatoryBackfilledWhenUnhealthy 锁定恒选席位因不健康而空出时的补位：
+// 名额不会浪费，由轮询在其余健康候选里补齐。
+func TestMandatoryBackfilledWhenUnhealthy(t *testing.T) {
+	urls := []string{
+		"stun:fast1.example:3478",
+		"stun:fast2.example:3478", // 本轮不健康 → 不占恒选席位
+		"stun:fast3.example:3478",
+		"stun:fast4.example:3478",
+	}
+	results := map[string]Observation{
+		urls[0]: okObservation(urls[0], 10),
+		urls[2]: okObservation(urls[2], 30),
+		urls[3]: okObservation(urls[3], 40),
+		// urls[1] 缺席 = 本轮失败
+	}
+	reg, _ := newTestRegistry(t, urls, 3, results)
+
+	reg.ProbeOnce(context.Background())
+	p := reg.Payload()
+	selected := selectedURLs(p)
+
+	if len(selected) != 3 {
+		t.Fatalf("3 个名额应被填满（恒选 2 + 补位 1），实际 %d：%v", len(selected), selected)
+	}
+	if !contains(selected, urls[0]) || !contains(selected, urls[2]) {
+		t.Fatalf("健康的前两条应占恒选席位，实际 %v", selected)
+	}
+	if !contains(selected, urls[3]) {
+		t.Fatalf("恒选空出的名额应由轮询补上（fast4），实际 %v", selected)
+	}
+	if contains(selected, urls[1]) {
+		t.Fatalf("不健康的条目不该被选中，实际 %v", selected)
+	}
+	if s := scoreOf(t, p, urls[1]); s.Selected || s.OK {
+		t.Fatalf("不健康条目的打分应如实上报：%+v", s)
 	}
 }
 
@@ -293,7 +427,7 @@ func TestMaxSTUNGivesRoomToStickyFirst(t *testing.T) {
 // 不代表观众看不见；空列表会直接掐掉 srflx 候选，比给一份未筛选的列表更糟。
 func TestAllFailDegradesToFullList(t *testing.T) {
 	urls := config.DefaultSTUNURLs()
-	reg, _ := newTestRegistry(t, urls, 4, nil) // 空 results = 全部失败
+	reg, _ := newTestRegistry(t, urls, config.DefaultICEMaxSTUN, nil) // 空 results = 全部失败
 
 	reg.ProbeOnce(context.Background())
 	p := reg.Payload()

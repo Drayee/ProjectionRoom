@@ -62,7 +62,13 @@ const DefaultPackSize = 100
 // 同时又足够短，使一次网络路径变化（换网关、切运营商）能在几分钟内反映到新房间里。
 const (
 	// DefaultICEMaxSTUN 是单次下发的 STUN 条数上限。
-	DefaultICEMaxSTUN = 4
+	//
+	// 为什么是 5 而不是 4：恒选席位是「实测最快的 2 条 + 本轮健康的粘性 2 条
+	// （stun.l.google.com / stun.cloudflare.com）」，上限 4 会让恒选席位吃满全部名额、
+	// 轮询只剩 0 席 —— 等于把"低分项/暂时抖动的条目靠轮换回升"这条设计抹掉。
+	// 要同时容下最快两条与粘性两条、再留出轮询席位，下限就是 5。
+	// （要改回 4 只需改这一个常量：改完轮询席位最多 1 个、常见情况下是 0 个。）
+	DefaultICEMaxSTUN = 5
 	// DefaultICEProbeInterval 是服务端重新探测一轮的周期。
 	DefaultICEProbeInterval = 60 * time.Second
 	// DefaultICETTL 是下发载荷的默认有效期。

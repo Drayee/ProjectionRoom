@@ -66,8 +66,13 @@ func TestICEDefaults(t *testing.T) {
 			t.Fatalf("默认 STUN 第 %d 条应为 %q，实际 %q", i+1, u, ic.STUNURLs[i])
 		}
 	}
-	if ic.MaxSTUN != 4 {
-		t.Fatalf("默认 MaxSTUN 应为 4，实际 %d", ic.MaxSTUN)
+	// 默认 5 = 恒选 4 席（实测最快 2 条 + 健康粘性 2 条）+ 1 个轮询席位。
+	// 4 会让恒选席吃满全部名额、轮询剩 0 席，等于抹掉"低分项靠轮换回升"这条设计。
+	if ic.MaxSTUN != 5 {
+		t.Fatalf("默认 MaxSTUN 应为 5，实际 %d", ic.MaxSTUN)
+	}
+	if ic.MaxSTUN != DefaultICEMaxSTUN {
+		t.Fatalf("默认 MaxSTUN 应与 DefaultICEMaxSTUN 一致，实际 %d", ic.MaxSTUN)
 	}
 	if ic.ProbeInterval != 60*time.Second {
 		t.Fatalf("默认探测周期应为 60s，实际 %v", ic.ProbeInterval)
