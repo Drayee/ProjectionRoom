@@ -49,6 +49,16 @@ button[aria-busy='true'] {
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
+/* 链接配色：深色主题下浏览器默认蓝对比度不够，统一用强调色；
+   悬停加下划线作为可点击的补充提示（键盘可达由下面的 :focus-visible 保证）。 */
+a {
+  color: var(--accent);
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
 /* 键盘可达：所有可交互元素在 Tab 聚焦时都有可见轮廓（Enter/Space 激活是浏览器原生行为）。 */
 button:focus-visible,
 summary:focus-visible,

@@ -112,6 +112,17 @@ function changeRate(event: Event) {
       </span>
     </div>
 
+    <p class="muted small hint" v-if="!store.mediaIndex">
+      还没有片源？本项目不提供也不分发任何内容，可以在第三方资源站找番剧：
+      <a
+        href="https://www.comicat.org/"
+        target="_blank"
+        rel="noopener noreferrer"
+        data-testid="anime-source-link"
+        >comicat.org</a
+      >。
+    </p>
+
     <p class="error-text" v-if="store.mediaError">{{ store.mediaError }}</p>
 
     <!-- 本机没有 ffmpeg 的兜底入口：默认收起，展开后是上传 + 服务端切片面板 + 切片工具下载。 -->

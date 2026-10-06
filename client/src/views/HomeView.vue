@@ -125,6 +125,16 @@ async function joinRoom() {
           创建后会拿到 6 位房间码。进房后选好分片目录即可开播：分片由主播通过 WebRTC 直连分发，
           服务器不在视频链路上。本机没有 ffmpeg 时，主播页里有「服务端切片」与「下载切片工具」两条路。
         </p>
+        <p class="muted note">
+          片源要自备：本项目不提供也不分发任何内容。还没有片源的话，可以到第三方资源站
+          <a
+            href="https://www.comicat.org/"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-testid="anime-source-link"
+            >comicat.org（番剧资源，新窗口打开）</a
+          >。
+        </p>
       </section>
 
       <section class="card">
