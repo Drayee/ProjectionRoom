@@ -3,7 +3,7 @@ import { defineStore } from 'pinia'
 import { useSignaling } from '../composables/useSignaling'
 import { useMediaIndex } from '../composables/useMediaIndex'
 import { useChunkStore } from '../composables/useChunkStore'
-import { useChunkRequester } from '../composables/useChunkRequester'
+import { chunkErrorCode, useChunkRequester } from '../composables/useChunkRequester'
 import { useChunkPlayer } from '../composables/useChunkPlayer'
 import { useSyncClock } from '../composables/useSyncClock'
 import { useWebRTC } from '../composables/useWebRTC'
@@ -12,6 +12,14 @@ import { useTopology } from '../composables/useTopology'
 import { segmentIndexAt } from '../types/media'
 import { KIND_INIT, KIND_MEDIA, encodeControl, type DecodedMedia } from '../types/codec'
 import { Action, T } from '../types/protocol'
+import {
+  INFLIGHT_FALLBACK,
+  MAX_FETCH_FAILOVER_HOPS,
+  PARENT_AVOID_TTL_MS,
+  deriveInflightLimit,
+  deriveRequestTimeoutMs,
+  pickServeTaskIndex,
+} from '../utils/serveSchedule'
 import type { MediaIndex } from '../types/media'
 import type {
   Capacity,
@@ -61,8 +69,13 @@ const ERROR_TEXT: Record<string, string> = {
 const PREFETCH_WINDOW = 30
 /** 主播本地读取，窗口不需要那么大。 */
 const HOST_WINDOW = 8
-/** 同时在途的远程请求上限。 */
-const MAX_INFLIGHT = 4
+/**
+ * 在途上限的**兜底值**（T2-2 改动前它是固定值）。
+ *
+ * 现在真正的上限由实测边速率推导（`inflightLimit`，见 utils/serveSchedule.deriveInflightLimit），
+ * 这个 4 只在"速率或分片大小还没测出来"时生效 —— 起播阶段行为因此与改动前完全一致。
+ */
+const MAX_INFLIGHT = INFLIGHT_FALLBACK
 /** 与 SPEC §7.3 一致的抖动缓冲目标。 */
 const BUFFER_TARGET_SEC = 2
 /**
@@ -236,6 +249,43 @@ export const useRoomStore = defineStore('room', () => {
   const serveLog = ref<string[]>([])
   const bufferedAhead = ref(0)
   const videoEl = shallowRef<HTMLVideoElement | null>(null)
+
+  // ---------- 播放健康度（T4）----------
+  /** 按时到达的分片数（进入可播放缓冲时播放头还没走到它的起点）。 */
+  const onTimeChunks = ref(0)
+  /** 迟到分片数（进入缓冲时播放头已经到它了）。 */
+  const lateChunks = ref(0)
+  /** 因**超时**换父的次数（T3）：卡顿优化的直接观测量。 */
+  const timeoutFailovers = ref(0)
+
+  /**
+   * 按时交付率统计。
+   *
+   * 判据 = "这一片进入可播放缓冲时，播放头还没走到它的起点"（T4 的定义）：
+   *   · 参照点取**权威锚点**（clock.expectedAt()）而不是 video.currentTime ——
+   *     门控期间播放头还钉在 0，用本机位置会把"按设计先攒后播"的那一批冤枉成迟到；
+   *   · 跳转重建缓冲期间不统计：seekPipeline 是"先 append 目标分片、再 seekTo"，
+   *     这期间 currentTime 还停在旧位置，用它判会凭空多出一堆假迟到。
+   *
+   * 这不是"卡顿次数"本身 —— 卡顿用的是 `<video>` 的 waiting 事件（player.stalls）：
+   * 播放头到了却一点可播数据都没有时浏览器才会发它，而"迟到的分片"里有一部分
+   * 仍然赶在播放头前面进了缓冲（只是裕度很小）。
+   */
+  const SEEK_TIMING_MUTE_MS = 3000
+
+  function noteDeliveryTiming(segment: number) {
+    const index = mediaIndex.value
+    if (!index || isHost.value) return
+    if (performance.now() - lastHardSeekAt < SEEK_TIMING_MUTE_MS) return
+    const meta = index.segments[segment - 1]
+    if (!meta) return
+    const refTime = gated.value ? (clock.expectedAt() ?? 0) : (player.video.value?.currentTime ?? 0)
+    if (refTime < meta.startPts) {
+      onTimeChunks.value += 1
+    } else {
+      lateChunks.value += 1
+    }
+  }
 
   /** 启动门控状态（观众侧）：true = 正在加载，不播放、不响应播放控制。 */
   const gated = ref(false)
@@ -880,6 +930,7 @@ export const useRoomStore = defineStore('room', () => {
     hostId.value = ''
     members.value = []
     requester.reset()
+    requester.resetEdges()
     rtc.closeAll()
     topology.reset()
     if (!isHost.value && mediaIndex.value) {
@@ -957,14 +1008,46 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   /**
+   * 当前播放头所在分片；取不到（没有索引 / 时钟未就绪）返回 null。
+   *
+   * 发送队列的紧迫度排序用它（T2-1）：观众用**权威进度**（主播此刻该播到的位置），
+   * 因为门控期间播放头还钉在 0，用它会得出"所有分片都很远"的结论。
+   * 主播没有权威进度（它就是源），退回自己的播放器位置。
+   */
+  function playheadSegment(): number | null {
+    const index = mediaIndex.value
+    if (!index || index.segments.length === 0) {
+      return null
+    }
+    const time = isHost.value ? player.video.value?.currentTime : (clock.expectedAt() ?? null)
+    if (time === null || time === undefined || !Number.isFinite(time)) {
+      return null
+    }
+    return segmentIndexAt(index, time)
+  }
+
+  /**
    * 应答队列：把"读磁盘"从 DataChannel 的 onmessage 回调里挪出来。
    *
    * 之前 serveRequest 直接跑在消息回调里，一次读盘失败（NotFoundError：文件被移动/替换、
    * 句柄过期）就变成未处理的 promise 拒绝，在控制台刷成一片红，
    * 而且并发请求会一起挤在消息回调里互相拖慢。
    * 现在回调只入队，真正的读盘按并发上限在队列里执行，任何异常都在这里落地。
+   *
+   * 出队顺序**不是到达顺序**（T2-1）：每个任务记下入队时刻，并按"离播放头还有多远"取最急的一条
+   * （见 utils/serveSchedule.ts）。改动前纯粹 FIFO，于是"马上要播的那一片"可能排在一堆
+   * 远端分片后面 —— 这正是紧要分片迟到、观众卡一下的直接原因。
    */
-  const serveQueue: Array<{ peerId: string; rid: string; index: number }> = []
+  interface ServeTask {
+    peerId: string
+    rid: string
+    index: number
+    /** 入队序号：同紧迫度时先到先发。 */
+    seq: number
+  }
+
+  const serveQueue: ServeTask[] = []
+  let serveSeq = 0
   let serveRunning = 0
   const SERVE_CONCURRENCY = 3
   const SERVE_QUEUE_MAX = 64
@@ -976,13 +1059,16 @@ export const useRoomStore = defineStore('room', () => {
       rtc.send(peerId, encodeControl({ t: 'err', rid: msg.rid, idx: msg.idx, code: 'BUSY' }))
       return
     }
-    serveQueue.push({ peerId, rid: msg.rid ?? '', index: msg.idx })
+    serveSeq += 1
+    serveQueue.push({ peerId, rid: msg.rid ?? '', index: msg.idx, seq: serveSeq })
     void drainServeQueue()
   }
 
   async function drainServeQueue() {
     while (serveRunning < SERVE_CONCURRENCY && serveQueue.length > 0) {
-      const task = serveQueue.shift() as { peerId: string; rid: string; index: number }
+      // 取"最急的那一条"：先算下标再 splice，避免并发 drain 把同一条发两次。
+      const at = pickServeTaskIndex(serveQueue, playheadSegment())
+      const task = serveQueue.splice(at < 0 ? 0 : at, 1)[0] as ServeTask
       serveRunning += 1
       try {
         await serveOne(task.peerId, task.rid, task.index)
@@ -1134,9 +1220,68 @@ export const useRoomStore = defineStore('room', () => {
     requester.reset()
   }
 
+  /**
+   * 某个父节点实测的 ping RTT（毫秒）；通道没开或还没测到返回 0。
+   *
+   * 数据通道的 ping 每 3s 才刷一次（useWebRTC.PING_INTERVAL_MS），所以起播最初几秒必然
+   * 读到 0 —— deriveRequestTimeoutMs 会用 800ms 兜底，不会退化成"0 毫秒超时"。
+   */
+  function perPeerRttMs(peerId: string): number {
+    const peer = rtc.peers.value.get(peerId)
+    if (!peer || !peer.channelOpen) {
+      return 0
+    }
+    return peer.rttMs
+  }
+
+  /** 平均分片字节数（在途推导与超时估计共用）；索引为空或分片数为 0 时返回 0。 */
+  function avgSegmentBytesOf(): number {
+    const index = mediaIndex.value
+    if (!index || index.segments.length === 0) {
+      return 0
+    }
+    return index.totalBytes / index.segments.length
+  }
+
+  /**
+   * 按该边**峰值速率**"传完一个平均分片"预计要多久（毫秒）；没有样本时返回 0。
+   *
+   * 数据通道 ping 测到的 RTT 只反映**控制报文**的往返，不含分片自身的传输时间
+   * （跨运营商的慢边上，200 KB 分片要 800ms，而 3×RTT 可能只有 600ms），
+   * 所以超时估计必须再叠上这一项，否则会必然误判超时 → 重复请求 → 白烧上行。
+   *
+   * 用峰值而不是当前 EWMA：退化的父节点当前速率很低，拿它估算会把超时越拖越长，
+   * 恰好抵消"坏父快速换掉"（详见 utils/serveSchedule.ts 的说明）。
+   */
+  function expectedDeliveryMsOf(peerId: string): number {
+    const peak = requester.edges.value.get(peerId)?.peakRateBps ?? 0
+    const avg = avgSegmentBytesOf()
+    if (!(peak > 0) || !(avg > 0)) {
+      return 0
+    }
+    return (avg / peak) * 1000
+  }
+
   const requester = useChunkRequester({
     send: (peerId, data) => rtc.send(peerId, data),
+    // T3-1：改动前这里没有传值，用的是 useChunkRequester 里写死的 **3000ms**。
+    // 现在按该父节点的实测 RTT + 实测边速率推导：
+    // clamp(500ms, 10s, max(3×RTT, 2×预计传输时间))；两者都没测到就用 800ms。
+    timeoutMs: (peerId) =>
+      deriveRequestTimeoutMs(perPeerRttMs(peerId), {
+        expectedDeliveryMs: expectedDeliveryMsOf(peerId),
+      }),
   })
+
+  /**
+   * 当前的在途上限（T2-2）。
+   *
+   * 从"所有父节点的实测吞吐之和"倒推：`clamp(2, 8, ceil(edgeRate × 0.4s / 平均分片字节))`。
+   * 没有测量数据（起播阶段）时回落 `MAX_INFLIGHT = 4`，与改动前一致。
+   */
+  const inflightLimit = computed(() =>
+    deriveInflightLimit(requester.totalEdgeRateBps(), avgSegmentBytesOf(), { fallback: MAX_INFLIGHT }),
+  )
 
   /** 进入加载门控：暂停播放，等到"主播时间戳所在分片起连续 n 片"再起播。 */
   function enterGate(reason: string, thresholdSegments = STARTUP_GATE_SEGMENTS) {
@@ -1267,7 +1412,8 @@ export const useRoomStore = defineStore('room', () => {
 
     for (let i = start; i <= end; i += 1) {
       if (chunkStore.has(i)) continue
-      if (!host && requester.pendingCount() >= MAX_INFLIGHT) break
+      // 在途上限是**推导值**（T2-2）：固定值时快链路喂不饱、慢链路会被压垮。
+      if (!host && requester.pendingCount() >= inflightLimit.value) break
       void fetchChunk(i)
     }
 
@@ -1289,15 +1435,26 @@ export const useRoomStore = defineStore('room', () => {
           nextAppend = fresh
         }
         requiredSegmentSince = performance.now()
-      } else if (host || requester.pendingCount() < MAX_INFLIGHT) {
+      } else if (host || requester.pendingCount() < inflightLimit.value) {
         void fetchChunk(requiredSegment)
       }
     }
   }
 
+  /**
+   * 取一片（观众走网络 / 主播走磁盘）。
+   *
+   * 观众的失败处理是本轮改的重点（T3-2）：**超时后立刻转投下一个候选父节点**，
+   * 而不是等下一个 200ms tick 再对同一个父重试一轮 ——
+   * 那正是"卡在一个坏父上"的表现：每一轮都要把同一份超时再等一遍。
+   *
+   * 只对**超时**做立即转投：`send` 失败（通道没开）与远端明确拒绝（NOT_FOUND/BUSY）
+   * 立刻换父也拿不到数据（前者是连接问题，后者说明对方真没有），交给下一个 tick 更干净。
+   */
   async function fetchChunk(index: number) {
-    try {
-      if (isHost.value) {
+    if (isHost.value) {
+      // 主播只从磁盘读（结构不变）。
+      try {
         const payload = await media.readChunk(index)
         if (!payload) return
         if (index === 0) {
@@ -1305,14 +1462,26 @@ export const useRoomStore = defineStore('room', () => {
         } else {
           chunkStore.put(index, payload)
         }
-      } else {
-        const peerId = topology.pickParent(index)
-        if (!peerId) {
-          chunkErrors.value += 1
-          noteFetchFailure(`分片 ${index}: 没有可用父节点`)
-          return
-        }
-        topology.noteAttempt(index)
+        flushOrdered()
+      } catch (err) {
+        chunkErrors.value += 1
+        noteFetchFailure(`分片 ${index}: ${(err as Error).message ?? '未知失败'}`)
+      }
+      return
+    }
+
+    let excluded = ''
+    for (let hop = 0; hop < MAX_FETCH_FAILOVER_HOPS; hop += 1) {
+      // 并发请求之间可能已经有人把这一片拿到了：别再白问一遍。
+      if (chunkStore.has(index)) return
+      const peerId = topology.pickParent(index, excluded)
+      if (!peerId) {
+        chunkErrors.value += 1
+        noteFetchFailure(`分片 ${index}: 没有可用父节点`)
+        return
+      }
+      topology.noteAttempt(index)
+      try {
         const delivery = await requester.request(peerId, index)
         topology.noteDelivered(index)
         if (index === 0 || delivery.kind === KIND_INIT) {
@@ -1320,13 +1489,35 @@ export const useRoomStore = defineStore('room', () => {
         } else {
           chunkStore.put(delivery.index, delivery.payload)
         }
+        flushOrdered()
+        return
+      } catch (err) {
+        // 必须留痕：以前这里是空的 catch，于是"一片都没成功"在界面上完全看不出来。
+        // T3 起带上**是从哪个父节点失败的** —— 换父取证必须能指出"从谁换到谁"。
+        chunkErrors.value += 1
+        noteFetchFailure(`分片 ${index} ← ${peerId.slice(0, 8)}: ${(err as Error).message ?? '未知失败'}`)
+        const code = chunkErrorCode(err)
+        if (code !== 'timeout') {
+          // 远端明确说没有（NOT_FOUND/BUSY）不是"父节点坏"：多半只是位图过期，
+          // 拿它去降权会把一个完全正常的父节点禁掉。只把**超时**计入连续失败。
+          return
+        }
+        // 同一个 (父, 分片) 连续超时到上限 → 该父节点暂时降权（T3-2 的"不卡在坏父上"）。
+        if (topology.noteFailure(index, peerId)) {
+          noteLifecycle(
+            `父节点 ${peerId.slice(0, 6)} 连续超时取不到分片 ${index}，暂时降权 ${PARENT_AVOID_TTL_MS / 1000}s`,
+          )
+        }
+        // 超时换父：只有在"确实还有别的候选"时才计数与继续 ——
+        // 否则计数会虚高（一个只有单父的观众永远换不了父）。
+        const alternatives = topology.parents.value.filter((id) => id !== peerId)
+        if (alternatives.length === 0) {
+          return
+        }
+        timeoutFailovers.value += 1
+        excluded = peerId
+        noteLifecycle(`分片 ${index}: ${peerId.slice(0, 6)} 超时，立刻转投下一个候选父`)
       }
-      flushOrdered()
-    } catch (err) {
-      // 超时/失败：下一次 tick 会重新请求（M3 会在这里转投其他父节点）。
-      // 但**必须留痕**：以前这里是空的 catch，于是"一片都没成功"在界面上完全看不出来。
-      chunkErrors.value += 1
-      noteFetchFailure(`分片 ${index}: ${(err as Error).message ?? '未知失败'}`)
     }
   }
 
@@ -1366,6 +1557,8 @@ export const useRoomStore = defineStore('room', () => {
     while (chunkStore.has(nextAppend)) {
       const buf = chunkStore.get(nextAppend)
       if (!buf) break
+      // 统计必须在 append **之前**读播放头：append 之后缓冲变了，但"到达时刻"已经过去。
+      noteDeliveryTiming(nextAppend)
       player.append(KIND_MEDIA, buf)
       nextAppend += 1
     }
@@ -1847,6 +2040,8 @@ export const useRoomStore = defineStore('room', () => {
     rebuildState.value = 'idle'
     roomUnrecoverable.value = ''
     requester.reset()
+    // 边速率账本跟着房间一起作废：换房之后旧的父节点吞吐不该影响新房间的在途推导。
+    requester.resetEdges()
     rtc.closeAll()
     topology.reset()
     player.detach()
@@ -2036,6 +2231,74 @@ export const useRoomStore = defineStore('room', () => {
     return iceConfig.snapshot()
   }
 
+  /**
+   * 播放健康度（T4）：这是用户判断"延迟/卡顿优化有没有效"的那块面板。
+   *
+   * 为什么用 computed 而不是普通函数：它要能被诊断抽屉依赖到 —— 普通函数只在抽屉
+   * 恰好因别的响应式数据重渲染时才被重新求值，数值会滞后甚至定格（这个坑在
+   * `playerDebugState` 的注释里已经踩过一次）。
+   */
+  const playbackHealth = computed(() => {
+    const totalTimed = onTimeChunks.value + lateChunks.value
+    const avgSegmentBytes = Math.round(avgSegmentBytesOf())
+
+    const edges = requester.edgeStatList().map((stat) => {
+      const member = members.value.find((m) => m.id === stat.peerId)
+      const rttMs = perPeerRttMs(stat.peerId)
+      const expectedDeliveryMs = Math.round(expectedDeliveryMsOf(stat.peerId))
+      return {
+        peerId: stat.peerId,
+        label: member?.displayName || stat.peerId.slice(0, 6),
+        primary: stat.peerId === topology.primaryId.value,
+        rateBps: Math.round(stat.rateBps),
+        peakRateBps: Math.round(stat.peakRateBps),
+        rttMs,
+        /**
+         * 这条边此刻实际用的请求超时（T3-1 的公式结果）：
+         * clamp(500ms, 10s, max(3×RTT, 2×预计传输时间))。
+         */
+        timeoutMs: deriveRequestTimeoutMs(rttMs, { expectedDeliveryMs }),
+        /** 按该边实测速率传完一个平均分片的预计耗时：超时阈值的另一半输入。 */
+        expectedDeliveryMs,
+        deliveries: stat.deliveries,
+        timeouts: stat.timeouts,
+        samples: stat.samples,
+      }
+    })
+
+    const parents = topology.parents.value
+    const unassigned = !isHost.value && parents.length === 0
+    return {
+      onTimeRate: totalTimed > 0 ? onTimeChunks.value / totalTimed : -1,
+      onTimeChunks: onTimeChunks.value,
+      lateChunks: lateChunks.value,
+      /** 卡顿次数：信号是 <video> 的 waiting 事件（播放头到了却没有可播数据）。 */
+      stallCount: player.stalls.value,
+      /** 因超时换父的次数（T3）：它涨说明"坏父"被绕过了。 */
+      timeoutFailovers: timeoutFailovers.value,
+      /** 当前被暂时降权的父节点数 / 累计降权次数。 */
+      avoidedParents: topology.avoidedParents(),
+      avoidEvents: topology.avoidEvents.value,
+      /** 当前在途上限（T2-2 的推导值）与此刻实际在途请求数。 */
+      inflight: inflightLimit.value,
+      inflightNow: requester.pendingCount(),
+      /** 实测边速率合计（Bytes/s）与平均分片字节数：在途上限就是由它们推出来的。 */
+      edgeRateBps: Math.round(requester.totalEdgeRateBps()),
+      avgSegmentBytes,
+      edges,
+      /** 自身深度与房间规模（"跳数"的可观测面）。 */
+      depth: depth.value,
+      members: members.value.length,
+      parents,
+      unassigned,
+      unassignedText: !unassigned
+        ? ''
+        : topology.mode.value === 'pending'
+          ? '等待服务端分配上游（尚未下发分配）'
+          : '未安置：当前房间已满 / 没有可用父节点（服务端没有给这个节点分配父节点）',
+    }
+  })
+
   /** IPv6 直连的地址族诊断：全局 IPv6 是否真的拿到、有没有候选被过滤掉。 */
   function ipv6Diagnostics() {
     return rtc.ipv6State()
@@ -2116,11 +2379,27 @@ export const useRoomStore = defineStore('room', () => {
     topologyReason: topology.reason,
     primaryParentId: topology.primaryId,
     backupParentIds: topology.backupIds,
+    /**
+     * 取数候选父节点（主父在前、备用父在后）。
+     *
+     * 与 primaryParentId 的区别：**长度为 0 才是"未安置"** ——
+     * 服务端安置不下时下发的主父是空串，光看 primaryParentId 分不清
+     * "还没下发"与"下发了一个空分配"。
+     */
+    parentIds: topology.parents,
     childrenIds: topology.children,
     distributorId: topology.distributorId,
     lastDistributorChange,
     peers: rtc.peers,
     uploadCapacityBps,
+    // ---- 播放健康度（T4）与调度观测面 ----
+    playbackHealth,
+    inflightLimit,
+    timeoutFailovers,
+    edgeRateBps: () => Math.round(requester.totalEdgeRateBps()),
+    edgeStats: () => requester.edgeStatList(),
+    parentRttMs: (peerId: string) => perPeerRttMs(peerId),
+    requestTimeoutMs: (peerId: string) => deriveRequestTimeoutMs(perPeerRttMs(peerId)),
     // ---- ICE 配置 TTL 与 IPv6 直连（打洞优化 ②③）----
     iceServerUrls: () => iceConfig.snapshot().serverUrls,
     iceDiagnostics,

@@ -77,6 +77,49 @@ export interface DebugSnapshot {
     reason: string
     lastDistributorChange: string
   }
+  /**
+   * 播放健康度（T4）：验收脚本与诊断抽屉读的是同一份数据。
+   * "按时率 / 迟到 / 卡顿 / 每边速率 / 在途上限"都在这里，不需要去抠 DOM 文本。
+   */
+  health: {
+    /** 按时交付率 0–1；还没有样本时为 -1（未测得）。 */
+    onTimeRate: number
+    onTimeChunks: number
+    lateChunks: number
+    /** 卡顿次数：信号是 <video> 的 waiting 事件。 */
+    stallCount: number
+    /** 因超时换父的次数（T3）。 */
+    timeoutFailovers: number
+    /** 当前被暂时降权的父节点数 / 累计降权次数。 */
+    avoidedParents: number
+    avoidEvents: number
+    /** 当前在途上限（T2-2 的推导值）与此刻实际在途请求数。 */
+    inflight: number
+    inflightNow: number
+    edgeRateBps: number
+    avgSegmentBytes: number
+    /** 自身深度与房间成员数（"跳数"的可观测面）。 */
+    depth: number
+    members: number
+    /** 取数候选父节点；长度为 0 且不是主播 = 未被安置。 */
+    parents: string[]
+    unassigned: boolean
+    unassignedText: string
+    edges: Array<{
+      peerId: string
+      label: string
+      primary: boolean
+      rateBps: number
+      peakRateBps: number
+      rttMs: number
+      timeoutMs: number
+      /** 按该边实测速率传完一个平均分片的预计耗时：超时阈值的另一半输入。 */
+      expectedDeliveryMs: number
+      deliveries: number
+      timeouts: number
+      samples: number
+    }>
+  }
   gate: {
     gated: boolean
     reason: string
@@ -282,6 +325,7 @@ export function installDebugHook(): void {
           reason: store.topologyReason,
           lastDistributorChange: store.lastDistributorChange,
         },
+        health: store.playbackHealth,
         errors: {
           last: store.lastError,
           media: store.mediaError,

@@ -27,6 +27,12 @@ function humanBps(bps: number): string {
   return `${Math.round(bps / 1000)} kbps`
 }
 
+function humanBytes(bytes: number): string {
+  if (!bytes) return '未测得'
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MiB`
+  return `${Math.round(bytes / 1024)} KiB`
+}
+
 const peers = computed(() => [...store.peers.values()])
 const openChannels = computed(() => peers.value.filter((peer) => peer.channelOpen).length)
 const player = computed(() => store.playerDebugState())
@@ -44,15 +50,28 @@ const connectionText = computed(() => {
   }
 })
 
-/** 上游链路：观众说"上游"，主播说"观众通道"。 */
+/**
+ * 上游链路：观众说"上游"，主播说"观众通道"。
+ *
+ * "未安置"必须说出来（T4 补 T1 的缺口）：服务端安置不下时下发的是**空分配**
+ * （主父为空串），客户端此前只是静默地什么都不取 —— 用户看到的是"一直加载中"，
+ * 却看不出原因是"房间满了"。这里用显式文案区分"还没下发"与"确实没被安置"。
+ */
+const unassigned = computed(() => !store.isHost && store.parentIds.length === 0)
+
 const upstreamText = computed(() => {
   if (store.isHost) {
     return `P2P ${peers.value.length} 条（已开通道 ${openChannels.value}）· 上行估计 ${humanBps(store.uploadCapacityBps)}`
   }
-  if (store.primaryParentId) {
-    return `主父 ${memberName(store.primaryParentId)} · 已开通道 ${openChannels.value}/${peers.value.length}`
+  const channels = `已开通道 ${openChannels.value}/${peers.value.length}`
+  if (store.parentIds.length > 0) {
+    const backup = store.backupParentIds.length > 0 ? `（备用 ${store.backupParentIds.map(memberName).join('、')}）` : ''
+    return `主父 ${memberName(store.primaryParentId)}${backup} · ${channels}`
   }
-  return `等待分配上游 · 已开通道 ${openChannels.value}/${peers.value.length}`
+  if (store.topologyMode === 'pending') {
+    return `等待服务端分配上游（尚未下发分配）· ${channels}`
+  }
+  return `未安置：当前房间已满 / 没有可用父节点（服务端没有分配父节点）· ${channels}`
 })
 
 const lagText = computed(() => {
@@ -119,6 +138,61 @@ const runtimeText = computed(
     ` · p95 交付 ${store.p95DeliveryMs}ms · 跳转重灌 ${store.syncResets} 次 · 丢弃非主父进度 ${store.rejectedProgress} 条`,
 )
 
+// ---------- 播放健康度（T4）----------
+//
+// 这一块是"优化到底有没有效"的判据面，四项都要能读到**真实数值**：
+//   ① 按时交付率（onTimeRate）—— 迟到分片才是用户感知到的卡顿来源；
+//   ② 卡顿次数（<video> waiting 事件）—— 播放头到了却没有可播数据；
+//   ③ 每边速率 / RTT / 交付·超时次数 —— 在途上限与超时值就是从这里推出来的；
+//   ④ 深度 + 成员数、当前在途上限。
+// 沿用抽屉原有样式（.kv 网格 + .mono），不重做 UI。
+
+const health = computed(() => store.playbackHealth)
+
+const healthText = computed(() => {
+  const h = health.value
+  const stalls = `${h.stallCount} 次（信号：<video> waiting 事件）`
+  if (h.onTimeRate < 0) {
+    return `按时率 未测得（还没有分片进入可播缓冲）· 卡顿 ${stalls}`
+  }
+  return (
+    `按时率 ${(h.onTimeRate * 100).toFixed(1)}%（按时 ${h.onTimeChunks} / 迟到 ${h.lateChunks}）` +
+    ` · 卡顿 ${stalls}`
+  )
+})
+
+const edgeText = computed(() => {
+  const h = health.value
+  if (h.edges.length === 0) {
+    return store.isHost ? '不适用（主播是源，不向父节点取数）' : '尚无交付样本（还没从父节点收到分片）'
+  }
+  return h.edges
+    .map((edge) => {
+      const peak = edge.peakRateBps > edge.rateBps ? `／峰值 ${humanBps(edge.peakRateBps)}` : ''
+      const rtt = edge.rttMs > 0 ? `${edge.rttMs}ms` : '未测'
+      // 超时阈值由两部分取大：3×RTT 与 2×预计传输耗时。后者能解释"为什么阈值比 RTT 大很多"。
+      const budget =
+        edge.expectedDeliveryMs > 0
+          ? `超时阈值 ${edge.timeoutMs}ms（含预计传输 ${edge.expectedDeliveryMs}ms）`
+          : `超时阈值 ${edge.timeoutMs}ms`
+      return (
+        `${edge.label}${edge.primary ? '*' : ''} ${humanBps(edge.rateBps)}${peak}` +
+        ` · rtt ${rtt} · ${budget} · 交付 ${edge.deliveries}／超时 ${edge.timeouts}`
+      )
+    })
+    .join(' ｜ ')
+})
+
+const scheduleText = computed(() => {
+  const h = health.value
+  return (
+    `在途上限 ${h.inflight}（实测边速率 ${humanBps(h.edgeRateBps)} / 均片 ${humanBytes(h.avgSegmentBytes)}` +
+    ` / 此刻在途 ${h.inflightNow}）· 发送队列按"离播放头距离"升序（已播过的排最后）` +
+    ` · 超时换父 ${h.timeoutFailovers} 次 · 降权父 ${h.avoidedParents}（累计 ${h.avoidEvents}）` +
+    ` · 深度 ${h.depth} · 成员 ${h.members}`
+  )
+})
+
 /**
  * ICE 配置（TTL 缓存 + 刷新）。
  * 重点是"列表变了才连"：刷新次数会随 TTL 一直涨，而重启次数只应该在列表真的变了时才涨。
@@ -180,6 +254,9 @@ const report = computed(() => {
   lines.push(`上游: ${upstreamText.value}`)
   lines.push(`同步: ${clockText.value}  滞后: ${lagText.value}`)
   lines.push(`门控: ${gateText.value}`)
+  lines.push(`播放健康度: ${healthText.value}`)
+  lines.push(`每边速率: ${edgeText.value}`)
+  lines.push(`调度: ${scheduleText.value}`)
   lines.push(`播放器: ${playerText.value}`)
   lines.push(`媒体: ${mediaText.value}`)
   lines.push(`计数: ${runtimeText.value}`)
@@ -245,7 +322,16 @@ onBeforeUnmount(() => {
         <span class="v">{{ connectionText }}<template v-if="!store.joined"> · 未加入房间</template></span>
 
         <span class="k">上游链路</span>
-        <span class="v">{{ upstreamText }}</span>
+        <span class="v" :class="{ warn: unassigned }" data-testid="diag-upstream">{{ upstreamText }}</span>
+
+        <span class="k">播放健康度</span>
+        <span class="v mono small" data-testid="diag-health">{{ healthText }}</span>
+
+        <span class="k">每边速率</span>
+        <span class="v mono small" data-testid="diag-health-edges">{{ edgeText }}</span>
+
+        <span class="k">调度</span>
+        <span class="v mono small" data-testid="diag-health-schedule">{{ scheduleText }}</span>
 
         <span class="k">与主播的差</span>
         <span class="v" :class="{ warn: Math.abs(store.lagSec) > 2 && !store.isHost }">{{ lagText }}</span>
