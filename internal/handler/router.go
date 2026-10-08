@@ -244,6 +244,9 @@ func NewRouter(
 		Rooms: rooms,
 		Meta:  roomMetaReader(accountDeps, adminDeps),
 		Sink:  accountDeps.RoomMeta,
+		// 读端点的每 IP 令牌桶（PR_ROOM_META_PER_MINUTE / _BURST）。
+		RatePerMinute: cfg.IPC.RoomMetaPerMinute,
+		RateBurst:     cfg.IPC.RoomMetaBurst,
 	}, cfg, accountDeps.Service)
 
 	// 客户端切片器二进制的只读清单：只回 JSON（平台/大小/sha256），

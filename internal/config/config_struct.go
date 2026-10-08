@@ -194,6 +194,17 @@ type IPCConfig struct {
 	// 按账号计数需要在这里再引入一个维度，而收益（防单账号刷）在本期并不成立。
 	AdminLogsPerMinute float64
 	AdminLogsBurst     int
+
+	// RoomMetaPerMinute / RoomMetaBurst 是 GET /api/rooms/:roomId/meta 的每 IP 限速
+	//（PR_ROOM_META_PER_MINUTE、PR_ROOM_META_BURST，默认 60/分钟、容量 20）。
+	//
+	// 为什么需要它：这条路由是**房主回读自己房间设置**的入口，前端在房主面板上
+	// 打开页面就会拉一次。它需要登录，但"已登录"不等于"不会被打"——
+	// 一个拿着自己账号的脚本可以持续请求任意房间码，而每次请求都会查一次 rooms_meta
+	//（非房主会被内存侧的房主校验挡住，因此不会有库往返，但 4xx 本身也是成本）。
+	// 默认 60/分钟对正常使用（进面板读一次 + 改完再读一次）是零约束。
+	RoomMetaPerMinute float64
+	RoomMetaBurst     int
 }
 
 // AuthConfig 是账号层的数据库与凭据配置（ACCOUNTS §5）。

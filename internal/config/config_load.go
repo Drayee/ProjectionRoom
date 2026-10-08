@@ -108,6 +108,10 @@ const (
 	// —— 一期缺口的补齐：管理端日志端点的每 IP 限速。
 	envAdminLogsPerMinute = "PR_ADMIN_LOGS_PER_MINUTE"
 	envAdminLogsBurst     = "PR_ADMIN_LOGS_BURST"
+
+	// —— 房主回读房间元数据的每 IP 限速（GET /api/rooms/:id/meta）。
+	envRoomMetaPerMinute = "PR_ROOM_META_PER_MINUTE"
+	envRoomMetaBurst     = "PR_ROOM_META_BURST"
 )
 
 // —— 账号层（ACCOUNTS §5）的默认值与允许范围。
@@ -149,6 +153,9 @@ const (
 	// 管理端日志端点的每 IP 令牌桶默认值（依据见 IPCConfig.AdminLogsPerMinute）。
 	DefaultAdminLogsPerMinute = 60
 	DefaultAdminLogsBurst     = 10
+	// 房主回读元数据的每 IP 令牌桶默认值（依据见 IPCConfig.RoomMetaPerMinute）。
+	DefaultRoomMetaPerMinute = 60
+	DefaultRoomMetaBurst     = 20
 )
 
 // DefaultPackSize 是分片打包的默认粒度（每个 .bin 容纳多少片）。
@@ -391,6 +398,9 @@ func Default() *Config {
 
 			AdminLogsPerMinute: DefaultAdminLogsPerMinute,
 			AdminLogsBurst:     DefaultAdminLogsBurst,
+
+			RoomMetaPerMinute: DefaultRoomMetaPerMinute,
+			RoomMetaBurst:     DefaultRoomMetaBurst,
 		},
 		Security: SecurityConfig{
 			Headers: true,
@@ -890,6 +900,7 @@ func applyIPCEnv(ic *IPCConfig) error {
 		{envAuthRefreshPerMinute, &ic.RefreshPerMinute, 0.001, MaxRoomCreatePerMinute},
 		{envPublicRoomsPerMinute, &ic.PublicRoomsPerMinute, 0.001, MaxRoomCreatePerMinute},
 		{envAdminLogsPerMinute, &ic.AdminLogsPerMinute, 0.001, MaxRoomCreatePerMinute},
+		{envRoomMetaPerMinute, &ic.RoomMetaPerMinute, 0.001, MaxRoomCreatePerMinute},
 	}
 	for _, tc := range cases {
 		v := os.Getenv(tc.name)
@@ -917,6 +928,7 @@ func applyIPCEnv(ic *IPCConfig) error {
 		{envAuthRefreshBurst, &ic.RefreshBurst},
 		{envPublicRoomsBurst, &ic.PublicRoomsBurst},
 		{envAdminLogsBurst, &ic.AdminLogsBurst},
+		{envRoomMetaBurst, &ic.RoomMetaBurst},
 	}
 	for _, tc := range bursts {
 		v := os.Getenv(tc.name)

@@ -769,6 +769,235 @@ func TestRoomMetaPatchStripsControlChars(t *testing.T) {
 	}
 }
 
+// —— 用例：房主回读元数据（T3 读侧：GET /api/rooms/:id/meta）——
+
+// TestRoomMetaGetOwnerReadsOwnMeta 覆盖房主回读的成功路径：
+// 200 + 四个字段，且响应里**不含**内部账号 id / 邮箱 / 角色 / 成员明细。
+func TestRoomMetaGetOwnerReadsOwnMeta(t *testing.T) {
+	env := newRoomMetaEnv(t, nil)
+
+	r, _, err := env.rooms.CreateOwned("GETMETA1", "pw12", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	env.meta.seed(store.RoomMeta{
+		RoomID: r.ID, OwnerUserID: env.owner.ID, Title: "我的客厅", IsPublic: true, HasPassword: true,
+	})
+
+	w := doJSON(t, env.engine, http.MethodGet, "/api/rooms/"+r.ID+"/meta", "", env.ownerToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("房主回读自己的元数据应当 200，实际 %d（%s）", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	// 字段白名单：这些键一旦出现就是泄露（内部 id / 账号档案 / 成员明细）。
+	for _, forbidden := range []string{"ownerUserId", "owner_user_id", "email", "role", "status", "members", "password_hash"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("房主元数据响应不得出现 %q：%s", forbidden, body)
+		}
+	}
+
+	var resp struct {
+		RoomID      string `json:"roomId"`
+		Title       string `json:"title"`
+		IsPublic    bool   `json:"isPublic"`
+		HasPassword bool   `json:"hasPassword"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v（body=%s）", err, body)
+	}
+	if resp.RoomID != r.ID || resp.Title != "我的客厅" || !resp.IsPublic || !resp.HasPassword {
+		t.Fatalf("响应内容不对：%+v", resp)
+	}
+
+	// 顶层字段必须**只有**这四个（多一个就是协议面扩大）。
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	allowed := map[string]bool{"roomId": true, "title": true, "isPublic": true, "hasPassword": true}
+	for k := range raw {
+		if !allowed[k] {
+			t.Fatalf("房主元数据响应字段超出白名单：%q（body=%s）", k, body)
+		}
+	}
+
+	// 读-改-写闭环：PATCH 之后回读必须看到新值。
+	pw := doJSON(t, env.engine, http.MethodPatch, "/api/rooms/"+r.ID+"/meta",
+		`{"title":"改过的标题","isPublic":false}`, env.ownerToken)
+	if pw.Code != http.StatusOK {
+		t.Fatalf("PATCH 应当 200，实际 %d（%s）", pw.Code, pw.Body.String())
+	}
+	w = doJSON(t, env.engine, http.MethodGet, "/api/rooms/"+r.ID+"/meta", "", env.ownerToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("回读应当 200，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if resp.Title != "改过的标题" || resp.IsPublic {
+		t.Fatalf("回读必须反映刚写进去的值：%+v", resp)
+	}
+	if !resp.HasPassword {
+		t.Fatalf("回读必须保留 has_password（PATCH 只管 title/isPublic）：%+v", resp)
+	}
+}
+
+// TestRoomMetaGetNonOwnerAndMissingAreBoth404 覆盖这条路由最关键的取舍：
+// 非房主与"不存在"给出**逐字相同**的 404，不留存在性 oracle。
+func TestRoomMetaGetNonOwnerAndMissingAreBoth404(t *testing.T) {
+	env := newRoomMetaEnv(t, nil)
+
+	// 存在的房间（元数据齐全）：非房主也必须是 404，而不是 403。
+	r, _, err := env.rooms.CreateOwned("GETMETA2", "", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	env.meta.seed(store.RoomMeta{RoomID: r.ID, OwnerUserID: env.owner.ID, Title: "非请勿入", IsPublic: true})
+
+	notOwner := doJSON(t, env.engine, http.MethodGet, "/api/rooms/"+r.ID+"/meta", "", env.otherToken)
+	if notOwner.Code != http.StatusNotFound {
+		t.Fatalf("非房主应当 404（不留存在性 oracle），实际 %d（%s）", notOwner.Code, notOwner.Body.String())
+	}
+
+	// 房间根本不存在。
+	missing := doJSON(t, env.engine, http.MethodGet, "/api/rooms/NOPE0007/meta", "", env.ownerToken)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("不存在的房间应当 404，实际 %d（%s）", missing.Code, missing.Body.String())
+	}
+
+	// 两者响应**逐字相同** —— 这是"没有 oracle"的可判定证据。
+	if notOwner.Body.String() != missing.Body.String() {
+		t.Fatalf("非房主与不存在必须给出同一响应，实际：\n非房主=%s\n不存在=%s",
+			notOwner.Body.String(), missing.Body.String())
+	}
+
+	// 顺带确认：非房主也读不到标题（响应里没有任何房间内容）。
+	if strings.Contains(notOwner.Body.String(), "非请勿入") {
+		t.Fatalf("非房主的 404 不得泄露标题：%s", notOwner.Body.String())
+	}
+}
+
+// TestRoomMetaGetMissingRowIs404 覆盖"元数据缺行"这一条：
+// 房间在内存里、房主也是本人，但库里没有行 → 404（不补默认值假成功）。
+func TestRoomMetaGetMissingRowIs404(t *testing.T) {
+	env := newRoomMetaEnv(t, nil)
+
+	r, _, err := env.rooms.CreateOwned("GETMETA3", "", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	// 刻意**不**给这个房间种元数据行。
+
+	w := doJSON(t, env.engine, http.MethodGet, "/api/rooms/"+r.ID+"/meta", "", env.ownerToken)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("元数据缺行应当 404，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), model.CodeRoomNotFound) {
+		t.Fatalf("404 应带 %s：%s", model.CodeRoomNotFound, w.Body.String())
+	}
+	// 缺行是**读**路径，不该顺手写库（自愈是公开列表与 PATCH 的事）。
+	if n := env.meta.submissions(); n != 0 {
+		t.Fatalf("读端点不该投递任何元数据写入，实际 %d 次", n)
+	}
+
+	// 补一次 PATCH 之后就能读回（缺行不是死局）。
+	if pw := doJSON(t, env.engine, http.MethodPatch, "/api/rooms/"+r.ID+"/meta",
+		`{"title":"补回来的标题"}`, env.ownerToken); pw.Code != http.StatusOK {
+		t.Fatalf("PATCH 应当 200，实际 %d（%s）", pw.Code, pw.Body.String())
+	}
+	w = doJSON(t, env.engine, http.MethodGet, "/api/rooms/"+r.ID+"/meta", "", env.ownerToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("补写之后回读应当 200，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Title != "补回来的标题" {
+		t.Fatalf("回读应当看到补写进去的标题，实际 %q", resp.Title)
+	}
+}
+
+// TestRoomMetaGetRequiresAuthAndRateLimits 覆盖 401 与 429 两条边界。
+func TestRoomMetaGetRequiresAuthAndRateLimits(t *testing.T) {
+	t.Run("未登录 401", func(t *testing.T) {
+		env := newRoomMetaEnv(t, nil)
+		r, _, err := env.rooms.CreateOwned("GETMETA4", "", 0, env.owner.ID)
+		if err != nil {
+			t.Fatalf("建房失败: %v", err)
+		}
+		env.meta.seed(store.RoomMeta{RoomID: r.ID, OwnerUserID: env.owner.ID})
+
+		w := doJSON(t, env.engine, http.MethodGet, "/api/rooms/"+r.ID+"/meta", "", "")
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("未登录应当 401，实际 %d（%s）", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("限速 429", func(t *testing.T) {
+		env := newRoomMetaEnv(t, func(cfg *config.Config) {
+			cfg.IPC.RoomMetaPerMinute = 0.001
+			cfg.IPC.RoomMetaBurst = 1
+		})
+		r, _, err := env.rooms.CreateOwned("GETMETA5", "", 0, env.owner.ID)
+		if err != nil {
+			t.Fatalf("建房失败: %v", err)
+		}
+		env.meta.seed(store.RoomMeta{RoomID: r.ID, OwnerUserID: env.owner.ID})
+
+		first := doJSON(t, env.engine, http.MethodGet, "/api/rooms/"+r.ID+"/meta", "", env.ownerToken)
+		if first.Code != http.StatusOK {
+			t.Fatalf("第一次请求应当 200，实际 %d（%s）", first.Code, first.Body.String())
+		}
+		for i := 0; i < 5; i++ {
+			w := doJSON(t, env.engine, http.MethodGet, "/api/rooms/"+r.ID+"/meta", "", env.ownerToken)
+			if w.Code == http.StatusTooManyRequests {
+				if !strings.Contains(w.Body.String(), model.CodeRateLimited) {
+					t.Fatalf("429 应带 %s：%s", model.CodeRateLimited, w.Body.String())
+				}
+				return
+			}
+		}
+		t.Fatal("连续请求必须触发 429（房间元数据读取限速未生效）")
+	})
+
+	t.Run("装配残缺 503", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		cfg := config.Default()
+		cfg.Auth.DBDSN = "host=127.0.0.1 dbname=x sslmode=disable"
+
+		r := gin.New()
+		api := r.Group("/api")
+		// Sink 缺失：读端点也一并 503（见 registerRoomMetaRoutes 的说明）。
+		registerRoomMetaRoutes(api, RoomMetaDeps{Meta: newFakeRoomMetaStore()}, cfg, newFakeAccountService(t))
+
+		w := doJSON(t, r, http.MethodGet, "/api/rooms/ABCD1234/meta", "", "")
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("装配残缺应当 503，实际 %d（%s）", w.Code, w.Body.String())
+		}
+	})
+}
+
+// TestRoomMetaGetRouteNotRegisteredWithoutDSN 回归：账号能力关闭时读路由也不存在。
+func TestRoomMetaGetRouteNotRegisteredWithoutDSN(t *testing.T) {
+	cfg := config.Default() // Auth.DBDSN 默认为空
+	cfg.Static.Serve = false
+
+	hub, cleanup, err := service.NewHub(cfg)
+	if err != nil {
+		t.Fatalf("构造 Hub 失败: %v", err)
+	}
+	rooms := usecase.NewManager(cfg, hub)
+	t.Cleanup(func() { rooms.Stop(); cleanup() })
+
+	engine := NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{})
+	w := doJSON(t, engine, http.MethodGet, "/api/rooms/ABCD1234/meta", "", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("账号能力关闭时该路由不该存在，实际 %d（%s）", w.Code, w.Body.String())
+	}
+}
+
 // TestRoomMetaAuthMissingDepReturns503 覆盖装配残缺时的语义：
 // 缺 Sink 时端点存在但一律 503（比"路由凭空消失"好定位）。
 func TestRoomMetaAuthMissingDepReturns503(t *testing.T) {
