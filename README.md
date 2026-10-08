@@ -233,6 +233,28 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 | `PR_STATIC_DIR` | `client/dist` | 前端构建产物目录（相对**进程工作目录**解析，请在仓库根目录启动） |
 | `PR_SERVE_STATIC` | `true` | 是否由 Go 服务端托管前端页面（单端口部署的总开关） |
 
+### 账号层（ACCOUNTS 一期）
+
+账号能力**默认关闭**：不配 `PR_DB_DSN` 时服务端不连库、不注册 `/api/auth/*` 与 `/api/admin/*`，
+观众仍可按房间码进房 —— 这是刻意的**两步部署**路径（先上代码、再开账号）。
+
+| 环境变量 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `PR_DB_DSN` | 空（账号关闭） | PostgreSQL 连接串；非空即账号能力总开关（同时触发启动期幂等迁移） |
+| `PR_JWT_SECRET` | 空 | access token 的 HS256 密钥，**至少 32 字节**（`openssl rand -hex 32`）。配了 `PR_DB_DSN` 却缺它 → **拒绝启动**：缺密钥的症状是"所有已登录用户随机掉线"，看起来像网络故障，极难归因 |
+| `PR_ACCESS_TTL` | `15m` | access token 有效期（上限 `24h`）。它只存内存 + `sessionStorage`，**不进 localStorage** |
+| `PR_REFRESH_TTL` | `720h` | refresh 会话有效期（`1h`~`1年`）。refresh 是 HttpOnly Cookie 里的不透明串，库里只存 sha256，每次刷新轮换且检测重放 |
+| `PR_BCRYPT_COST` | `12` | 口令哈希代价（`10`~`14`）；本机实测 12 ≈ 0.57s/次 |
+| `PR_AUTH_HASH_CONCURRENCY` | `4` | 并发 bcrypt 闸门容量（`1`~`64`）。拿不到闸门**立刻返回 429 而不是排队**：排队会让响应时间无上界，且队列本身成为第二个被打爆的资源 |
+| `PR_WS_TICKET_TTL` | `30s` | WebSocket 一次性票据有效期（上限 `10m`）。浏览器 WebSocket 无法自定义请求头，所以账号身份走票（而不是把 token 塞进 URL） |
+| `PR_TRUSTED_PROXIES` | `127.0.0.1,::1` | 允许其 `X-Forwarded-For` 被采信的来源；显式设为**空** = 谁都不信（服务端直接对外的形态）。默认只信任本机反代 —— 否则任何人加一行伪造头就能把每 IP 限速全部绕过 |
+| `PR_AUTH_LOGIN_PER_MINUTE` / `_BURST` | `10` / `5` | 登录尝试的每 IP 令牌桶（失败也计入，挡撞库） |
+| `PR_AUTH_REGISTER_PER_MINUTE` / `_BURST` | `5` / `3` | 注册的每 IP 令牌桶（同样跑 bcrypt，所以更严） |
+| `PR_AUTH_REFRESH_PER_MINUTE` / `_BURST` | `30` / `10` | 刷新的每 IP 令牌桶（多标签页会叠加，故比登录宽松） |
+
+**无 TLS 的已知缺口**：当前部署是明文 http，因此 refresh Cookie **不带 `Secure`**（有一条测试断言
+把它钉住：上 TLS 之前不该加，否则浏览器会直接丢弃它）。上 TLS 后应立即补 `Secure` 并收紧 `SameSite`。
+
 默认 STUN 列表（顺序即默认优先级，2026-02 本机实测 UDP Binding Request 往返）：
 
 | STUN | 实测 RTT | 说明 |
