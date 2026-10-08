@@ -40,6 +40,7 @@ import {
   argOf,
   createRoom,
   findChrome,
+  lastAccount,
   loadMedia,
   openTarget,
   percentile,
@@ -265,7 +266,7 @@ async function main() {
     console.log('三个浏览器已就绪')
 
     // ---------- 准备：主播开播 + 观众在播 ----------
-    await seedAndEnter(host, CLIENT_URL, roomId, 'host', '主播')
+    await seedAndEnter(host, CLIENT_URL, roomId, 'host', '主播', undefined, lastAccount(SERVER_URL))
     const media = await loadMedia(host, MEDIA_DIR, mediaServerRef)
     console.log(`媒体已加载：${media.segmentCount} 段 / ${media.mimeType}`)
 
@@ -526,7 +527,7 @@ async function main() {
     try {
       const dupRoomId = await createRoom(SERVER_URL)
       // 第一个页面：正常进房，拿到它的 clientId；第二个页面被钉成同一个 id。
-      await seedAndEnter(dup, CLIENT_URL, dupRoomId, 'host', '顶号甲')
+      await seedAndEnter(dup, CLIENT_URL, dupRoomId, 'host', '顶号甲', undefined, lastAccount(SERVER_URL))
       const takenId = await dup.evaluate('window.__pr.store.clientId')
 
       dupViewer = await openTarget(BASE_PORT + 2, 'dup-viewer')

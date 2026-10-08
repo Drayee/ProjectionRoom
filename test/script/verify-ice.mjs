@@ -35,7 +35,16 @@
  * 注入只加一条额外 STUN，走的仍然是客户端自己的定时刷新 → 归一化比较 → 变更处理。
  */
 import { networkInterfaces } from 'node:os'
-import { argOf, findChrome, openTarget, seedAndEnter, sleep, startChrome, waitFor } from './lib/browser.mjs'
+import {
+  argOf,
+  ensureAccount,
+  findChrome,
+  openTarget,
+  seedAndEnter,
+  sleep,
+  startChrome,
+  waitFor,
+} from './lib/browser.mjs'
 
 const argv = process.argv.slice(2)
 const SERVER_URL = argOf(argv, 'server', 'http://127.0.0.1:8099')
@@ -201,12 +210,30 @@ async function main() {
   const ice = await waitForProbe()
   console.log(`/api/ice -> HTTP ${ice.status}`)
 
-  const roomResp = await fetch(`${SERVER_URL}/api/rooms`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  })
-  const roomText = await roomResp.text()
+  // 建房（ACCOUNTS §6 起**必须登录**）：本文件原来这里是匿名请求，账号层上线后固定 401。
+  // 与 lib/browser.mjs 的 createRoom 是同一个修复点，这里照它的形态带 Bearer；
+  // 账号能力关闭（ensureAccount 返回 null）时仍退化为匿名请求 —— 那种部署形态下建房本就不该要求登录。
+  const roomToken = await ensureAccount(SERVER_URL)
+  let roomResp = null
+  let roomText = ''
+  for (let attempt = 0; ; attempt += 1) {
+    roomResp = await fetch(`${SERVER_URL}/api/rooms`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(roomToken ? { Authorization: `Bearer ${roomToken}` } : {}),
+      },
+      body: '{}',
+    })
+    roomText = await roomResp.text()
+    // 建房限速（默认 20/分钟、容量 10）：连跑多个脚本时会撞上，退避重试而不是直接失败。
+    if (roomResp.status === 429 && attempt < 5) {
+      console.log('建房限速（HTTP 429），等 15s 后重试')
+      await sleep(15000)
+      continue
+    }
+    break
+  }
   const roomBody = JSON.parse(roomText)
   console.log(`/api/rooms -> HTTP ${roomResp.status} roomId=${roomBody.roomId}`)
 

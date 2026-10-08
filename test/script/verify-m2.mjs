@@ -20,6 +20,7 @@ import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { extname, join, resolve, sep } from 'node:path'
+import { ensureAccount } from './lib/browser.mjs'
 
 // ---------- 参数 ----------
 const argv = process.argv.slice(2)
@@ -305,14 +306,34 @@ async function injectMediaInPage(cdp, baseUrl) {
 }
 
 // ---------- 主流程 ----------
+/**
+ * 建房（ACCOUNTS §6 起**必须登录**）。
+ *
+ * 本文件原有的这一段是匿名请求（`POST /api/rooms` 不带 Authorization），在账号层
+ * 上线后固定 401 —— 与 lib/browser.mjs 的 createRoom 是同一个修复点，这里照它的形态
+ * 改成"先取测试账号 token 再带 Bearer"，并保留账号能力关闭时退化为匿名请求的路径
+ *（那种部署形态下建房确实不该被要求登录）。
+ */
 async function createRoom() {
-  const resp = await fetch(`${SERVER_URL}/api/rooms`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  })
-  if (!resp.ok) throw new Error(`创建房间失败：HTTP ${resp.status}`)
-  return (await resp.json()).roomId
+  const token = await ensureAccount(SERVER_URL)
+  for (let attempt = 0; ; attempt += 1) {
+    const resp = await fetch(`${SERVER_URL}/api/rooms`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: '{}',
+    })
+    // 建房限速（默认 20/分钟、容量 10）：连跑多个脚本时会撞上，退避重试而不是直接失败。
+    if (resp.status === 429 && attempt < 5) {
+      console.log('  建房限速（HTTP 429），等 15s 后重试')
+      await sleep(15000)
+      continue
+    }
+    if (!resp.ok) throw new Error(`创建房间失败：HTTP ${resp.status}`)
+    return (await resp.json()).roomId
+  }
 }
 
 async function seedAndEnter(cdp, roomId, role, displayName) {

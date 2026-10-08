@@ -293,7 +293,12 @@ export async function loadMedia(host, mediaDir, mediaServerRef) {
  */
 const hostTokens = new Map()
 
-/** serverUrl → 测试账号 token（见 ensureAccount 的说明）。 */
+/**
+ * serverUrl → `{token, user}` | `null`（见 ensureAccount 的说明）。
+ *
+ * 只装**确定性结论**：拿到凭据的会话，或者"账号能力确实关闭"的 null。
+ * 暂时性失败（限速/网络/5xx）**不写这里** —— 否则同一个进程内后续调用会永远拿到 null。
+ */
 const accountCache = new Map()
 
 /**
@@ -333,15 +338,46 @@ async function readAuthBody(resp) {
   return body
 }
 
+/**
+ * 账号接口的失败错误。
+ *
+ * 把 **HTTP 状态码挂在错误对象上**（`err.status`）：调用方（ensureAccount）必须区分
+ * "确定性的拒绝"（404/503 = 账号能力关闭；401/400 = 凭据/参数确实不行）与
+ * "暂时性的失败"（429 限速、其它 5xx、网络不可达）—— 后者重试就可能成功，
+ * 靠正则去匹配 message 太脆，所以这里显式给出。
+ */
 function authError(resp, body, what) {
   const code = body?.error?.code ?? body?.code ?? ''
   const message = body?.error?.message ?? body?.error ?? ''
-  return new Error(`${what}失败：HTTP ${resp.status}${code ? ` ${code}` : ''}${message ? ` ${message}` : ''}`)
+  const err = new Error(
+    `${what}失败：HTTP ${resp.status}${code ? ` ${code}` : ''}${message ? ` ${message}` : ''}`,
+  )
+  err.status = resp.status
+  return err
+}
+
+/**
+ * 注册/登录的限速退避：429 时按 1s / 2s / 4s 重试（最多 3 次重试、共 4 次请求）。
+ *
+ * 为什么要在这里退避而不是让调用方重试：注册桶默认只有 5/分钟、容量 3，而一次验收运行
+ * 里"注册新账号"是该跑的（多个脚本各注册一个）—— 撞上限速是**预期内**的瞬时状态，
+ * 用固定等待或直接放弃会把"跑得快"变成假失败。指数退避是这里唯一诚实的处理方式。
+ */
+const RATE_LIMIT_BACKOFF_MS = [1000, 2000, 4000]
+
+/** 发一次请求，只在 429（限速）时退避重试；其它状态码原样返回给调用方判定。 */
+async function fetchWithRateLimitRetry(url, init) {
+  let resp
+  for (let attempt = 0; ; attempt += 1) {
+    resp = await fetch(url, init)
+    if (resp.status !== 429 || attempt >= RATE_LIMIT_BACKOFF_MS.length) return resp
+    await sleep(RATE_LIMIT_BACKOFF_MS[attempt])
+  }
 }
 
 /** 注册一个账号，返回 {token, user}。成功状态码是 **201**（见 internal/handler/auth.go）。 */
 export async function registerUser(serverUrl, { username, password, displayName, cookieJar } = {}) {
-  const resp = await fetch(`${serverUrl}/api/auth/register`, {
+  const resp = await fetchWithRateLimitRetry(`${serverUrl}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password, displayName: displayName ?? username }),
@@ -354,7 +390,7 @@ export async function registerUser(serverUrl, { username, password, displayName,
 
 /** 登录，返回 {token, user}。 */
 export async function loginUser(serverUrl, { username, password, cookieJar } = {}) {
-  const resp = await fetch(`${serverUrl}/api/auth/login`, {
+  const resp = await fetchWithRateLimitRetry(`${serverUrl}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
@@ -382,45 +418,96 @@ export async function ensureAccount(serverUrl, { cookieJar } = {}) {
   // 缓存必须**按 serverUrl 分键**：同一次运行里脚本可能同时对着本地实例与公网实例
   // （例如"本地跑通再对线上复跑"），共用一个缓存会把 A 的 token 拿去打 B ——
   // 症状是 B 上出现"不该存在的登录态"（实测踩到过）。
-  if (accountCache.has(serverUrl)) return accountCache.get(serverUrl)
+  if (accountCache.has(serverUrl)) return accountCache.get(serverUrl)?.token ?? null
   const username = process.env.PR_TEST_USER || `t_${Math.random().toString(36).slice(2, 10)}`
   // 口令必须满足服务端策略：≥8 字符且同时含字母与数字。
   const password = process.env.PR_TEST_PASS || 'pr-test-pass1'
-  const remember = (v) => {
-    accountCache.set(serverUrl, v)
-    return v
+
+  // 缓存只写**确定性结论**（拿到 token，或"账号能力关闭"这种稳定事实）。
+  // 暂时性失败（429 限速、5xx、网络不可达）**不写缓存** —— 否则一次限速会让整个
+  // 进程在此后永远认为"没有账号"，症状是几条判据莫名其妙地全红（实测踩到过：
+  // 注册桶 5/分钟用完后，同一进程内的后续调用再也拿不到 token）。
+  const definitive = (acc) => {
+    accountCache.set(serverUrl, acc)
+    return acc?.token ?? null
   }
+  const transient = () => null
+
   if (process.env.PR_TEST_USER) {
     try {
-      const r = await loginUser(serverUrl, { username, password, cookieJar })
-      return remember(r.token)
+      const r = await withTransientBackoff(() => loginUser(serverUrl, { username, password, cookieJar }))
+      return definitive({ token: r.token, user: r.user })
     } catch (err) {
       if (process.env.PR_TEST_STRICT === '1') throw err
-      // 落到注册分支：固定的测试账号可能还没建出来
+      if (isTransientError(err)) return transient()
+      // 非暂时性（口令错/账号不存在）→ 落到注册分支：固定的测试账号可能还没建出来
     }
   }
   try {
-    const r = await registerUser(serverUrl, { username, password, cookieJar })
-    return remember(r.token)
+    const r = await withTransientBackoff(() => registerUser(serverUrl, { username, password, cookieJar }))
+    return definitive({ token: r.token, user: r.user })
   } catch (err) {
     const msg = String(err?.message ?? err)
     if (msg.includes('HTTP 404') || msg.includes('HTTP 503')) {
-      // 账号能力关闭：这是**合法部署形态**，不是错误。
-      return remember(null)
+      // 账号能力关闭：这是**合法部署形态**，不是错误，且是稳定事实 → 缓存。
+      return definitive(null)
     }
     if (msg.includes('HTTP 409')) {
       // 随机用户名撞车（或固定账号已存在）→ 登录
       try {
-        const r = await loginUser(serverUrl, { username, password, cookieJar })
-        return remember(r.token)
+        const r = await withTransientBackoff(() => loginUser(serverUrl, { username, password, cookieJar }))
+        return definitive({ token: r.token, user: r.user })
       } catch (loginErr) {
         if (process.env.PR_TEST_STRICT === '1') throw loginErr
-        return remember(null)
+        return isTransientError(loginErr) ? transient() : definitive(null)
       }
     }
     if (process.env.PR_TEST_STRICT === '1') throw err
-    return remember(null)
+    return isTransientError(err) ? transient() : definitive(null)
   }
+}
+
+/** 该实例最近一次拿到的账号（含档案）；没拿到过返回 null。 */
+export function lastAccount(serverUrl) {
+  return accountCache.get(serverUrl) ?? null
+}
+
+/**
+ * 清掉账号缓存。
+ *
+ * 用途：脚本明知服务端的限速桶已经回满（例如等过一个窗口）时，可以主动重试而
+ * 不必重启进程。不传 serverUrl 就全清。
+ */
+export function resetAccountCache(serverUrl) {
+  if (serverUrl) accountCache.delete(serverUrl)
+  else accountCache.clear()
+}
+
+/** 429/5xx/网络类错误算"暂时性"：值得退避重试，且不该被缓存成结论。 */
+export function isTransientError(err) {
+  const msg = String(err?.message ?? err)
+  return /HTTP 429|HTTP 5\d\d|ECONNREFUSED|ECONNRESET|fetch failed|网络|timeout|timed out/i.test(msg)
+}
+
+/**
+ * 对暂时性错误做指数退避重试（1s/2s/4s，最多 4 次尝试）。
+ *
+ * 为什么注册/登录需要它：注册桶默认 5/分钟、容量 3，而一条完整验收会连续用到
+ * 注册、建房、ws-ticket 几个入口；没有退避的话，脚本会因为"跑得快"而自己撞上限速。
+ * 注意这是**脚手架**的退避，不改变任何服务端判据。
+ */
+async function withTransientBackoff(fn, attempts = 4, baseMs = 1000) {
+  let lastErr
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      if (!isTransientError(err) || i === attempts - 1) throw err
+      await new Promise((r) => setTimeout(r, baseMs * 2 ** i))
+    }
+  }
+  throw lastErr
 }
 
 export async function createRoom(serverUrl, { token } = {}) {
@@ -443,7 +530,24 @@ export async function createRoom(serverUrl, { token } = {}) {
   return data.roomId
 }
 
-export async function seedAndEnter(cdp, clientUrl, roomId, role, displayName, hostToken) {
+/**
+ * 直接写账号会话（供 `seedAndEnter` 与需要"已登录窗口"的脚本复用）。
+ *
+ * 两个键名以 `client/src/stores/auth.ts` 为准：access token 只在
+ * `sessionStorage['pr:access']`，档案在 `localStorage['pr:profile']`（仅显示用）。
+ * 必须在导航到目标页**之前**写入，否则页面初始化时读不到。
+ */
+export async function seedAccount(cdp, account) {
+  if (!account?.token) return
+  await cdp.evaluate(`sessionStorage.setItem('pr:access', ${JSON.stringify(account.token)})`)
+  if (account.user) {
+    await cdp.evaluate(
+      `localStorage.setItem('pr:profile', ${JSON.stringify(JSON.stringify(account.user))})`,
+    )
+  }
+}
+
+export async function seedAndEnter(cdp, clientUrl, roomId, role, displayName, hostToken, account) {
   await cdp.navigate(clientUrl)
   // 显式传入优先；否则用 createRoom 记下的令牌（键与客户端 joinSession 一致：大写房间码）。
   const token = hostToken ?? hostTokens.get(String(roomId).toUpperCase())
@@ -454,6 +558,13 @@ export async function seedAndEnter(cdp, clientUrl, roomId, role, displayName, ho
       JSON.stringify(stored),
     )})`,
   )
+  // 账号会话：**只有传了 account 才播种**。
+  //
+  // 为什么房主侧必须传：主播重建房间走 `auth.authedFetch('/api/rooms')`（建房需登录），
+  // 而房间被宽限期回收后重建失败会让 verify-room-resume 的恢复判据假失败 ——
+  // 服务端日志里只会看到"加入 XXX 被拒绝: 房间不存在"，没有任何新建房记录（A/B 实证）。
+  // 为什么观众侧**不能**传：游客进房是产品决定，判据"无账号会话也能进房"依赖它。
+  await seedAccount(cdp, account)
   await cdp.navigate(`${clientUrl}/room/${roomId}`)
   await waitFor(async () => cdp.evaluate('typeof window.__pr !== "undefined"'), { label: '调试钩子就绪' })
   await waitFor(async () => (await cdp.snapshot()).joined, { label: `${displayName} 加入房间` })
