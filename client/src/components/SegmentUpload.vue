@@ -29,6 +29,7 @@ import {
 } from '../api/segment'
 import { extractZipToDirectory } from '../api/segmentZip'
 import { pickDirectory, supportsFileSystemAccess } from '../api/fileSystemAccess'
+import { blockedLinkHint, resolveSafeLink } from '../utils/safeLink'
 import { useRoomStore } from '../stores/room'
 import SliceToolPanel from './SliceToolPanel.vue'
 
@@ -326,6 +327,36 @@ function triggerDownload(url: string, filename: string) {
   link.remove()
 }
 
+/**
+ * 产物分份的可下载地址（F-2）。
+ *
+ * `part.url` 来自服务端 JSON，**必须过同源/协议白名单**再喂给 `link.href`
+ * （`javascript:` 会在点击时执行）。被挡下时不静默丢弃：退回同源推导出来的地址
+ * （`segmentPartUrl` 是按 jobId 自己拼的，永远同源），并在界面上说明。
+ */
+interface PartDownload {
+  url: string
+  /** 非空 = 服务端给的地址被白名单挡下，UI 要显式说明（改用同源推导地址）。 */
+  blockedReason: string
+}
+
+function partDownloadOf(part: SegmentPart): PartDownload {
+  const current = job.value
+  const n = segmentPartNumber(part)
+  const fallback = current ? segmentPartUrl(current.jobId, n) : ''
+  if (part.url === '') {
+    return { url: fallback, blockedReason: '' }
+  }
+  const safe = resolveSafeLink(part.url, window.location.origin)
+  if (safe.url) {
+    return { url: safe.url, blockedReason: '' }
+  }
+  return { url: fallback, blockedReason: safe.reason }
+}
+
+/** 模板与下载动作共用同一份判定：界面上说"已改用同源地址"，点下去就真的是那个地址。 */
+const partLinks = computed(() => parts.value.map((part) => ({ part, ...partDownloadOf(part) })))
+
 /** ≤1GiB：直接让浏览器流式下载 zip，字节不经过 JS 内存。 */
 function downloadZip() {
   const current = job.value
@@ -338,7 +369,11 @@ function downloadPart(part: SegmentPart) {
   const current = job.value
   if (!current) return
   const n = segmentPartNumber(part)
-  const url = part.url !== '' ? part.url : segmentPartUrl(current.jobId, n)
+  const { url } = partDownloadOf(part)
+  if (url === '') {
+    notice.value = '这一份没有可用的下载地址（服务端没给，也推导不出来）。'
+    return
+  }
   triggerDownload(url, `room-media-${current.jobId}-part${String(n).padStart(3, '0')}.zip`)
 }
 
@@ -566,12 +601,16 @@ async function writeAndPublish() {
             （各份覆盖的文件互不重复）。
           </p>
           <ul class="parts">
-            <li v-for="part in parts" :key="part.url">
-              <button class="link" @click="downloadPart(part)">
-                第 {{ segmentPartNumber(part) }} 份
+            <li v-for="link in partLinks" :key="link.part.n">
+              <button class="link" @click="downloadPart(link.part)">
+                第 {{ segmentPartNumber(link.part) }} 份
               </button>
-              <span class="muted small mono">{{ humanBytes(part.bytes) }}</span>
-              <span class="muted small mono" :title="part.sha256">sha256 {{ part.sha256.slice(0, 12) }}…</span>
+              <span class="muted small mono">{{ humanBytes(link.part.bytes) }}</span>
+              <span class="muted small mono" :title="link.part.sha256">sha256 {{ link.part.sha256.slice(0, 12) }}…</span>
+              <!-- 服务端给的地址没过白名单：改用同源推导地址，并把原因说出来（不静默换 URL）。 -->
+              <span v-if="link.blockedReason" class="muted small warn-text">
+                （服务端地址被拦下：{{ blockedLinkHint(link.blockedReason) }}，已改用同源推导地址）
+              </span>
             </li>
           </ul>
           <div class="row">

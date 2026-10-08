@@ -247,6 +247,7 @@ export function encodeEnvelope(env: Envelope): Bytes {
     displayName: env.displayName ?? '',
     role: env.role ?? '',
     password: env.password ?? '',
+    hostToken: env.hostToken ?? '',
     payload: env.payload ? new TextEncoder().encode(JSON.stringify(env.payload)) : new Uint8Array(0),
     text: env.text ?? '',
     ts: big(env.ts),
@@ -312,6 +313,9 @@ export function decodeEnvelope(bytes: Uint8Array): Envelope {
     code: pb.code || undefined,
     message: pb.message || undefined,
     reason: pb.reason || undefined,
+    // 刻意**不**解析入站的 host_token：它是主播复位令牌（上行专用密钥），
+    // 客户端永远不需要在信封里"收到"它。落进内存对象只会多一个被日志/诊断快照带出去的出口，
+    // 所以下行这里保持 undefined —— 这是取舍，不是漏写。
   }
   return env
 }

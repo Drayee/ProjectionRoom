@@ -11,10 +11,27 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRoomStore } from '../stores/room'
 import { copyText } from '../utils/clipboard'
+import { maskAddress } from '../utils/addressMask'
 
 const store = useRoomStore()
 const copyState = ref<'idle' | 'ok' | 'failed'>('idle')
 let timer: number | undefined
+
+/**
+ * 「包含完整地址（仅自己看）」（F-6）。
+ *
+ * 诊断报告是**要被贴出去**的（issue / 群聊），而 `localAddress ↔ remoteAddress`
+ * 是本机内网地址与**陌生人的**公网地址：默认必须掩码。
+ * 这条开关只影响显示，**不进 localStorage**（不落盘、不跨会话记住），
+ * 刷新即回到"掩码"的安全默认 —— 这类隐私开关最怕的就是"上次开过就一直开着"。
+ */
+const includeFullAddress = ref(false)
+
+/** 地址的展示形态：默认掩码；开关打开时显示原样（界面与复制内容用同一份输出）。 */
+function shownAddress(address: string): string {
+  if (!address) return '（地址不可见）'
+  return includeFullAddress.value ? address : maskAddress(address)
+}
 
 function memberName(id: string): string {
   if (!id) return '—'
@@ -135,8 +152,25 @@ const mediaText = computed(() => {
 const runtimeText = computed(
   () =>
     `交付 ${store.delivered} · 超时 ${store.timedOut} · 取数失败 ${store.chunkErrors}` +
+    ` · 内容校验 坏片 ${store.hashMismatches} / 通过 ${store.hashVerified}` +
+    (store.hashSkipped > 0 ? ` / 跳过 ${store.hashSkipped}（非安全上下文没有 crypto.subtle）` : '') +
     ` · p95 交付 ${store.p95DeliveryMs}ms · 跳转重灌 ${store.syncResets} 次 · 丢弃非主父进度 ${store.rejectedProgress} 条`,
 )
+
+/**
+ * 内容校验（F-11）：坏片计数是"有对端在发替换内容"的唯一直接证据，
+ * 必须出现在诊断里，而不是只躺在 store 里。
+ */
+const hashText = computed(() => {
+  if (store.hashMismatches === 0 && store.hashVerified === 0 && store.hashSkipped === 0) {
+    return store.isHost ? '不适用（主播是源，收到的分片只来自本机磁盘）' : '还没有收到分片'
+  }
+  const parts = [`坏片 ${store.hashMismatches}`, `通过 ${store.hashVerified}`]
+  if (store.hashSkipped > 0) {
+    parts.push(`跳过 ${store.hashSkipped}（当前上下文没有 crypto.subtle：明文 http 的局域网地址就是这样）`)
+  }
+  return parts.join(' · ') + (store.hashMismatches > 0 ? ' · 坏片已丢弃且不会进播放器' : '')
+})
 
 // ---------- 播放健康度（T4）----------
 //
@@ -210,8 +244,17 @@ const iceText = computed(() => {
     ` · 刷新 ${ice.refreshCount} 次（列表变化 ${ice.changeCount} · ICE 重启 ${store.iceRestartCount}）` +
     ` · 最近 ${ice.lastRefreshReason || '—'}` +
     (ice.failedRefreshCount > 0 ? ` · 刷新失败 ${ice.failedRefreshCount}` : '') +
+    // F-12：白名单挡下的条目必须能在界面上看到（否则"STUN 不生效"会变成玄学排障）。
+    (ice.filteredIceServers > 0 ? ` · ${iceFilterText.value}` : '') +
     (scores ? ` · 探测 ${scores}` : '')
   )
+})
+
+/** F-12：被白名单过滤掉的 ICE 条目（条数 + 可读样本）。 */
+const iceFilterText = computed(() => {
+  const ice = store.iceDiagnostics()
+  if (ice.filteredIceServers <= 0) return ''
+  return `被白名单过滤 ${ice.filteredIceServers} 条：${ice.filteredIceSamples.join('；')}`
 })
 
 /** IPv6 直连的地址族分布：全局 IPv6 有没有真的拿到、有没有候选被判为不可跨网而没发出去。 */
@@ -230,13 +273,13 @@ const ipv6Text = computed(() => {
   )
 })
 
-/** 选中候选对：`family=v6-global` 才是"IPv6 直连真的生效了"。 */
+/** 选中候选对：`family=v6-global` 才是"IPv6 直连真的生效了"。地址默认掩码（见 includeFullAddress）。 */
 const selectedPairText = computed(() => {
   const pair = store.selectedPairInfo()
   if (!pair) return '尚未建立成功的候选对（等 P2P 连通）'
   return (
-    `${pair.family || 'unknown'} · ${pair.localType} ${pair.localAddress || '（地址不可见）'}` +
-    ` ↔ ${pair.remoteType} ${pair.remoteAddress || '（地址不可见）'} · ${pair.protocol} · rtt ${pair.rttMs}ms`
+    `${pair.family || 'unknown'} · ${pair.localType} ${shownAddress(pair.localAddress)}` +
+    ` ↔ ${pair.remoteType} ${shownAddress(pair.remoteAddress)} · ${pair.protocol} · rtt ${pair.rttMs}ms`
   )
 })
 
@@ -260,11 +303,15 @@ const report = computed(() => {
   lines.push(`播放器: ${playerText.value}`)
   lines.push(`媒体: ${mediaText.value}`)
   lines.push(`计数: ${runtimeText.value}`)
+  lines.push(`内容校验: ${hashText.value}`)
   lines.push(`拓扑: ${topologyText.value}`)
   lines.push(`分配依据: ${topologyReason.value}`)
   lines.push(`ICE: ${iceText.value}`)
   lines.push(`IPv6: ${ipv6Text.value}`)
   lines.push(`选中候选对: ${selectedPairText.value}`)
+  if (!includeFullAddress.value) {
+    lines.push('（本机与对端地址已掩码；需要完整地址时勾选「包含完整地址（仅自己看）」后重新复制）')
+  }
   for (const line of store.iceRestartLog) {
     lines.push(`  ICE restart ${line}`)
   }
@@ -310,12 +357,24 @@ onBeforeUnmount(() => {
     <div class="body">
       <div class="toolbar">
         <button type="button" data-testid="diag-copy" @click="copyReport">复制诊断报告</button>
+        <!--
+          F-6：默认掩码本机/对端 IP（报告是要贴出去的，完整地址能定位到具体的人）。
+          开关不写 localStorage：刷新技术性回到"掩码"这一安全默认。
+        -->
+        <label class="toggle" data-testid="diag-full-address-toggle">
+          <input type="checkbox" v-model="includeFullAddress" />
+          包含完整地址（仅自己看）
+        </label>
         <span class="muted small" v-if="copyState === 'ok'">已复制，贴进反馈里即可。</span>
         <span class="muted small warn-text" v-else-if="copyState === 'failed'">
           剪贴板不可用（非 HTTPS 或被拒）：请手动选中下面的文本复制。
         </span>
         <span class="muted small" v-else>日志是环形缓冲，只保留最近几条。</span>
       </div>
+
+      <p class="muted tiny warn-block" v-if="includeFullAddress" data-testid="diag-full-address-notice">
+        已包含完整地址：这份报告里会有你的内网地址与对端的公网地址，只发给自己信任的人。
+      </p>
 
       <div class="kv">
         <span class="k">房间连接</span>
@@ -351,6 +410,9 @@ onBeforeUnmount(() => {
         <span class="k">计数</span>
         <span class="v">{{ runtimeText }}</span>
 
+        <span class="k">内容校验</span>
+        <span class="v mono small" data-testid="diag-hash">{{ hashText }}</span>
+
         <span class="k">拓扑</span>
         <span class="v">{{ topologyText }}</span>
 
@@ -359,6 +421,11 @@ onBeforeUnmount(() => {
 
         <span class="k">ICE 配置</span>
         <span class="v" data-testid="diag-ice">{{ iceText }}</span>
+
+        <template v-if="iceFilterText">
+          <span class="k">ICE 白名单</span>
+          <span class="v mono small warn-text" data-testid="diag-ice-filter">{{ iceFilterText }}</span>
+        </template>
 
         <span class="k">IPv6 直连</span>
         <span class="v" data-testid="diag-ipv6">{{ ipv6Text }}</span>
@@ -447,6 +514,26 @@ summary .mono {
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 8px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input {
+  margin: 0;
+}
+
+.warn-block {
+  margin: 0 0 8px;
+  color: var(--accent-2);
+  font-size: 11.5px;
 }
 
 .kv {

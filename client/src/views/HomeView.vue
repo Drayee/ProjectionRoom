@@ -17,8 +17,8 @@ const joinPassword = ref('')
 const busy = ref(false)
 const error = ref('')
 
-function remember(roomId: string, password: string, role: Role) {
-  rememberJoin(roomId, { password, role, displayName: displayName.value })
+function remember(roomId: string, password: string, role: Role, hostToken?: string) {
+  rememberJoin(roomId, { password, role, displayName: displayName.value, hostToken })
 }
 
 async function createRoom() {
@@ -46,7 +46,9 @@ async function createRoom() {
     // 响应里除了 iceServers 还有 ttlSeconds/expiresAt/probe：一起存下来，
     // 进房后的 /api/ice 才能正确判断"列表到底变没变"（变了才 setConfiguration + ICE restart）。
     store.applyIceResponse(data, 'POST /api/rooms')
-    remember(data.roomId, createPassword.value, 'host')
+    // 主播复位令牌（S-7）只在这一次响应里出现（服务端只存哈希）：
+    // 必须跟 join 凭据一起存下来，否则主播断线后**宽限期内接不回主播位**。
+    remember(data.roomId, createPassword.value, 'host', data.hostToken)
     await router.push(`/room/${data.roomId}`)
   } catch (err) {
     error.value = `创建房间失败：${(err as Error).message}`

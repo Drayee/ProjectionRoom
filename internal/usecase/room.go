@@ -6,7 +6,10 @@
 package usecase
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
+	"regexp"
 	"sync"
 	"time"
 
@@ -40,7 +43,59 @@ var (
 	ErrBadMediaIndex = errors.New("room: 分片索引不合法")
 	// ErrMediaLocked 表示索引已锁定：中途换片需要重开房间（SPEC §8.1）。
 	ErrMediaLocked = errors.New("room: 分片索引已锁定（换片需重开房间）")
+	// ErrBadRoomCode 表示房间码不符合白名单格式（S-3）。
+	ErrBadRoomCode = errors.New("room: 房间码必须是 4-12 位大写字母或数字（A-Z 0-9）")
+	// ErrTooManyRooms 表示同时存在的房间数已达配置上限（S-3）。
+	ErrTooManyRooms = errors.New("room: 房间数已达上限，请稍后重试")
+	// ErrBadPasswordPolicy 表示密码长度不符合策略（S-11）。
+	ErrBadPasswordPolicy = errors.New("room: 密码长度必须为 4-64 个字符（留空表示不设密码）")
+	// ErrHostTokenRequired 表示宽限期内接回主播位必须携带正确的复位令牌（S-7）。
+	ErrHostTokenRequired = errors.New("room: 该房间处于主播重连宽限期，需要主播复位令牌")
+	// ErrJoinRateLimited 表示该 IP+房间码的 join 失败次数过多（S-11）。
+	ErrJoinRateLimited = errors.New("room: 尝试过于频繁，请稍后再试")
 )
+
+// RoomCodePattern 是房间码的白名单：4-12 位大写字母或数字。
+//
+// 为什么是白名单而不是"长度 + 黑名单"：房间码来自 URL 路径/查询串，会被写进日志、
+// 广播给全房、拼进前端路由。放开字符集等于放开"控制字符注入日志"与"超长字符串"
+// 两条路（审计实测 60 KB 的 roomId 也能建房成功，而每个这样的房间都会常驻内存）。
+// 4-12 位覆盖两种合法来源：自动生成的 6 位码，以及用户自选的短码。
+// 注意它与 utils.RoomCodeAlphabet 不同：字母表去掉了易听错的 I/O/0/1，
+// 那是"生成侧"的约束；这里必须**接受**全部 A-Z0-9，否则手输的房间码会被误拒。
+var RoomCodePattern = regexp.MustCompile(`^[A-Z0-9]{4,12}$`)
+
+// ValidRoomCode 判断房间码是否符合白名单。
+func ValidRoomCode(code string) bool { return RoomCodePattern.MatchString(code) }
+
+// 密码策略（S-11）。留空 = 不设密码（默认形态，局域网/朋友之间用）。
+//
+// 为什么下限是 4：1-3 位密码在"每个人都能试"的入口上没有任何意义，
+// 与其给一个假的保护感，不如拒绝并让用户要么留空要么设一个像样的。
+// 上限 64：压住"用超长密码把 join 变成一次哈希/拷贝攻击"的形态；
+// bcrypt 的 72 字节截断界限也在这个量级，将来接账号层不会撞上。
+const (
+	MinPasswordLen = 4
+	MaxPasswordLen = 64
+)
+
+// ValidPassword 判断密码是否符合策略（留空合法）。
+func ValidPassword(pw string) bool {
+	n := len([]rune(pw))
+	if n == 0 {
+		return true
+	}
+	return n >= MinPasswordLen && n <= MaxPasswordLen
+}
+
+// hostTokenGrace 是主播复位令牌（S-7）在**无成员空窗期**内的有效期。
+//
+// 令牌本身不设过期：房间还在，令牌就有效（它随房间一起被回收）。
+// 这一项只在一种情况下生效：房间里的主播位和令牌都被占着/刚用过，
+// 而房间已经一个成员都没有（全在重连）。给 5 分钟是为了让
+// "主播电脑崩了、10 分钟后换台机器拿回房间"仍然可用，
+// 同时不给"房间码泄露 + 长期空窗"留下无限期的窗口。
+const hostTokenGrace = 5 * time.Minute
 
 // Member 是房间内的一个成员。
 type Member struct {
@@ -59,6 +114,8 @@ type Member struct {
 	// StallCount 是客户端上报的累计卡顿次数。它是"这条路已经不行了"的直接信号：
 	// 服务端据此立刻换路（degraded 单独不足以触发，见 UpdateMetrics）。
 	StallCount int
+	// lastMetricsAt 是上一次**被处理**的 metrics 时间（S-9 的最小间隔节流用）。
+	lastMetricsAt time.Time
 
 	// 分片拥有情况（base64 位图）。服务端只做记录，供 M4 监控面板展示；
 	// 逐分片的父节点选择在客户端用同一张位图直接完成（SPEC §6.4）。
@@ -110,6 +167,27 @@ type Room struct {
 	hostOfflineSince time.Time
 	// hostGraceTimer 是宽限期到期定时器；主播重连或房间关闭时取消。
 	hostGraceTimer *time.Timer
+	// neverJoined 表示自创建以来**从未有人成功进房**。
+	//
+	// 为什么需要它（S-3）：僵尸房间的主要来源就是"创建了但没人进房"
+	// （拿到链接的人没点进来），这类房间没有任何值得保留的状态，
+	// 所以可以按"创建后 TTL"直接回收；而"主播进过房又断开"的房间
+	// 走的是 hostOffline 宽限期那条路，两者的回收判据必须分开。
+	neverJoined bool
+	// hostToken 是主播复位令牌的 SHA-256（S-7）。
+	//
+	// 为什么存哈希而不是原文：房间对象会被导出到诊断面板/日志上下文的机会很多，
+	// 落一个明文令牌在里面等于把"主播位"变成"谁抓到日志谁能抢"。
+	// 校验是常量时间比较（subtle.ConstantTimeCompare），先 sha256 再比。
+	hostToken [32]byte
+	// hostTokenUntil 是令牌的失效时刻。零值表示"当前无令牌"。
+	hostTokenUntil time.Time
+	// hostTokenPlain 是令牌**明文**，只在同包单测里用来证明"正确令牌能接回主播位"。
+	//
+	// 生产路径只存哈希（下面是 hostToken）；这个字段存在的唯一理由是
+	// 单测需要"重放一次真实令牌"，而令牌只在下发响应里出现过一次、不可再导出。
+	// 它不是秘密泄漏面：房间对象本来就在进程内存里，而这段内存里还有房间密码原文。
+	hostTokenPlain string
 	// closed 表示房间已被 closeRoom 销毁。
 	// Join 在持 mu 后会先检查它：否则"关房瞬间挤进来"的连接会拿到 joined 却立即被断连。
 	closed bool
@@ -298,4 +376,50 @@ func (r *Room) memberInfosLocked() []model.MemberInfo {
 		}
 	}
 	return out
+}
+
+// setHostToken 记录主播复位令牌的哈希（S-7）。调用方需持 mu。
+//
+// 令牌只在创建响应里下发一次；重复创建同一房间码会被 Create 挡掉（ErrRoomExists），
+// 所以正常路径下只会设一次。
+func (r *Room) setHostToken(token string) {
+	if token == "" {
+		return
+	}
+	r.hostToken = sha256.Sum256([]byte(token))
+	r.hostTokenUntil = time.Now().Add(hostTokenGrace)
+	r.hostTokenPlain = token
+}
+
+// hostTokenUsableLocked 判断当前是否处于"必须携带令牌"的窗口。调用方需持 mu。
+//
+// 为什么令牌会失效：房间已空、且超过 hostTokenGrace（5 分钟）之后，
+// 令牌不再被接受 —— 那正是"房间码泄露 + 房间长期没人"的组合，
+// 给一个有限窗口比给一个无限窗口更保守；房间本身也会被后台清扫回收。
+func (r *Room) hostTokenUsableLocked(now time.Time) bool {
+	return !now.After(r.hostTokenUntil)
+}
+
+// consumeHostTokenLocked 校验令牌，成功即作废它（一次性）。调用方需持 mu。
+//
+// 为什么是一次性：令牌代表"主播位"，用完即弃可以缩小泄露窗口 ——
+// 重连成功之后令牌就不再有用（房间已有主播，再来会被 ErrHostTaken 挡住）。
+// 用常量时间比较是为了不泄露"前几个字节对不对"。
+func (r *Room) consumeHostTokenLocked(token string) bool {
+	if token == "" {
+		return false
+	}
+	got := sha256.Sum256([]byte(token))
+	if subtle.ConstantTimeCompare(got[:], r.hostToken[:]) != 1 {
+		return false
+	}
+	r.hostTokenUntil = time.Time{}
+	return true
+}
+
+// MemberCount 返回当前成员数（后台清扫用，避免外部直接碰 members）。
+func (r *Room) MemberCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.members)
 }

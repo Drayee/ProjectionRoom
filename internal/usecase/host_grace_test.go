@@ -56,17 +56,19 @@ func hostOfflineState(t *testing.T, r *Room) (offline bool, timerRunning bool, h
 }
 
 // setupPlayingRoom 搭一个"正在播"的房间：主播 + 观众，已发布索引、已下发一次控制（seq=1）。
-func setupPlayingRoom(t *testing.T, m *Manager) *Room {
+//
+// 第二个返回值是创建响应里的**主播复位令牌**（S-7）：宽限期内重连主播位必须带上它。
+func setupPlayingRoom(t *testing.T, m *Manager) (*Room, string) {
 	t.Helper()
 
-	r, err := m.Create("", "", 0)
+	r, hostToken, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	if err := m.Join(r.ID, "viewer", "观众", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "viewer", DisplayName: "观众", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("观众进房失败: %v", err)
 	}
 
@@ -78,14 +80,14 @@ func setupPlayingRoom(t *testing.T, m *Manager) *Room {
 		t.Fatalf("主播下发播放控制失败: %v", err)
 	}
 
-	return r
+	return r, hostToken
 }
 
 // 契约 a：主播 Leave 后房间仍然存在、HostID 为空、MediaIndex/lastPlayback 保留，
 // 且**没有**广播 room-closed、没有断开任何连接。
 func TestHostLeaveEntersGraceAndKeepsState(t *testing.T) {
 	m, bus := newGraceManager(t, 8, time.Minute)
-	r := setupPlayingRoom(t, m)
+	r, _ := setupPlayingRoom(t, m)
 
 	m.Leave(r.ID, "host")
 
@@ -128,11 +130,13 @@ func TestHostLeaveEntersGraceAndKeepsState(t *testing.T) {
 // 且 Playback.Seq 不回退、MediaIndex 仍在、宽限定时器被取消。
 func TestHostRejoinWithinGraceRestoresRoom(t *testing.T) {
 	m, bus := newGraceManager(t, 8, 200*time.Millisecond)
-	r := setupPlayingRoom(t, m)
+	r, _ := setupPlayingRoom(t, m)
 
+	// S-7：宽限期内接回主播位必须带上创建时下发的复位令牌。
+	hostToken := r.hostTokenPlain
 	m.Leave(r.ID, "host")
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
-		t.Fatalf("宽限期内主播重连必须成功，实际 %v", err)
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: "", HostToken: hostToken}); err != nil {
+		t.Fatalf("宽限期内主播重连（带正确令牌）必须成功，实际 %v", err)
 	}
 
 	joined := bus.lastDirectOfType(t, "host", model.TypeJoined)
@@ -180,7 +184,7 @@ func TestHostRejoinWithinGraceRestoresRoom(t *testing.T) {
 // 契约 c：宽限期到期（测试里压到几十毫秒）仍无主播才销毁房间并广播 room-closed。
 func TestHostGraceExpiryClosesRoom(t *testing.T) {
 	m, bus := newGraceManager(t, 8, 80*time.Millisecond)
-	r := setupPlayingRoom(t, m)
+	r, _ := setupPlayingRoom(t, m)
 
 	m.Leave(r.ID, "host")
 	if _, ok := m.Get(r.ID); !ok {
@@ -206,7 +210,7 @@ func TestHostGraceExpiryClosesRoom(t *testing.T) {
 	}
 
 	// 关闭后用同一个房间码也能重新创建：房间码没有被永久占住。
-	if _, err := m.Create(r.ID, "", 0); err != nil {
+	if _, _, err := m.Create(r.ID, "", 0); err != nil {
 		t.Fatalf("房间销毁后房间码应可复用: %v", err)
 	}
 }
@@ -214,7 +218,7 @@ func TestHostGraceExpiryClosesRoom(t *testing.T) {
 // 契约 c 的边界：HostGrace <= 0 时退回"立即销毁"的旧语义（配置写错也不能把房间永久留着）。
 func TestHostGraceDisabledClosesImmediately(t *testing.T) {
 	m, bus := newGraceManager(t, 8, 0)
-	r := setupPlayingRoom(t, m)
+	r, _ := setupPlayingRoom(t, m)
 
 	m.Leave(r.ID, "host")
 
@@ -229,7 +233,7 @@ func TestHostGraceDisabledClosesImmediately(t *testing.T) {
 // 契约 d：宽限期内房内成员清空时，CloseRoomIfEmpty 与 Leave 的空房分支都不得删除房间。
 func TestCloseRoomIfEmptyKeepsRoomDuringHostGrace(t *testing.T) {
 	m, _ := newGraceManager(t, 8, time.Minute)
-	r := setupPlayingRoom(t, m)
+	r, _ := setupPlayingRoom(t, m)
 
 	m.Leave(r.ID, "host")   // 主播断线 → 宽限期开始
 	m.Leave(r.ID, "viewer") // 最后一个人也走了，房间只剩元数据
@@ -247,7 +251,7 @@ func TestCloseRoomIfEmptyKeepsRoomDuringHostGrace(t *testing.T) {
 	}
 
 	// 反向证明这道闸门是有效的：不在宽限期的空房间照旧会被清理。
-	other, err := m.Create("", "", 0)
+	other, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建对照房间失败: %v", err)
 	}
@@ -261,7 +265,7 @@ func TestCloseRoomIfEmptyKeepsRoomDuringHostGrace(t *testing.T) {
 // 新观众也能进房（房间与分片索引还在，见 TestViewerCanJoinDuringHostGrace）。
 func TestViewerLeaveDuringGraceKeepsRoom(t *testing.T) {
 	m, bus := newGraceManager(t, 8, time.Minute)
-	r := setupPlayingRoom(t, m)
+	r, _ := setupPlayingRoom(t, m)
 
 	m.Leave(r.ID, "host")
 	m.Leave(r.ID, "viewer")
@@ -272,7 +276,7 @@ func TestViewerLeaveDuringGraceKeepsRoom(t *testing.T) {
 	if _, ok := m.Get(r.ID); !ok {
 		t.Fatal("宽限期内观众离开不得销毁房间")
 	}
-	if err := m.Join(r.ID, "late", "迟到观众", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "late", DisplayName: "迟到观众", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("宽限期内观众应能回房（否则同一次抖动里掉线的观众最长 60s 回不来），实际 %v", err)
 	}
 }
@@ -281,11 +285,11 @@ func TestViewerLeaveDuringGraceKeepsRoom(t *testing.T) {
 // 新观众据此对齐后由界面显示"等待主播重连"（服务端不做特殊处理）。
 func TestViewerCanJoinDuringHostGrace(t *testing.T) {
 	m, bus := newGraceManager(t, 8, time.Minute)
-	r := setupPlayingRoom(t, m)
+	r, _ := setupPlayingRoom(t, m)
 
 	m.Leave(r.ID, "host")
 
-	if err := m.Join(r.ID, "late", "迟到观众", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "late", DisplayName: "迟到观众", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("宽限期内观众进房应成功，实际 %v", err)
 	}
 
@@ -333,11 +337,11 @@ func TestViewerCanJoinDuringHostGrace(t *testing.T) {
 func TestViewerRejectedBeforeHostEverJoins(t *testing.T) {
 	m, _ := newGraceManager(t, 8, time.Minute)
 
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "early", "抢跑观众", model.RoleViewer, ""); !errors.Is(err, ErrNotReady) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "early", DisplayName: "抢跑观众", Role: model.RoleViewer, Password: ""}); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("主播从未进房的房间，观众进房应返回 ErrNotReady，实际 %v", err)
 	}
 	if got := r.MemberInfos(); len(got) != 0 {
@@ -349,7 +353,7 @@ func TestViewerRejectedBeforeHostEverJoins(t *testing.T) {
 // 重算只会把刻意保留的分配与容量口径抹成 pending（观众会看到容量突然变未知）。
 func TestMetricsDuringGraceDoesNotWipePlan(t *testing.T) {
 	m, bus := newGraceManager(t, 16, time.Minute)
-	r := setupPlayingRoom(t, m)
+	r, _ := setupPlayingRoom(t, m)
 
 	// 先让房间有一套真实的分配与容量口径（主播 16 Mbps / 2 Mbps 码率 → fanout）。
 	if err := m.UpdateMetrics(r.ID, "host", model.Metrics{UploadCapacityBps: 16_000_000, RTTMs: 10}); err != nil {
@@ -389,11 +393,11 @@ func TestHostGraceExpiryRacesRejoinSafely(t *testing.T) {
 		grace := time.Millisecond
 		m, bus := newGraceManager(t, 8, grace)
 
-		r, err := m.Create("", "", 0)
+		r, hostToken, err := m.Create("", "", 0)
 		if err != nil {
 			t.Fatalf("第 %d 次创建房间失败: %v", i, err)
 		}
-		if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+		if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 			t.Fatalf("第 %d 次主播进房失败: %v", i, err)
 		}
 
@@ -408,7 +412,7 @@ func TestHostGraceExpiryRacesRejoinSafely(t *testing.T) {
 			})
 		}
 
-		joinErr := m.Join(r.ID, "host", "主播", model.RoleHost, "")
+		joinErr := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: "", HostToken: hostToken})
 		if joinErr == nil {
 			// 重连赢了：等够"定时器本该触发"的时间，房间必须还在（取消必须真的生效）。
 			time.Sleep(4 * grace)
@@ -481,7 +485,7 @@ func roomClosedFlag(t *testing.T, r *Room) bool {
 func TestRoomRemovalPathsMarkClosed(t *testing.T) {
 	t.Run("CloseRoomIfEmpty", func(t *testing.T) {
 		m, _ := newGraceManager(t, 8, time.Minute)
-		r, err := m.Create("", "", 0)
+		r, _, err := m.Create("", "", 0)
 		if err != nil {
 			t.Fatalf("创建房间失败: %v", err)
 		}
@@ -498,7 +502,7 @@ func TestRoomRemovalPathsMarkClosed(t *testing.T) {
 
 	t.Run("LeaveLastMember", func(t *testing.T) {
 		m, _ := newGraceManager(t, 8, time.Minute)
-		r, err := m.Create("", "", 0)
+		r, _, err := m.Create("", "", 0)
 		if err != nil {
 			t.Fatalf("创建房间失败: %v", err)
 		}
@@ -532,14 +536,14 @@ func TestJoinNeverLandsInOrphanRoom(t *testing.T) {
 
 	for i := 0; i < iterations; i++ {
 		m, _ := newGraceManager(t, 8, time.Minute)
-		r, err := m.Create("", "", 0)
+		r, _, err := m.Create("", "", 0)
 		if err != nil {
 			t.Fatalf("第 %d 次创建房间失败: %v", i, err)
 		}
-		if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+		if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 			t.Fatalf("第 %d 次主播进房失败: %v", i, err)
 		}
-		if err := m.Join(r.ID, "v1", "观众", model.RoleViewer, ""); err != nil {
+		if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v1", DisplayName: "观众", Role: model.RoleViewer, Password: ""}); err != nil {
 			t.Fatalf("第 %d 次观众进房失败: %v", i, err)
 		}
 		// 宽限期开始：Join 可以成功，而 CloseRoomIfEmpty 绝不能删掉这个房间。
@@ -550,7 +554,7 @@ func TestJoinNeverLandsInOrphanRoom(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			joinErr = m.Join(r.ID, "late", "迟到观众", model.RoleViewer, "")
+			joinErr = m.Join(JoinRequest{RoomID: r.ID, ClientID: "late", DisplayName: "迟到观众", Role: model.RoleViewer, Password: ""})
 		}()
 		go func() {
 			defer wg.Done()

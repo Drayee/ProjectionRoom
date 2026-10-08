@@ -12,13 +12,21 @@
 
 import { computed, onMounted, ref } from 'vue'
 import { copyText } from '../utils/clipboard'
+import { blockedLinkHint, resolveSafeLink } from '../utils/safeLink'
 
 /** 清单里的一条平台记录，字段与服务端 SegmenterDownload 的 JSON tag 一一对应。 */
 interface ToolEntry {
   os: string
   arch: string
   file: string
-  url: string
+  /**
+   * 过完白名单的下载地址（同源 + http/https）。
+   * `null` = 服务端给的地址没通过白名单（例如 `javascript:`）：界面必须渲染成纯文本 + 提示，
+   * 不能出现可点击的链接（F-1）。
+   */
+  url: string | null
+  /** 未通过白名单的原因（通过时为空串），用于给出可读提示。 */
+  blockedReason: string
   bytes: number
   sha256: string
 }
@@ -157,15 +165,20 @@ async function loadManifest() {
     const origin = window.location.origin
     entries.value = (body.platforms ?? [])
       .filter((item) => typeof item.url === 'string' && item.url !== '' && typeof item.file === 'string')
-      .map((item) => ({
-        os: String(item.os ?? ''),
-        arch: String(item.arch ?? ''),
-        file: String(item.file ?? ''),
+      .map((item) => {
         // 服务端给的是 /downloads/<file> 这样的相对地址，按页面来源补成绝对地址再放进 href。
-        url: new URL(String(item.url), origin).toString(),
-        bytes: Number(item.bytes ?? 0),
-        sha256: String(item.sha256 ?? '').toLowerCase(),
-      }))
+        // **必须过白名单**（F-1）：`:href` 直接吃服务端 JSON 时，一个 `javascript:` 就是本页 RCE。
+        const safe = resolveSafeLink(item.url, origin)
+        return {
+          os: String(item.os ?? ''),
+          arch: String(item.arch ?? ''),
+          file: String(item.file ?? ''),
+          url: safe.url,
+          blockedReason: safe.reason,
+          bytes: Number(item.bytes ?? 0),
+          sha256: String(item.sha256 ?? '').toLowerCase(),
+        }
+      })
     state.value = entries.value.length > 0 ? 'ok' : 'empty'
   } catch {
     state.value = 'failed'
@@ -290,6 +303,7 @@ function toggleSha(entry: ToolEntry) {
           <span class="tag" v-if="isRecommended(entry)">推荐（与你当前平台匹配）</span>
           <span class="muted small mono">{{ humanBytes(entry.bytes) }}</span>
           <a
+            v-if="entry.url"
             class="download"
             :href="entry.url"
             download
@@ -298,6 +312,12 @@ function toggleSha(entry: ToolEntry) {
           >
             下载
           </a>
+          <template v-else>
+            <!-- 服务端给的地址没过白名单：渲染成纯文本 + 可读提示，绝不生成可点击链接。 -->
+            <span class="muted small warn-text" data-testid="slice-tool-download-blocked" :data-key="keyOf(entry)">
+              不可下载（{{ blockedLinkHint(entry.blockedReason) }}）
+            </span>
+          </template>
         </div>
         <div class="line sha-line">
           <span class="muted tiny">sha256</span>

@@ -66,6 +66,18 @@ const (
 	// 客户端拿着同一个 clientId 重连时只会看到一次"策略违规关闭"，
 	// 既不知道原因也无从自救，只能空转重试。带上这个错误码后客户端可以换一个 clientId 重试。
 	CodeClientIDTaken = "CLIENT_ID_TAKEN"
+	// CodeRateLimited 表示该来源（IP / IP+房间码）的尝试过于频繁，已限速（S-3、S-11）。
+	//
+	// 为什么单独给一个码（而不是复用 BAD_REQUEST）：客户端应当据此**退避重试**，
+	// 而不是把它当成"参数错了"去改参数。建房（429）与 join 失败（限速）都走它。
+	CodeRateLimited = "RATE_LIMITED"
+	// CodeHostTokenRequired 表示宽限期内接回主播位必须携带正确的主播复位令牌（S-7）。
+	//
+	// 客户端拿到它只有一条正确反应：**不要**重试，而是提示"需要房主重新用创建时的
+	// 凭据接入"（令牌只在创建响应里下发过一次，丢了就找不回来）。
+	CodeHostTokenRequired = "HOST_TOKEN_REQUIRED"
+	// CodeTooManyRooms 表示服务端在册房间数已达上限（S-3）。
+	CodeTooManyRooms = "TOO_MANY_ROOMS"
 )
 
 // 角色。
@@ -101,6 +113,13 @@ type Envelope struct {
 	DisplayName string `json:"displayName,omitempty"`
 	Role        string `json:"role,omitempty"`
 	Password    string `json:"password,omitempty"`
+	// HostToken 是主播复位令牌（S-7），只由**创建房间者**持有。
+	//
+	// 用它的时机只有一个：主播断线后房间进入宽限期（HostID 为空但房间还活着），
+	// 这时只有携带正确令牌的连接才能接回主播位 —— 否则任何知道房间码
+	//（而房间码本来就是要分享给观众的）的人都能抢走主播位。
+	// 首次进房（房内无主播且不在宽限期）不需要它。
+	HostToken string `json:"hostToken,omitempty"`
 
 	// 信令透传：服务端原样转发，不解析 payload
 	Payload json.RawMessage `json:"payload,omitempty"`

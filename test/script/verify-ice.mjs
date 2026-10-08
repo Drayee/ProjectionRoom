@@ -43,6 +43,15 @@ const CLIENT_URL = argOf(argv, 'client', 'http://127.0.0.1:5173')
 const BASE_PORT = Number(argOf(argv, 'port', '9900'))
 /** 注入用的额外 STUN：真实存在、无需解析即可被浏览器接受，只为让"列表变了"。 */
 const INJECTED_STUN = argOf(argv, 'inject-stun', 'stun:stun1.l.google.com:19302')
+/**
+ * 判据⑦（列表未变 → 不重启）用的"钉住"列表。
+ *
+ * 为什么需要钉住：服务端默认每 60s 重新探测 STUN 并可能轮换下发内容（实测
+ * miwifi → chat.bilibili），所以"两次刷新之间列表没变"不能用真实服务端赌 ——
+ * 那会让 ⑦ 随探测周期间歇性假失败。用固定列表把窗口变成确定性的。
+ * 只影响判据⑦的窗口，⑧ 之前会清掉。
+ */
+const PINNED_STUN = ['stun:stun.miwifi.com:3478', 'stun:stun.hitv.com:3478']
 
 const checks = []
 function record(id, label, pass, detail) {
@@ -57,12 +66,15 @@ function record(id, label, pass, detail) {
 /**
  * 页面加载前挂钩 fetch：
  *   - `extraUrls`：给 /api/ice 的响应"加一条 STUN"（让列表真的变化）；
+ *   - `pinUrls`：把响应里的 iceServers **整体替换**为固定列表，用于制造"列表稳定"
+ *     的确定性窗口 —— 服务端每 60s 重新探测打分，即使 TTL 没到，它下发的列表也可能
+ *     自己轮换（实测 miwifi → chat.bilibili），所以"列表未变"不能用真实服务端赌；
  *   - `failTimes`：让接下来 N 次 /api/ice 返回 500（验证刷新失败不影响连接）。
  * 非注入分支原样返回，不改变客户端的正常路径。
  */
 const HOOK = `(() => {
   const original = window.fetch;
-  window.__prIceInject = { extraUrls: [], failTimes: 0 };
+  window.__prIceInject = { extraUrls: [], pinUrls: null, failTimes: 0 };
   window.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     if (url.includes('/api/ice') && window.__prIceInject.failTimes > 0) {
@@ -77,10 +89,16 @@ const HOOK = `(() => {
     const promise = original.apply(this, arguments);
     if (!url.includes('/api/ice')) return promise;
     return promise.then(async (resp) => {
+      const pin = window.__prIceInject.pinUrls;
       const extra = window.__prIceInject.extraUrls || [];
-      if (extra.length === 0 || !resp.ok) return resp;
+      const hasPin = Array.isArray(pin) && pin.length > 0;
+      if (!resp.ok || (!hasPin && extra.length === 0)) return resp;
       const body = await resp.clone().json();
-      body.iceServers = [...(body.iceServers || []), ...extra.map((u) => ({ urls: u }))];
+      if (hasPin) {
+        body.iceServers = pin.map((u) => ({ urls: u }));
+      } else {
+        body.iceServers = [...(body.iceServers || []), ...extra.map((u) => ({ urls: u }))];
+      }
       return new Response(JSON.stringify(body), {
         status: resp.status,
         headers: { 'Content-Type': 'application/json' },
@@ -321,6 +339,21 @@ async function main() {
   )
 
   // ---------- 3) 列表未变 → 不重启 ----------
+  // 先把列表钉成固定两条（见 PINNED_STUN）：钉住动作本身会引发一次"真变化 + 重启"，
+  // 那是预期的，所以第一轮刷新只用来消化它，之后取基线再量第二轮 —— 只有第二轮才
+  // 是"列表相同"的确定性窗口。
+  const pinScript = `window.__prIceInject.pinUrls = ${JSON.stringify(PINNED_STUN)}; 'ok'`
+  const viewerPrePin = await viewer.snapshot()
+  await viewer.evaluate(pinScript)
+  await host.evaluate(pinScript)
+  await waitFor(
+    async () => {
+      const s = await viewer.snapshot()
+      return s.ice.refreshCount > viewerPrePin.ice.refreshCount ? s : null
+    },
+    { label: '钉住列表后的第一次刷新（消化钉住引发的变化）', timeoutMs: ttlMs + 15000, intervalMs: 500 },
+  ).catch(() => null)
+
   const viewerBefore = await viewer.snapshot()
   const unchangedStart = Date.now()
   const viewerRefreshed = await waitFor(
@@ -328,12 +361,12 @@ async function main() {
       const s = await viewer.snapshot()
       return s.ice.refreshCount > viewerBefore.ice.refreshCount ? s : null
     },
-    { label: '观众侧 TTL 刷新（列表未变）', timeoutMs: ttlMs + 10000, intervalMs: 500 },
+    { label: '观众侧 TTL 刷新（列表已钉住，必然未变）', timeoutMs: ttlMs + 15000, intervalMs: 500 },
   ).catch(() => null)
   const unchangedElapsed = Date.now() - unchangedStart
   record(
     '⑦',
-    '列表未变：refreshCount 增长而 changeCount / restartCount 不变',
+    '列表未变（已钉住）：refreshCount 增长而 changeCount / restartCount 不变',
     !!viewerRefreshed &&
       viewerRefreshed.ice.changeCount === viewerBefore.ice.changeCount &&
       viewerRefreshed.ice.restartCount === viewerBefore.ice.restartCount,
@@ -342,9 +375,15 @@ async function main() {
           viewerRefreshed.ice.refreshCount - viewerBefore.ice.refreshCount
         }，${unchangedElapsed}ms）· changeCount ${viewerBefore.ice.changeCount} → ${viewerRefreshed.ice.changeCount}` +
         ` · restartCount ${viewerBefore.ice.restartCount} → ${viewerRefreshed.ice.restartCount}` +
-        ` · 原因=${viewerRefreshed.ice.lastRefreshReason}`
+        ` · 原因=${viewerRefreshed.ice.lastRefreshReason}` +
+        ` · 钉住列表=${PINNED_STUN.join(', ')}`
       : `超时没有观察到刷新（refreshCount 停在 ${viewerBefore.ice.refreshCount}）`,
   )
+
+  // 解除钉住：⑧ 要靠 extraUrls 制造"真变化"，钉住会让它失效。
+  const unpinScript = `window.__prIceInject.pinUrls = null; 'ok'`
+  await viewer.evaluate(unpinScript)
+  await host.evaluate(unpinScript)
 
   // ---------- 4) 列表变化 → 发起方重启，父节点只换配置 ----------
   await viewer.evaluate(`window.__prIceInject.extraUrls = [${JSON.stringify(INJECTED_STUN)}]; 'ok'`)

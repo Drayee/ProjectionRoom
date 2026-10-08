@@ -82,6 +82,9 @@ onMounted(() => {
     displayName: stored.displayName || '匿名观众',
     role: stored.role === 'host' ? 'host' : 'viewer',
     password: stored.password ?? '',
+    // 主播复位令牌（S-7）：创建房间时下发、存进同一份 join 凭据里。
+    // 不带上它，主播断线后在宽限期内就抢不回主播位（服务端会回 HOST_TOKEN_REQUIRED）。
+    hostToken: stored.hostToken,
   }
   store.enterRoom(credentials)
 })

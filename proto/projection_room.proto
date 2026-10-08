@@ -149,6 +149,15 @@ message Envelope {
 
   // 请求/通知的缘由（如 topology-request 的 "stalled"、换防原因）
   string reason = 33;
+
+  // 主播复位令牌（仅 join 上行使用）。
+  //
+  // 为什么需要它：主播断线后房间进入宽限期，此时 HostID 为空，任何知道房间码的人
+  // 都能以 role=host 抢走主播位。创建房间时服务端用 crypto/rand 生成 64 位十六进制
+  // 令牌，只在创建响应里返回给创建者；宽限期内只有携带正确令牌的连接才能接回主播位。
+  // 字段 34 是纯加法（proto3 未知字段可忽略），旧客户端不带该字段 → 行为不变
+  //（首次进房不需要令牌；宽限期内则无法接回，由客户端另一条线补上）。
+  string host_token = 34;
 }
 
 // PeerControl 是 DataChannel 上的控制消息。

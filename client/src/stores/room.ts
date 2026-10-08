@@ -20,9 +20,12 @@ import {
   deriveRequestTimeoutMs,
   pickServeTaskIndex,
 } from '../utils/serveSchedule'
+import { sha256Hex } from '../utils/sha256'
+import { rememberHostToken } from '../utils/joinSession'
 import type { MediaIndex } from '../types/media'
 import type {
   Capacity,
+  CreateRoomResponse,
   Envelope,
   MemberInfo,
   PeerControl,
@@ -46,6 +49,11 @@ export interface JoinCredentials {
   displayName: string
   role: Role
   password: string
+  /**
+   * 主播复位令牌（S-7）：服务端只在创建响应里下发一次，宽限期内接回主播位必须带上。
+   * 首次进房不需要；缺了它 → 服务端回 HOST_TOKEN_REQUIRED，主播就只能等到宽限期结束重建房间。
+   */
+  hostToken?: string
 }
 
 const ERROR_TEXT: Record<string, string> = {
@@ -63,6 +71,8 @@ const ERROR_TEXT: Record<string, string> = {
   BAD_MEDIA_INDEX: '分片索引不合法',
   MEDIA_LOCKED: '分片索引已锁定，换片需重开房间',
   INTERNAL: '服务端内部错误',
+  // 宽限期内接回主播位少了复位令牌：说清原因与后果，而不是含糊的"密码错误"。
+  HOST_TOKEN_REQUIRED: '缺少主播复位令牌：无法接回主播位。请用创建该房间的那个标签页重连掉线的主播',
 }
 
 /** 观众预取窗口（分片数）。2s/片 ≈ 60s 缓冲，是抖动的缓冲池。 */
@@ -244,6 +254,42 @@ export const useRoomStore = defineStore('room', () => {
   const syncMode = ref('idle')
   const syncResets = ref(0)
   const chunkErrors = ref(0)
+
+  // ---------- 入站分片的内容校验（F-11）----------
+  //
+  // 索引里的 `sha256` 是主播发布时签出去的"内容指纹"，但客户端此前**从不校验**：
+  // 同一个房间里的对端可以把任意字节塞进 media 帧，坏数据会一路进 chunkStore 并
+  // append 进 MSE（画面花屏、被替换成任意内容，且无人察觉）。
+  /** 校验不通过（内容被替换）的分片数：这是"有对端在发坏数据"的唯一直接证据。 */
+  const hashMismatches = ref(0)
+  /** 校验通过的分片数。 */
+  const hashVerified = ref(0)
+  /** 环境不支持 `crypto.subtle`（明文 http + 非 localhost）导致跳过校验的分片数。 */
+  const hashSkipped = ref(0)
+
+  /**
+   * 媒体代数：每次"缓冲/房间被复位"就 +1。
+   *
+   * 校验是异步的（`crypto.subtle.digest` 返回 Promise），复位之后才回来的校验结果
+   * 必须作废 —— 否则跳转/换房/重新挂载播放器之后，旧会话的分片会被写进新缓冲。
+   */
+  let mediaEpoch = 0
+
+  /** 复位分片仓库（并作废所有在途校验）。**所有** chunkStore.reset() 都必须走这里。 */
+  function resetChunkStore() {
+    mediaEpoch += 1
+    chunkStore.reset()
+  }
+
+  /** 索引里声明的分片摘要（小写十六进制）；索引没给或格式不对时返回空串（= 跳过校验）。 */
+  function expectedSha256(segmentIndex: number): string {
+    const meta = mediaIndex.value?.segments[segmentIndex - 1]
+    const value = typeof meta?.sha256 === 'string' ? meta.sha256.trim().toLowerCase() : ''
+    if (value === '' || !/^[0-9a-f]{64}$/.test(value)) {
+      return ''
+    }
+    return value
+  }
   /** 取数失败与应答情况的环形日志：排障时先看这两个（以前失败是静默的）。 */
   const fetchFailures = ref<string[]>([])
   const serveLog = ref<string[]>([])
@@ -623,6 +669,9 @@ export const useRoomStore = defineStore('room', () => {
       displayName: creds.displayName,
       role: creds.role,
       password: creds.password,
+      // 主播复位令牌（S-7）：服务端只在"房间处于主播离线宽限期"时才看它。
+      // 带上它，主播断线重连才能在同一房间码下直接接回主播位（否则只能等房间被回收后重建）。
+      hostToken: creds.hostToken,
     })
   }
 
@@ -801,9 +850,16 @@ export const useRoomStore = defineStore('room', () => {
             // 409 = 房间已存在（ErrRoomExists），与 200 等价地视为"房间已就绪"。
             noteLifecycle(`房间 ${creds.roomId} 已就绪（HTTP ${resp.status}），重新进房`)
             rebuildState.value = 'idle'
-            const data = (await resp.json().catch(() => null)) as IcePayload | null
+            const data = (await resp.json().catch(() => null)) as CreateRoomResponse | null
             // 新房间的响应里有 ICE 配置（409 时没有）：拿到就更新，拿不到沿用旧的。
             if (data?.iceServers?.length) applyIceResponse(data, 'POST /api/rooms（重建）')
+            // 重建 = 服务端**新建**了房间对象 → 会下发一枚新的复位令牌，旧令牌对新房间无效。
+            // 只在响应真的带令牌时覆盖（409 时没有），否则会把还能用的旧令牌冲掉。
+            if (data?.hostToken) {
+              credentials.value = { ...creds, hostToken: data.hostToken }
+              rememberHostToken(creds.roomId, data.hostToken)
+              noteLifecycle('已保存重建房间下发的主播复位令牌')
+            }
             rejoinNow()
             return
           }
@@ -998,8 +1054,60 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function handlePeerMedia(peerId: string, media: DecodedMedia) {
+    // 校验是异步的（crypto.subtle.digest）：用既有的 safe() 兜住"发射后不管"的异常，
+    // 否则一次校验里的意外会变成未处理的 promise 拒绝，在控制台刷一片红。
+    safe(`分片 ${media.chunkIndex} 校验`, ingestPeerMedia(peerId, media))
+  }
+
+  /**
+   * 收到一个分片：**先校验内容，再入库**（F-11）。
+   *
+   * 三条设计约束（都是实的，不是漂亮话）：
+   *   1. **每个分片只算一遍摘要**。已经拿到这一片时（并发副本 / 迟到响应 / push 分发）
+   *      直接结算在途请求、不再算 —— 那是最常见的重复路径。
+   *   2. **不引入新的写入顺序**。校验只推迟"入库时刻"（异步摘要），入库之后仍然是
+   *      原来的 `put + flushOrdered`，`flushOrdered` 依旧按 `nextAppend` 起连续追加 ——
+   *      乱序分片本来就靠它排队，所以校验没有破坏顺序落库语义。
+   *   3. **校验不过就不结算在途请求**。那条请求会走**原有**的超时路径失败
+   *      （`noteFailure` 记账 → 连续到上限即降权 → 转投下一个候选父），
+   *      于是坏数据既不落库也不 append。坏字节来自哪个父节点也一并留在取数失败日志里。
+   */
+  async function ingestPeerMedia(peerId: string, media: DecodedMedia) {
+    const index = media.chunkIndex
+    const isInit = index === 0 || media.kind === KIND_INIT
+
+    if (!isInit && chunkStore.has(index)) {
+      // 已经有了（重复副本）：结算请求即可，别再算一遍摘要。
+      requester.handleMedia(peerId, media)
+      return
+    }
+
+    const expected = isInit ? '' : expectedSha256(index)
+    if (expected !== '') {
+      const epoch = mediaEpoch
+      const actual = await sha256Hex(media.payload)
+      if (epoch !== mediaEpoch) {
+        // 缓冲/房间已经复位：这一片属于上一个会话，直接丢掉（在途请求由 reset 结算）。
+        return
+      }
+      if (actual === null) {
+        // 非安全上下文（明文 http + 局域网 IP）：没有 crypto.subtle，降级为不校验并计数。
+        hashSkipped.value += 1
+      } else if (actual !== expected) {
+        hashMismatches.value += 1
+        noteFetchFailure(
+          `分片 ${index} ← ${peerId.slice(0, 8)}: sha256 与索引不符（对端内容不可信，已丢弃不入库）`,
+        )
+        // 这条父节点刚交出了坏字节：按原有失败机制记账（连续到上限即降权 + 立刻转投）。
+        topology.noteFailure(index, peerId)
+        return
+      } else {
+        hashVerified.value += 1
+      }
+    }
+
     const delivery = requester.handleMedia(peerId, media)
-    if (delivery.index === 0 || delivery.kind === KIND_INIT) {
+    if (isInit || delivery.index === 0 || delivery.kind === KIND_INIT) {
       chunkStore.putInit(delivery.payload)
     } else {
       chunkStore.put(delivery.index, delivery.payload)
@@ -1742,7 +1850,7 @@ export const useRoomStore = defineStore('room', () => {
 
     const segIndex = segmentIndexAt(index, target)
     await player.clearBuffered()
-    chunkStore.reset()
+    resetChunkStore()
     initRequested = false
     nextAppend = segIndex
     requiredSegment = segIndex
@@ -1899,7 +2007,7 @@ export const useRoomStore = defineStore('room', () => {
       if (changed) {
         noteLifecycle(`媒体索引到达（${index.segments.length} 段），复位取数状态`)
         resetFetchState()
-        chunkStore.reset()
+        resetChunkStore()
         initRequested = false
         nextAppend = 1
         requiredSegment = null
@@ -1939,7 +2047,7 @@ export const useRoomStore = defineStore('room', () => {
     await playerAttachInFlight
     if (!player.attached.value) return
 
-    chunkStore.reset()
+    resetChunkStore()
     initRequested = false
     nextAppend = 1
     requiredSegment = null
@@ -2045,7 +2153,7 @@ export const useRoomStore = defineStore('room', () => {
     rtc.closeAll()
     topology.reset()
     player.detach()
-    chunkStore.reset()
+    resetChunkStore()
     media.reset()
     // ICE 刷新定时器必须在这里停掉：否则切房之后残留的定时器会继续打旧房间的 /api/ice，
     // 并把旧房间的列表 setConfiguration 到新房间的连接上。
@@ -2291,6 +2399,10 @@ export const useRoomStore = defineStore('room', () => {
       members: members.value.length,
       parents,
       unassigned,
+      /** 入站分片的内容校验（F-11）：坏片计数是"有对端在发替换内容"的直接证据。 */
+      hashMismatches: hashMismatches.value,
+      hashVerified: hashVerified.value,
+      hashSkipped: hashSkipped.value,
       unassignedText: !unassigned
         ? ''
         : topology.mode.value === 'pending'
@@ -2352,6 +2464,15 @@ export const useRoomStore = defineStore('room', () => {
     syncMode,
     syncResets,
     chunkErrors,
+    /** 入站分片内容校验（F-11）的三个计数。 */
+    hashMismatches,
+    hashVerified,
+    hashSkipped,
+    /**
+     * 只读：某个分片当前是否在仓库里。
+     * 给 F-11 的确定性验收用（"坏片没有落库"必须能直接读到，不能只靠计数推断）。
+     */
+    hasChunk: (index: number) => chunkStore.has(index),
     fetchFailures,
     serveLog,
     bufferedAhead,

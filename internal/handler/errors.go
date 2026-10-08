@@ -38,6 +38,18 @@ func roomErrorResponse(err error) (status int, code string, message string) {
 		return http.StatusBadRequest, model.CodeBadRequest, "参数不合法"
 	case errors.Is(err, usecase.ErrRoomExists):
 		return http.StatusConflict, model.CodeBadRequest, "房间码已存在"
+	// —— 以下三条是 S-3 / S-7 / S-11 新增闸门的对外表述。
+	// 状态码选择：400（参数不合白名单）/ 503（服务端在册房间到顶，不是客户端的错）/ 403（令牌缺失或错误）。
+	case errors.Is(err, usecase.ErrBadRoomCode):
+		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+	case errors.Is(err, usecase.ErrBadPasswordPolicy):
+		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+	case errors.Is(err, usecase.ErrTooManyRooms):
+		return http.StatusServiceUnavailable, model.CodeTooManyRooms, err.Error()
+	case errors.Is(err, usecase.ErrHostTokenRequired):
+		return http.StatusForbidden, model.CodeHostTokenRequired, err.Error()
+	case errors.Is(err, usecase.ErrJoinRateLimited):
+		return http.StatusTooManyRequests, model.CodeRateLimited, err.Error()
 	default:
 		return http.StatusInternalServerError, model.CodeInternalError, "服务端内部错误"
 	}

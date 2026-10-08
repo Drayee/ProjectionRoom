@@ -46,6 +46,39 @@ const (
 
 	// 客户端切片器二进制的发布目录；留空即跟随 <PR_STATIC_DIR>/downloads。
 	envDownloadsDir = "PR_DOWNLOADS_DIR"
+
+	// —— S-1：解码前的 proto 预算（见 internal/model/wire.go）。
+	// 每个都是"元素/字节"量级的上限，非法值直接报错（预算写错等于闸门失效）。
+	envSignalMaxRepeatedElements = "PR_SIGNAL_MAX_REPEATED_ELEMENTS"
+	envSignalMaxMembers          = "PR_SIGNAL_MAX_MEMBERS"
+	envSignalMaxSegments         = "PR_SIGNAL_MAX_SEGMENTS"
+	envSignalMaxFieldBytes       = "PR_SIGNAL_MAX_FIELD_BYTES"
+	// 每连接字节速率配额（第二道闸）。0 = 关闭。
+	envSignalMaxRate   = "PR_SIGNAL_MAX_RATE_BYTES"
+	envSignalRateBurst = "PR_SIGNAL_RATE_BUCKET_BYTES"
+
+	// —— S-3：建房闸门与房间回收。
+	envMaxRooms          = "PR_MAX_ROOMS"
+	envUnclaimedRoomTTL  = "PR_ROOM_UNCLAIMED_TTL"
+	envEmptyRoomTTL      = "PR_ROOM_EMPTY_TTL"
+	envRoomSweepInterval = "PR_ROOM_SWEEP_INTERVAL"
+
+	// —— S-3/S-11：每 IP 令牌桶。
+	envRoomCreatePerMinute = "PR_ROOM_CREATE_PER_MINUTE"
+	envRoomCreateBurst     = "PR_ROOM_CREATE_BURST"
+	envJoinFailPerMinute   = "PR_JOIN_FAIL_PER_MINUTE"
+	envJoinFailBurst       = "PR_JOIN_FAIL_BURST"
+
+	// —— S-9：metrics 节流。
+	envMetricsMinInterval      = "PR_METRICS_MIN_INTERVAL"
+	envMetricsSignificantRatio = "PR_METRICS_SIGNIFICANT_RATIO"
+
+	// —— F-9：安全响应头。
+	envSecurityHeaders = "PR_SECURITY_HEADERS"
+	envSecurityCSP     = "PR_SECURITY_CSP"
+
+	// —— S-1 兜底：进程软内存上限。
+	envMemoryLimit = "PR_MEMORY_LIMIT"
 )
 
 // DefaultPackSize 是分片打包的默认粒度（每个 .bin 容纳多少片）。
@@ -54,6 +87,119 @@ const (
 // import segment（queue.go 依赖 config，会形成 import 循环）。segment 与 cmd/segmenter
 // 都引用这个常量，因此默认值只有一处定义。
 const DefaultPackSize = 100
+
+// —— S-1 解码前预算的默认值与允许范围。
+//
+// 默认值逐条依据见 internal/model/wire.go 的 WireBudget 注释；这里只固定"数值本身"
+// 与允许范围。范围上限（Max*）不是推荐值，而是"再往上就等于关掉这条闸门"的红线：
+// 超限的配置必须显式写出来，避免有人在不知情的情况下把 DoS 面放大几个数量级。
+const (
+	// DefaultSignalMaxRepeatedElements = 16384：实测最大的 index.json 是 14000 片。
+	DefaultSignalMaxRepeatedElements = 16384
+	// MaxSignalMaxRepeatedElements = 4,000,000：再往上就等于让"4 MiB 帧 → 几十 GB 堆"
+	// 成为可能（审计实证是 1,398,100 个元素），所以必须显式配置才允许。
+	MaxSignalMaxRepeatedElements = 4_000_000
+	// DefaultSignalMaxMembers = 256：房间硬上限默认 16，留 16 倍余量。
+	DefaultSignalMaxMembers = 256
+	// MaxSignalMaxMembers = 65536。
+	MaxSignalMaxMembers = 65536
+	// DefaultSignalMaxSegments = 8192：覆盖 2s/片 的 4.5 小时视频。
+	DefaultSignalMaxSegments = 8192
+	// MaxSignalMaxSegments = 1,000,000：24 天视频的索引，显式配置才允许。
+	MaxSignalMaxSegments = 1_000_000
+	// DefaultSignalMaxFieldBytes = 1 MiB：have 位图 838 万片 / SDP 几 KB。
+	DefaultSignalMaxFieldBytes = 1 << 20
+	// MaxSignalMaxFieldBytes = 16 MiB：单字段再大就等于没有单字段闸门。
+	MaxSignalMaxFieldBytes = 16 << 20
+	// DefaultSignalMaxRateBytes = 256 KiB/s：正常连接是几百字节每秒。
+	DefaultSignalMaxRateBytes = 256 << 10
+	// DefaultSignalRateBucketBytes = 512 KiB：突发上限，必须能容纳一条索引帧的常见大小。
+	DefaultSignalRateBucketBytes = 512 << 10
+	// MaxSignalRateBytes = 64 MiB/s：再高就等于关掉速率闸。
+	MaxSignalRateBytes = 64 << 20
+)
+
+// —— S-3 / S-11 建房与 join 的默认闸门。
+const (
+	// DefaultMaxRooms = 256：每个房间常驻几 KB + 一个宽限定时器；
+	// 审计实测"创建 400 个房间 RSS 只增不减"，这里给它一个上限。
+	DefaultMaxRooms = 256
+	// MaxMaxRooms = 65536：再往上等于放弃"总数上限"这条约束。
+	MaxMaxRooms = 65536
+	// DefaultUnclaimedRoomTTL = 10m：从"拿到房间码"到"主播点进房"的人机交互时间。
+	DefaultUnclaimedRoomTTL = 10 * time.Minute
+	// MaxUnclaimedRoomTTL = 24h。
+	MaxUnclaimedRoomTTL = 24 * time.Hour
+	// DefaultEmptyRoomTTL = 30m：兜底回收（无成员且不在宽限期），给足够长的误杀余量。
+	DefaultEmptyRoomTTL = 30 * time.Minute
+	// MaxEmptyRoomTTL = 24h。
+	MaxEmptyRoomTTL = 24 * time.Hour
+	// DefaultRoomSweepInterval = 1m：清扫是纯内存遍历（房间数上限 256），成本可忽略。
+	DefaultRoomSweepInterval = time.Minute
+	// MinRoomSweepInterval = 100ms（测试需要把周期压到很短）。
+	MinRoomSweepInterval = 100 * time.Millisecond
+	// MaxRoomSweepInterval = 1h。
+	MaxRoomSweepInterval = time.Hour
+
+	// DefaultRoomCreatePerMinute / DefaultRoomCreateBurst：每 IP 建房令牌桶。
+	DefaultRoomCreatePerMinute = 20
+	DefaultRoomCreateBurst     = 10
+	// MaxRoomCreatePerMinute = 100000：再高等于关掉限速。
+	MaxRoomCreatePerMinute = 100_000
+	// DefaultJoinFailPerMinute / DefaultJoinFailBurst：join 失败的每 IP+房间码令牌桶。
+	//
+	// 容量 30 而不是 5，是因为建错房间/打错密码的正常用户会在同一分钟里连续试几次，
+	// 而 6 位房间码的暴力猜测需要 10^4 量级次；30/分钟 已经让那条路不可行。
+	DefaultJoinFailPerMinute = 30
+	DefaultJoinFailBurst     = 30
+
+	// DefaultMetricsMinInterval = 1500ms，与 usecase.reassignMinInterval（拓扑重算节流）
+	// 取同一个量级：客户端本来 5s 上报一次，这个闸门只针对"连发"；
+	// 而"秒级连续两次显著变化"里被丢掉的中间态本身没有观测价值
+	//（下一次显著变化会立刻把容量与拓扑修正到最终值）。
+	DefaultMetricsMinInterval = 1500 * time.Millisecond
+	// DefaultMetricsSignificantRatio = 0.1（10%）。
+	DefaultMetricsSignificantRatio = 0.1
+	// MinMetricsSignificantRatio / MaxMetricsSignificantRatio。
+	MinMetricsSignificantRatio = 0.01
+	MaxMetricsSignificantRatio = 1.0
+
+	// DefaultMemoryLimitBytes = 512 MiB：进程软内存上限（debug.SetMemoryLimit）。
+	//
+	// 这是**兜底**，不是替代前面的预算：预算挡的是"已知形态的一帧放大"，
+	// 这一条挡的是"某个没想到的路径一直在长"。512 MiB 的依据：
+	// 正常态 RSS 约 20–40 MB（审计实测 22 MB），切片作业会额外占 I/O 缓冲
+	// （走的是文件流，不是堆），512 MiB 给了 >10 倍余量，同时把
+	// "一帧把机器打死"变成"GC 变忙 + 拒绝（如果还超）"。
+	DefaultMemoryLimitBytes = 512 << 20
+	// MaxMemoryLimitBytes = 64 GiB。
+	MaxMemoryLimitBytes = 64 << 30
+)
+
+// DefaultSecurityCSP 是全站 CSP 的默认内容（F-9）。
+//
+// 逐条说明为什么这么写（改错会直接弄坏页面）：
+//
+//	default-src 'self'        兜底：一切未显式列出的资源类型只允许同源
+//	script-src 'self'          现有 client/dist 没有内联脚本（index.html 只有 <script type=module src=…>）
+//	style-src 'self' 'unsafe-inline'  **必须**留 unsafe-inline：Vue 运行时按组件把 <style> 注入文档
+//	connect-src 'self' ws: wss: 同源 fetch + WebSocket（ws: 保留给"页面 http、隧道 https"的混用）
+//	img-src 'self' data:       SVG/小图标走 data URI
+//	media-src 'self' blob:     **必须**留 blob:：MSE 用 URL.createObjectURL(MediaSource) 播放
+//	worker-src 'self' blob:    保险：打包器将来引入 worker 时不至于被 CSP 掐掉
+//	frame-ancestors 'none'     禁止被任何页面 frame（配合 X-Frame-Options: DENY）
+//	base-uri 'none'            禁止 <base> 改写相对 URL 解析
+//	form-action 'self'         表单只能提交到同源
+const DefaultSecurityCSP = "default-src 'self'; " +
+	"script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"connect-src 'self' ws: wss:; " +
+	"img-src 'self' data:; " +
+	"media-src 'self' blob:; " +
+	"worker-src 'self' blob:; " +
+	"frame-ancestors 'none'; " +
+	"base-uri 'none'; " +
+	"form-action 'self'"
 
 // ICE 下发的默认值。
 //
@@ -149,7 +295,25 @@ func Default() *Config {
 			SafetyFactor:     0.8,
 			HostGrace:        DefaultHostGrace,
 			MaxDepth:         DefaultRoomMaxDepth,
+
+			MaxRooms:                DefaultMaxRooms,
+			UnclaimedRoomTTL:        DefaultUnclaimedRoomTTL,
+			HostGraceZeroTTL:        DefaultEmptyRoomTTL,
+			SweepInterval:           DefaultRoomSweepInterval,
+			MetricsMinInterval:      DefaultMetricsMinInterval,
+			MetricsSignificantRatio: DefaultMetricsSignificantRatio,
 		},
+		IPC: IPCConfig{
+			CreatePerMinute:   DefaultRoomCreatePerMinute,
+			CreateBurst:       DefaultRoomCreateBurst,
+			JoinFailPerMinute: DefaultJoinFailPerMinute,
+			JoinFailBurst:     DefaultJoinFailBurst,
+		},
+		Security: SecurityConfig{
+			Headers: true,
+			CSP:     DefaultSecurityCSP,
+		},
+		MemoryLimitBytes: DefaultMemoryLimitBytes,
 		Signal: SignalConfig{
 			WriteTimeout: 10 * time.Second,
 			PingInterval: 20 * time.Second,
@@ -163,8 +327,16 @@ func Default() *Config {
 			MaxChatLen:      500,
 			SendQueueSize:   32,
 			// 本机开发时页面在 Vite 5173、/ws 在 Go 8080（跨源）；
-			// 单端口部署与隧道域名天然同源，不需要在这里列。
+			// 单端口部署与隧道域名不再"自动同源"（S-5 删掉了请求 Host 兜底），
+			// 所以部署到隧道时要把那个域名显式加进 PR_ALLOWED_ORIGINS。
 			AllowedOrigins: []string{"127.0.0.1:5173", "localhost:5173"},
+
+			MaxRepeatedElements:  DefaultSignalMaxRepeatedElements,
+			MaxMembersPerMessage: DefaultSignalMaxMembers,
+			MaxSegmentsPerIndex:  DefaultSignalMaxSegments,
+			MaxFieldBytes:        DefaultSignalMaxFieldBytes,
+			MaxRateBytesPerSec:   DefaultSignalMaxRateBytes,
+			RateBucketBytes:      DefaultSignalRateBucketBytes,
 		},
 		ICE: ICEConfig{
 			STUNURLs:      DefaultSTUNURLs(),
@@ -222,10 +394,48 @@ func Load() (*Config, error) {
 		cfg.Room.DefaultStreamBps = n
 	}
 	// 额外允许的 WebSocket 来源（逗号分隔，支持 *.example.com）。
-	// 同源（页面与 /ws 同端口）始终放行，所以这一项主要是给"前后端分离开发"或
-	// 需要从别的域名嵌页面进来的场景用。
+	// 它现在是**唯一**的来源白名单（同源不再隐式放行，见 S-5）。
 	if v := os.Getenv(envAllowedOrigins); v != "" {
 		cfg.Signal.AllowedOrigins = splitList(v)
+	}
+
+	if err := applySignalEnv(&cfg.Signal); err != nil {
+		return nil, err
+	}
+
+	if err := applyIPCEnv(&cfg.IPC); err != nil {
+		return nil, err
+	}
+
+	if err := applySecurityEnv(&cfg.Security); err != nil {
+		return nil, err
+	}
+
+	if v := os.Getenv(envMemoryLimit); v != "" {
+		n, err := positiveInt64(envMemoryLimit, v)
+		if err != nil {
+			return nil, err
+		}
+		if n < 16<<20 || n > MaxMemoryLimitBytes {
+			return nil, fmt.Errorf("config: %s 必须落在 [16MiB, %d] 区间（字节数）, got %q",
+				envMemoryLimit, int64(MaxMemoryLimitBytes), v)
+		}
+		cfg.MemoryLimitBytes = n
+	}
+
+	// 交叉校验：帧预算必须放得下"配置允许的最大房间"。
+	//
+	// 为什么必须显式报错（而不是各自独立校验）：这两个变量分别属于"协议预算"与
+	// "业务容量"，单独看都合法，但组合起来会让**满员房间的成员表被自己的预算拒掉** ——
+	// 症状是"房间越大越容易突然断线"，而且日志里只有一条"帧预算超限"，极难归因。
+	// 例：PR_MAX_MEMBERS=300 而 PR_SIGNAL_MAX_MEMBERS 保持默认 256 →
+	// 第 257 个成员进房后的 member-list 广播会被服务端拒绝。
+	if cfg.Room.MaxMembers > cfg.Signal.MaxMembersPerMessage {
+		return nil, fmt.Errorf(
+			"config: PR_MAX_MEMBERS=%d 大于 PR_SIGNAL_MAX_MEMBERS=%d："+
+				"满员房间的成员表会被帧预算拒绝（表现为房间越大越容易断线）。"+
+				"请把 PR_SIGNAL_MAX_MEMBERS 抬到 >= PR_MAX_MEMBERS",
+			cfg.Room.MaxMembers, cfg.Signal.MaxMembersPerMessage)
 	}
 
 	if err := applyICEEnv(&cfg.ICE); err != nil {
@@ -305,6 +515,56 @@ func applyRoomEnv(rc *RoomConfig) error {
 				envRoomMaxDepth, MinRoomMaxDepth, MaxRoomMaxDepth, v)
 		}
 		rc.MaxDepth = n
+	}
+
+	// —— S-3：房间总数上限与三个回收 TTL。
+	if v := os.Getenv(envMaxRooms); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > MaxMaxRooms {
+			return fmt.Errorf("config: %s 必须是 [1, %d] 区间内的整数, got %q", envMaxRooms, MaxMaxRooms, v)
+		}
+		rc.MaxRooms = n
+	}
+	if v := os.Getenv(envUnclaimedRoomTTL); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 || d > MaxUnclaimedRoomTTL {
+			return fmt.Errorf("config: %s 必须是 (0, %s] 区间内的 Go 时长（如 10m）, got %q",
+				envUnclaimedRoomTTL, MaxUnclaimedRoomTTL, v)
+		}
+		rc.UnclaimedRoomTTL = d
+	}
+	if v := os.Getenv(envEmptyRoomTTL); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 || d > MaxEmptyRoomTTL {
+			return fmt.Errorf("config: %s 必须是 (0, %s] 区间内的 Go 时长（如 30m）, got %q",
+				envEmptyRoomTTL, MaxEmptyRoomTTL, v)
+		}
+		rc.HostGraceZeroTTL = d
+	}
+	if v := os.Getenv(envRoomSweepInterval); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < MinRoomSweepInterval || d > MaxRoomSweepInterval {
+			return fmt.Errorf("config: %s 必须落在 [%s, %s] 区间（如 1m）, got %q",
+				envRoomSweepInterval, MinRoomSweepInterval, MaxRoomSweepInterval, v)
+		}
+		rc.SweepInterval = d
+	}
+
+	// —— S-9：metrics 节流。
+	if v := os.Getenv(envMetricsMinInterval); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return fmt.Errorf("config: %s 必须是 >=0 的 Go 时长（0 表示不节流）, got %q", envMetricsMinInterval, v)
+		}
+		rc.MetricsMinInterval = d
+	}
+	if v := os.Getenv(envMetricsSignificantRatio); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < MinMetricsSignificantRatio || f > MaxMetricsSignificantRatio {
+			return fmt.Errorf("config: %s 必须落在 [%v, %v] 区间, got %q",
+				envMetricsSignificantRatio, MinMetricsSignificantRatio, MaxMetricsSignificantRatio, v)
+		}
+		rc.MetricsSignificantRatio = f
 	}
 	return nil
 }
@@ -475,6 +735,109 @@ func applyICEEnv(ic *ICEConfig) error {
 			return fmt.Errorf("config: %s 必须落在 (0, %s] 区间, got %q", envICETTL, MaxICETTL, v)
 		}
 		ic.TTL = d
+	}
+	return nil
+}
+
+// applySignalEnv 应用 S-1 的解码前预算与速率配额覆盖。
+//
+// 与其它配置一致：非法值直接报错。这里尤其不能静默回退 ——
+// 预算写错（例如把 MaxMembers 写成 0 或负数）等于把审计实证的 OOM 路径重新打开，
+// 而"配错了"和"配对了"在运行期完全看不出来。
+func applySignalEnv(sc *SignalConfig) error {
+	intCases := []struct {
+		name  string
+		value *int
+		// min 是允许下限（含），max 是允许上限（含）。
+		min, max int
+	}{
+		{envSignalMaxRepeatedElements, &sc.MaxRepeatedElements, 1, MaxSignalMaxRepeatedElements},
+		{envSignalMaxMembers, &sc.MaxMembersPerMessage, 1, MaxSignalMaxMembers},
+		{envSignalMaxSegments, &sc.MaxSegmentsPerIndex, 1, MaxSignalMaxSegments},
+		{envSignalMaxFieldBytes, &sc.MaxFieldBytes, 1024, MaxSignalMaxFieldBytes},
+		// 0 表示关闭速率闸（排障用），所以下限是 0。
+		{envSignalMaxRate, &sc.MaxRateBytesPerSec, 0, MaxSignalRateBytes},
+		{envSignalRateBurst, &sc.RateBucketBytes, 1024, MaxSignalRateBytes},
+	}
+	for _, tc := range intCases {
+		v := os.Getenv(tc.name)
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("config: %s 必须是整数, got %q", tc.name, v)
+		}
+		if n < tc.min || n > tc.max {
+			return fmt.Errorf("config: %s 必须落在 [%d, %d] 区间, got %q", tc.name, tc.min, tc.max, v)
+		}
+		*tc.value = n
+	}
+	return nil
+}
+
+// applyIPCEnv 应用 S-3/S-11 的每 IP 令牌桶覆盖。
+func applyIPCEnv(ic *IPCConfig) error {
+	cases := []struct {
+		name  string
+		value *float64
+		min   float64
+		max   float64
+	}{
+		{envRoomCreatePerMinute, &ic.CreatePerMinute, 0.001, MaxRoomCreatePerMinute},
+		{envJoinFailPerMinute, &ic.JoinFailPerMinute, 0.001, MaxRoomCreatePerMinute},
+	}
+	for _, tc := range cases {
+		v := os.Getenv(tc.name)
+		if v == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("config: %s 必须是数字, got %q", tc.name, v)
+		}
+		if f < tc.min || f > tc.max {
+			return fmt.Errorf("config: %s 必须落在 [%v, %v] 区间, got %q", tc.name, tc.min, tc.max, v)
+		}
+		*tc.value = f
+	}
+
+	bursts := []struct {
+		name  string
+		value *int
+	}{
+		{envRoomCreateBurst, &ic.CreateBurst},
+		{envJoinFailBurst, &ic.JoinFailBurst},
+	}
+	for _, tc := range bursts {
+		v := os.Getenv(tc.name)
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 1_000_000 {
+			return fmt.Errorf("config: %s 必须是 [1, 1000000] 区间内的整数, got %q", tc.name, v)
+		}
+		*tc.value = n
+	}
+	return nil
+}
+
+// applySecurityEnv 应用 F-9 的安全响应头覆盖。
+func applySecurityEnv(sc *SecurityConfig) error {
+	if v := os.Getenv(envSecurityHeaders); v != "" {
+		b, err := parseBool(envSecurityHeaders, v)
+		if err != nil {
+			return err
+		}
+		sc.Headers = b
+	}
+	if v := os.Getenv(envSecurityCSP); v != "" {
+		csp := strings.TrimSpace(v)
+		if csp == "" {
+			return fmt.Errorf("config: %s 不能为空（要关闭 CSP 请用 PR_SECURITY_HEADERS=0）, got %q", envSecurityCSP, v)
+		}
+		sc.CSP = csp
 	}
 	return nil
 }

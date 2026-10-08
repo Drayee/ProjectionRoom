@@ -56,6 +56,8 @@ func segmentServer(t *testing.T, mutate func(*config.Config)) (*httptest.Server,
 	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, queue))
 	t.Cleanup(func() {
 		srv.Close()
+		// NewRouter 会启动房间清扫协程（S-3）：测试结束必须停掉，避免用例间互相干扰。
+		rooms.Stop()
 		queueCleanup()
 		hubCleanup()
 	})

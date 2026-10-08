@@ -798,7 +798,15 @@ type Envelope struct {
 	Code     string `protobuf:"bytes,31,opt,name=code,proto3" json:"code,omitempty"`
 	Message  string `protobuf:"bytes,32,opt,name=message,proto3" json:"message,omitempty"`
 	// 请求/通知的缘由（如 topology-request 的 "stalled"、换防原因）
-	Reason        string `protobuf:"bytes,33,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason string `protobuf:"bytes,33,opt,name=reason,proto3" json:"reason,omitempty"`
+	// 主播复位令牌（仅 join 上行使用）。
+	//
+	// 为什么需要它：主播断线后房间进入宽限期，此时 HostID 为空，任何知道房间码的人
+	// 都能以 role=host 抢走主播位。创建房间时服务端用 crypto/rand 生成 64 位十六进制
+	// 令牌，只在创建响应里返回给创建者；宽限期内只有携带正确令牌的连接才能接回主播位。
+	// 字段 34 是纯加法（proto3 未知字段可忽略），旧客户端不带该字段 → 行为不变
+	// （首次进房不需要令牌；宽限期内则无法接回，由客户端另一条线补上）。
+	HostToken     string `protobuf:"bytes,34,opt,name=host_token,json=hostToken,proto3" json:"host_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1064,6 +1072,13 @@ func (x *Envelope) GetReason() string {
 	return ""
 }
 
+func (x *Envelope) GetHostToken() string {
+	if x != nil {
+		return x.HostToken
+	}
+	return ""
+}
+
 // PeerControl 是 DataChannel 上的控制消息。
 // 分片数据本身不走这里：它在控制消息之后以原始二进制帧发送。
 type PeerControl struct {
@@ -1307,7 +1322,7 @@ const file_projection_room_proto_rawDesc = "" +
 	"\x11DistributorChange\x12\x17\n" +
 	"\afrom_id\x18\x01 \x01(\tR\x06fromId\x12\x13\n" +
 	"\x05to_id\x18\x02 \x01(\tR\x04toId\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xdf\b\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xfe\b\n" +
 	"\bEnvelope\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x17\n" +
 	"\aroom_id\x18\x02 \x01(\tR\x06roomId\x12\x1b\n" +
@@ -1344,7 +1359,9 @@ const file_projection_room_proto_rawDesc = "" +
 	"\bcomplete\x18\x1e \x01(\bR\bcomplete\x12\x12\n" +
 	"\x04code\x18\x1f \x01(\tR\x04code\x12\x18\n" +
 	"\amessage\x18  \x01(\tR\amessage\x12\x16\n" +
-	"\x06reason\x18! \x01(\tR\x06reason\"\x8f\x03\n" +
+	"\x06reason\x18! \x01(\tR\x06reason\x12\x1d\n" +
+	"\n" +
+	"host_token\x18\" \x01(\tR\thostToken\"\x8f\x03\n" +
 	"\vPeerControl\x12\f\n" +
 	"\x01t\x18\x01 \x01(\tR\x01t\x12\x10\n" +
 	"\x03rid\x18\x02 \x01(\tR\x03rid\x12\x10\n" +

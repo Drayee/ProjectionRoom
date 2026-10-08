@@ -110,6 +110,16 @@ export interface Envelope {
   displayName?: string
   role?: Role
   password?: string
+  /**
+   * 主播复位令牌（proto 字段 34，仅 join 上行使用）。
+   *
+   * 为什么需要它：主播断线后房间进入宽限期，此时 HostID 为空 —— 任何知道房间码的人
+   * （而房间码是要分享给观众的）都能以 role=host 抢走主播位，把原主播挡在门外。
+   * 令牌由 `POST /api/rooms` 创建响应一次性下发（64 位十六进制），宽限期内只有带上它
+   * 才能接回主播位；不带 → 服务端回 HOST_TOKEN_REQUIRED（不是"密码错误"那种含糊结果）。
+   * 首次进房（房间已有主播）不需要它。
+   */
+  hostToken?: string
   payload?: unknown
   text?: string
   ts?: number
@@ -191,6 +201,11 @@ export interface CreateRoomResponse extends IceResponsePart {
   roomId: string
   iceServers: RTCIceServer[]
   capacity: Capacity
+  /**
+   * 主播复位令牌：只在创建响应里出现这一次（服务端只存它的哈希），必须持久化并随 join 上行。
+   * 老服务端没有这个字段 → undefined（不带照常能进房，只是宽限期内接不回主播位）。
+   */
+  hostToken?: string
 }
 
 export interface RoomInfoResponse {

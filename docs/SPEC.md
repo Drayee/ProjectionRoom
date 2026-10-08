@@ -223,18 +223,41 @@ ffmpeg -i input.mp4 -c:v libx264 -preset veryfast -b:v 1200k \
 > 分片数据**不包 protobuf**：那会为每个分片多一次大块内存拷贝。
 > 本节的字段表描述的是消息语义，字段编号以 .proto 为准。
 
-### 5.1 WebSocket（信令 / 房间，JSON 文本帧）
+### 5.1 WebSocket（信令 / 房间，protobuf 二进制帧）
 
-连接：`ws://host:8080/ws?roomId=<id>&clientId=<uuid>&role=host|viewer`
+连接：`ws://host:8080/ws?roomId=<id>&clientId=<uuid>`
+
+**房间码契约（安全加固 S-3）**：`roomId` 必须匹配 `^[A-Z0-9]{4,12}$`（服务端会把输入折成大写后校验）。
+两条入口（`POST /api/rooms` 与 `/ws`）用同一把尺子：非法一律 400 并返回明确文案。
+为什么必须是白名单：房间码来自 URL，会被写进日志、广播给全房、拼进前端路由；
+放开字符集等于同时放开"控制字符注入日志"与"超长字符串常驻内存"两条路
+（审计实测 60 KB 的房间码也能建房成功）。
+
+**主播复位令牌（安全加固 S-7）**：`POST /api/rooms` 的响应里包含 `hostToken`
+（`crypto/rand` 生成的 64 位十六进制串，服务端只保存哈希）。
+主播断线后房间进入宽限期（§7.1），此时 `hostId` 为空 —— 只有携带**正确** `hostToken`
+的 `join(role=host)` 才能接回主播位，否则任何知道房间码（而房间码本来就要分享给观众）的人
+都能抢走主播位。令牌是**一次性**的：成功接回后即作废。旧客户端不带该字段 →
+宽限期内无法接回（首次进房不需要令牌，行为不变）。
+
+**来源白名单（安全加固 S-5）**：`/ws` 只接受 `PR_ALLOWED_ORIGINS` 里列出的浏览器来源。
+**不带 `Origin` 的客户端（curl、自动化脚本）仍按设计放行**，见 §12.1 的安全待办 S1。
+
+> **部署要求（必读）**：来源校验**不再**接受"Origin 的 host 等于请求自身 Host"这种判据
+> —— 那条判据可以被伪造（`Origin: http://evil.com` + `Host: evil.com` 曾经能 101），
+> 也就是 DNS rebinding 的经典形态。代价是**单端口/隧道部署必须把对外访问的域名写进
+> `PR_ALLOWED_ORIGINS`**（例如 `PR_ALLOWED_ORIGINS=room.example.com`），
+> 否则症状是"页面能打开、但一直显示『已断开，正在自动重连』"（实测复现见报告）。
+> 服务端启动日志会打印当前生效的白名单以提示这件事。
 
 **客户端 → 服务端**
 
 | type | 字段 | 说明 |
 | :--- | :--- | :--- |
-| `join` | `roomId, clientId, displayName, role, password?` | 加入房间（role=host 需房间未开播） |
+| `join` | `roomId, clientId, displayName, role, password?, hostToken?` | 加入房间（`role=host` 需房间未开播；宽限期内需 `hostToken`，见上） |
 | `signal` | `to, payload` | SDP / ICE 透传（`payload` 原样转发，服务端不解析） |
-| `chunks-report` | `have`(Base64 bitset), `complete`(bool) | 分片拥有情况增量上报 |
-| `metrics` | `rttMs, throughputBps, uploadCapacityBps, depth` | 供拓扑计分与选举；`uploadCapacityBps` 取自 `getStats().availableOutgoingBitrate`（C11） |
+| `chunks-report` | `have`(bytes 位图), `complete`(bool) | 分片拥有情况增量上报（位图长度上限见 §5.5） |
+| `metrics` | `rttMs, throughputBps, uploadCapacityBps, depth` | 供拓扑计分与选举；`uploadCapacityBps` 取自 `getStats().availableOutgoingBitrate`（C11）。同成员的连发受最小间隔与"显著变化"两道闸门约束（§6.2） |
 | `media-index` | `mediaIndex` | 主播发布分片索引（开播动作）。服务端用 `media.Index.Validate` 校验后广播给全房，并以其 `bitrateBps` 作为容量模型的码率输入（§6.1） |
 | `topology-request` | `have, parents[]` | 请求父节点分配 / 重平衡 |
 | `room-control` | `action(play\|pause\|seek\|rate), currentTime, hostClockMs, seq` | 仅 host，服务端校验权限 |
@@ -305,6 +328,42 @@ DataChannel 单条消息有协商上限（Chrome↔Chrome 约 256KiB，规范默
 - 全局在途请求上限 `maxInflight = 16`；`channel.bufferedAmount > 4MB` 时暂停该父节点的分派（C7）。
 - 单分片请求超时 **3s**，超时后立即转投下一个父节点（最多 3 次），三次全败则记入缺失表并降级到窗口更靠后的位置重试。
 - **换防专用约束**：分发节点换防期间（§6.3），预取窗口临时扩大到 `W = 60`，为切换留出缓冲。
+
+### 5.5 协议预算、速率闸门与安全响应头（安全加固 S-1 / F-9）
+
+**为什么"帧长度上限"不够**：审计实证过一种单帧内存放大 —— 一帧 4,194,300 字节
+（`members`(24) 重复 1,398,100 次）让整机 RSS 从 22 MB 涨到 **3,947 MB**，关闭连接后不归还。
+它完全落在 `PR_SIGNAL_MAX_MESSAGE_BYTES`（默认 4 MiB）之内，所以**只看字节数的闸门对此无效**：
+放大倍数来自**元素个数**（每个 3 字节的嵌套消息会变成一个指针 + 一个结构体）。
+
+因此服务端在 `Unmarshal` **之前**按 wire format 扫一遍顶层帧，逐个核对预算
+（实现：`internal/model/wire.go`）：
+
+| 预算 | 默认 | 环境变量 | 依据 |
+| :--- | :--- | :--- | :--- |
+| 整帧 repeated 元素总数 | 16384 | `PR_SIGNAL_MAX_REPEATED_ELEMENTS` | 实测最大的 `index.json` 是 14000 片；真实信令帧是"一条成员表"量级 |
+| 单帧 `members` 元素数 | 256 | `PR_SIGNAL_MAX_MEMBERS` | 房间硬上限默认 16，留 16 倍余量 |
+| `media_index.segments` 元素数 | 8192 | `PR_SIGNAL_MAX_SEGMENTS` | 覆盖 2s/片 的 4.5 小时视频 |
+| 单字段字节数（`have` / `payload` / id / 名称） | 1 MiB | `PR_SIGNAL_MAX_FIELD_BYTES` | `have` 位图 1 bit/片 → 838 万片；SDP 实测几 KB |
+| 每连接字节速率配额 | 256 KiB/s（桶 512 KiB） | `PR_SIGNAL_MAX_RATE_BYTES`、`PR_SIGNAL_RATE_BUCKET_BYTES` | 正常连接是几百字节每秒；0 表示关闭 |
+
+超预算的帧以 `1009`（MessageTooBig）关闭并记日志，**绝不进入 `Unmarshal`**。
+计数只增不减，所以拒绝发生在读到第 N+1 个元素的那一刻 —— 4 MB 攻击帧的全部内存成本
+就是它自己那份读缓冲（实测：1.2 MB 的放大帧被拒时累计分配 376 字节）。
+
+除预算法以外还有两道互补的闸门：`GOMEMLIMIT`（`PR_MEMORY_LIMIT`，默认 512 MiB，
+**兜底**而非替代）与静态目录校验（`PR_STATIC_DIR` 不得是文件系统根、不得等于/包含
+工作目录、不得含 `.env`，否则拒绝启动）。
+
+**安全响应头（F-9）**：全站由中间件注入 `Content-Security-Policy`、
+`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: same-origin`、
+`Permissions-Policy`（相机/麦克风/地理位置全关）。CSP 默认值里有两条**硬约束**（删掉页面就坏）：
+
+- `style-src` 必须含 `'unsafe-inline'` —— Vue 运行时按组件注入内联 `<style>`；
+- `media-src` 必须含 `blob:` —— MSE 用 `URL.createObjectURL(MediaSource)` 播放。
+
+开关与内容可用 `PR_SECURITY_HEADERS` / `PR_SECURITY_CSP` 覆盖（`PR_SECURITY_HEADERS=0`
+是给"反代已经加了这些头"的部署用的）。
 
 ---
 
@@ -543,6 +602,16 @@ func CalculateScore(s PeerScore) float64 {
   宽限期内观众可以继续进出房间：`ROOM_NOT_READY` 只拦"主播从未进房"的房间；
   晚到的观众拿到的是保留的 `mediaIndex` 与主播断线前的播放状态，界面据此显示"等待主播重连"，
   容量闸门沿用主播断线前的实测值（宽限期内不重算拓扑，等主播回来再算）。
+- **接回主播位需要复位令牌（安全加固 S-7）**：宽限期内 `hostId` 为空，只凭"房间码 + 密码"
+  已不足以证明"我就是那个主播"（房间码本来就要分享给观众）。因此创建房间时下发一次性
+  `hostToken`，宽限期内的 `join(role=host)` 必须携带它；首次进房（房内无主播且非宽限）不需要。
+- **房间回收（安全加固 S-3）**：房间不再只靠 `Leave` 销毁，后台清扫协程按三条判据回收
+  —— ① **宽限期内（`hostOffline`）一律不回收**（那几 KB 元数据正是"房间码还能用"的全部依据，
+  扫掉等于把宽限期作废）；② "创建后从未有人进房"且超过 `PR_ROOM_UNCLAIMED_TTL`（默认 `10m`）；
+  ③ 无成员且不在宽限期、且超过 `PR_ROOM_EMPTY_TTL`（默认 `30m`，兜底）。
+  同时建房受每 IP 令牌桶（默认 `20/分钟`、容量 `10`）与在册房间总数上限
+  （`PR_MAX_ROOMS`，默认 `256`，超出返回 `503`）约束；`join` 失败按 IP+房间码限速
+  （默认 `30/分钟`），用于防在线猜房间密码。
 
 ### 7.2 时钟偏移估计（NTP 最小滤波）
 
@@ -793,6 +862,14 @@ client/
 | O5 | 是否要房间密码 / 邀请码？ | 影响 M1 的 `join` 校验分支 |
 | O7 | 换防评估周期（默认 5s）与换防阈值（默认 1.5×）是否需要可调？ | 影响 `internal/config` 项与 M3 调参成本 |
 | O8 | **未安置成员没有客户端信号**：`Unassigned` 只写服务端日志；未安置成员不会收到 `parent-assignment`，主动请求拓扑会拿到 `NOT_JOINED`（前端因此分不清"正在分配"与"安置不下"） | 影响客户端能否把"房间满了 / 我暂时没有父节点"讲清楚。空位口径收紧后这种情况变少，但不会归零（全员弱上行 + 深度上限即会触发）。客户端侧状态由另一条工作线实现
+
+### 12.1 安全待办（加固批次留下的事项）
+
+| # | 待办 | 为什么必须做 | 现状 |
+| :--- | :--- | :--- | :--- |
+| S1 | **账号层上线后，/ws 必须要求令牌**：无 Origin 的非浏览器客户端目前按设计放行（本地工具链依赖它），而它意味着「任何能连到端口的人都能发 join 指令」 | 这是唯一一条未认证的控制面入口。S-5 已修掉「伪造 Host 自证同源」，但「无 Origin 就放行」是有意保留的过渡态 | 代码位置：internal/handler/ws.go 的 joinedOriginTodo 与 checkOrigin |
+| S2 | **已修（信任边界收紧）**：`NewRouter` 显式 `SetTrustedProxies(["127.0.0.1","::1"])`，只信任本机反代的 `X-Forwarded-For`；非回环监听（`PR_ADDR` 不是回环）时启动打印醒目警告 | 收紧前 `ClientIP()` 取 XFF 最左值，而 XFF 是请求方随便写的：任何能直连本端口的路径都能用一行 `X-Forwarded-For: <随机 IP>` 让每次请求算成新 IP，把每 IP 建房限速与每 IP+房间码 join 失败退避**全部绕过** | 剩余项：信任代理列表**写死为回环**，不可配置；将来若有「多级代理 / 容器 sidecar」部署，需要加 `PR_TRUSTED_PROXIES` 配置项 |
+| S3 | PR_STATIC_DIR 的校验已在启动期拦住「文件系统根 / 工作目录 / 含 .env」三种形态，但独立部署（静态根不在工作目录树下）的敏感性只能靠运维判断 | 服务端无法知道外部目录里有什么 | 已覆盖三种最危险的形态；其余靠 PR_STATIC_DIR 显式配置 |
 
 ---
 

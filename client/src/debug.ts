@@ -7,6 +7,22 @@ import { classifyAddress, isCrossNetworkUsable } from './utils/iceCandidate'
  * 存在的理由：M2 的验收标准是"起播时间 1–3s、进度偏差 < 500ms"这类可测量的量，
  * 而它们只存在于真实浏览器的运行期状态里。让 CDP 驱动脚本读一份结构化快照，
  * 比在 DOM 文本里抠数字可靠得多。
+ *
+ * ⚠️ **生产构建不得暴露这些钩子**（安全批次 F-5）。
+ * 这个 api 对象里挂着**整个 Pinia store**（含房间密码、成员表、上行限速与度量注入），
+ * 挂到 window 上等价于给页面留一个任意改状态的入口。因此 `installDebugHook()` 的调用
+ * 点被 `main.ts` 的两个**构建期常量**守住：
+ *
+ *   if (import.meta.env.DEV || __PR_DEBUG_HOOKS__) installDebugHook()
+ *
+ *   - 默认的 `npm --prefix client run build`：两者都是 false → 条件被静态判死，
+ *     Rollup 连带把整个 debug.ts 摇掉，产物里 grep `window.__pr` 必须 0 命中；
+ *   - 验收脚本请用 **Vite dev**（`import.meta.env.DEV === true`，test/script/verify-*.mjs
+ *     就是这么跑的），或者用 `VITE_DEBUG_HOOKS=1` 显式开启后再构建。
+ *
+ * 新增/改动钩子名之前先确认 test/script/** 的依赖：
+ * `snapshot` / `setUploadThrottle` / `holdSignaling` / `dropSignaling` /
+ * `iceClassify` / `iceCrossNetworkUsable` 等名字在 DEV 下必须保持兼容。
  */
 export interface DebugSnapshot {
   role: string
@@ -55,6 +71,14 @@ export interface DebugSnapshot {
     delivered: number
     timedOut: number
     chunkErrors: number
+    /**
+     * 入站分片内容校验（F-11）：与索引里的 sha256 不符的分片数。
+     * 它 > 0 就是"同房对端在发替换内容"的直接证据；坏片不会进仓库也不会 append。
+     */
+    hashMismatches: number
+    hashVerified: number
+    /** 非安全上下文（明文 http + 非 localhost）没有 crypto.subtle，跳过校验的分片数。 */
+    hashSkipped: number
     /** 取数失败的最近几条原因（排障入口：以前这里是静默的）。 */
     fetchFailures: string[]
     /** 应答侧最近几条（主播/中继："到底发出去没有"）。 */
@@ -105,6 +129,10 @@ export interface DebugSnapshot {
     parents: string[]
     unassigned: boolean
     unassignedText: string
+    /** 入站分片内容校验（F-11）：坏片/已校验/跳过 三个计数。 */
+    hashMismatches: number
+    hashVerified: number
+    hashSkipped: number
     edges: Array<{
       peerId: string
       label: string
@@ -185,6 +213,9 @@ export interface DebugSnapshot {
     restartLog: string[]
     /** 我是发起方（offer 由我发）的连接数：ICE restart 只会发生在它们身上。 */
     initiatedPeers: number
+    /** F-12：最近一次下发里被协议/主机白名单过滤掉的 url 条数与可读样本。 */
+    filteredIceServers: number
+    filteredIceSamples: string[]
   }
   /** IPv6 直连的地址族诊断（"IPv6 直连有没有生效"靠它验证）。 */
   ipv6: {
@@ -276,6 +307,9 @@ export function installDebugHook(): void {
           delivered: store.delivered,
           timedOut: store.timedOut,
           chunkErrors: store.chunkErrors,
+          hashMismatches: store.hashMismatches,
+          hashVerified: store.hashVerified,
+          hashSkipped: store.hashSkipped,
           fetchFailures: store.fetchFailures,
           serveLog: store.serveLog,
         },
@@ -356,6 +390,14 @@ export function installDebugHook(): void {
      */
     iceClassify: (address: string) => classifyAddress(address),
     iceCrossNetworkUsable: (address: string) => isCrossNetworkUsable(classifyAddress(address)),
+    /**
+     * 验收钩子：某个分片当前是否在分片仓库里（F-11 的确定性断言用）。
+     *
+     * 为什么需要它：`hashMismatches` 只说明"检测到坏片"，而"坏片**没有入库**"必须直接
+     * 读仓库才能证明 —— 只看计数无法排除"计数了但仍然落了库"。只读、不暴露写入路径，
+     * 也不暴露仓库本身（避免脚本绕过校验往仓库里塞数据）。
+     */
+    hasChunk: (index: number) => store.hasChunk(index),
   }
 
   ;(window as unknown as { __pr?: typeof api }).__pr = api

@@ -282,6 +282,17 @@ export async function loadMedia(host, mediaDir, mediaServerRef) {
   return (await host.snapshot()).media
 }
 
+/**
+ * roomId（大写）→ 主播复位令牌。
+ *
+ * 为什么需要：S-7 之后服务端只在 `POST /api/rooms` 的响应里下发一次 hostToken，
+ * 主播在 60s 宽限期内接回主播位必须带上它（否则 HOST_TOKEN_REQUIRED）。脚本用
+ * `seedAndEnter` 直接写 sessionStorage，若不把令牌一并写进去，就会出现"脚本自己
+ * 把令牌丢了"导致的假失败（verify-room-resume 的 B6/B*）。这里由 createRoom 记录、
+ * seedAndEnter 消费，调用方无需改签名。
+ */
+const hostTokens = new Map()
+
 export async function createRoom(serverUrl) {
   const resp = await fetch(`${serverUrl}/api/rooms`, {
     method: 'POST',
@@ -289,14 +300,22 @@ export async function createRoom(serverUrl) {
     body: '{}',
   })
   if (!resp.ok) throw new Error(`创建房间失败：HTTP ${resp.status}`)
-  return (await resp.json()).roomId
+  const data = await resp.json()
+  if (data.roomId && data.hostToken) {
+    hostTokens.set(String(data.roomId).toUpperCase(), data.hostToken)
+  }
+  return data.roomId
 }
 
-export async function seedAndEnter(cdp, clientUrl, roomId, role, displayName) {
+export async function seedAndEnter(cdp, clientUrl, roomId, role, displayName, hostToken) {
   await cdp.navigate(clientUrl)
+  // 显式传入优先；否则用 createRoom 记下的令牌（键与客户端 joinSession 一致：大写房间码）。
+  const token = hostToken ?? hostTokens.get(String(roomId).toUpperCase())
+  const stored = { password: '', role, displayName }
+  if (token) stored.hostToken = token
   await cdp.evaluate(
-    `sessionStorage.setItem('pr:join:${roomId}', ${JSON.stringify(
-      JSON.stringify({ password: '', role, displayName }),
+    `sessionStorage.setItem('pr:join:${String(roomId).toUpperCase()}', ${JSON.stringify(
+      JSON.stringify(stored),
     )})`,
   )
   await cdp.navigate(`${clientUrl}/room/${roomId}`)

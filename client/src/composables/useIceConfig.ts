@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { isPrivateOrLoopbackHost, sanitizeIceServers } from '../utils/iceServers'
 
 /**
  * ICE 配置的 TTL 缓存与刷新（打洞优化第 ①② 条）。
@@ -98,9 +99,29 @@ export function normalizeIceUrls(list: readonly RTCIceServer[] | undefined): str
     .sort()
 }
 
-/** 只保留有 urls 的条目：空条目会让 RTCPeerConnection 构造直接抛。 */
-function sanitizeServers(list: readonly RTCIceServer[] | undefined): RTCIceServer[] {
-  return (list ?? []).filter((entry) => normalizeIceUrls([entry]).length > 0)
+/** 只保留有 urls 的条目，并逐条 url 过协议/主机白名单（F-12，见 utils/iceServers.ts）。 */
+function sanitizeServers(list: readonly RTCIceServer[] | undefined): ReturnType<typeof sanitizeIceServers> {
+  return sanitizeIceServers(list, { allowPrivateHosts: allowPrivateIceHosts() })
+}
+
+/**
+ * 私网/回环 ICE 主机是否放行（F-12 第 3 层白名单的放宽条件）。
+ *
+ * 默认**不放行**：公网部署下，明文 http 被改写就能把 STUN 指到内网主机，
+ * 等于拿用户浏览器当内网探针、顺便外带客户端地址。
+ * 两条放宽路径：
+ *   1. 页面本身就部署在私网/回环上（`location.hostname` 是私网地址、localhost 或 .local）——
+ *      这个部署本来就是局域网内网，自建 coturn 用私网地址是正常配置，一刀切会误杀；
+ *   2. 显式构建期开关 `VITE_ICE_ALLOW_PRIVATE=1`。
+ */
+function allowPrivateIceHosts(): boolean {
+  if (import.meta.env?.VITE_ICE_ALLOW_PRIVATE === '1') {
+    return true
+  }
+  if (typeof location === 'undefined' || !location.hostname) {
+    return false
+  }
+  return isPrivateOrLoopbackHost(location.hostname)
 }
 
 /**
@@ -127,6 +148,10 @@ export interface IceSnapshot {
   lastError: string
   serverUrls: string[]
   scores: IceScore[]
+  /** 最近一次下发里被白名单过滤掉的 url 条数（F-12；0 表示原样接受）。 */
+  filteredIceServers: number
+  /** 被过滤条目的可读样本（最多 4 条），排障时能一眼看出"是谁被挡了"。 */
+  filteredIceSamples: string[]
 }
 
 export function useIceConfig(opts: {
@@ -148,6 +173,9 @@ export function useIceConfig(opts: {
   const lastRefreshReason = ref<IceRefreshReason>('')
   const lastRefreshAt = ref(0)
   const lastError = ref('')
+  /** F-12：被白名单过滤掉的 url 条数与可读样本（诊断抽屉与验收脚本读它）。 */
+  const filteredIceServers = ref(0)
+  const filteredIceSamples = ref<string[]>([])
 
   /**
    * 会话代号。切房/离开时 +1，所有在途的 fetch 与看门狗都靠它作废：
@@ -180,12 +208,23 @@ export function useIceConfig(opts: {
    */
   function apply(payload: IcePayload): { urlsChanged: boolean; empty: boolean } {
     const nowSec = Math.floor(Date.now() / 1000)
-    const incoming = sanitizeServers(payload.iceServers)
+    const cleaned = sanitizeServers(payload.iceServers)
+    const incoming = cleaned.servers
+
+    // 每次下发都重记过滤结果：诊断里看到的永远是"当前这一份列表"的证据，而不是历史累计。
+    filteredIceServers.value = cleaned.filtered.length
+    filteredIceSamples.value = cleaned.filtered
+      .slice(0, 4)
+      .map((item) => `${item.url || '（无 url）'} ← ${item.detail}`)
 
     if (incoming.length === 0) {
       // 空列表 = 服务端这次没给（或探测全军覆没）：保住手上这份能用的配置，
       // 但仍然按 TTL 继续重拉 —— 清空等于把已经在跑的连接置于无候选可用的境地。
-      lastError.value = '服务端本次未下发任何 iceServers'
+      // 「被白名单全部过滤」与「服务端真没给」必须区分开：前者是安全事件，后者是能力缺失。
+      lastError.value =
+        cleaned.filtered.length > 0
+          ? `服务端本次下发的 iceServers 全部被白名单过滤（${cleaned.filtered.length} 条）：${filteredIceSamples.value.join('；')}`
+          : '服务端本次未下发任何 iceServers'
       return { urlsChanged: false, empty: true }
     }
 
@@ -251,7 +290,11 @@ export function useIceConfig(opts: {
       }
 
       if (result.urlsChanged) {
-        log(`ICE 列表变化（第 ${changeCount.value} 次）：${normalizeIceUrls(payload.iceServers).join(', ')}`)
+        // 记的是**清洗后生效**的那份列表：把被拒的 url 也写进日志只会让人以为它生效了。
+        log(`ICE 列表变化（第 ${changeCount.value} 次）：${normalizeIceUrls(servers.value).join(', ')}`)
+      }
+      if (filteredIceServers.value > 0) {
+        log(`ICE 配置有 ${filteredIceServers.value} 条 url 被白名单过滤：${filteredIceSamples.value.join('；')}`)
       }
       lastError.value = result.empty ? lastError.value : ''
       schedule(iceRefreshDelayMs(ttlSeconds.value))
@@ -332,6 +375,8 @@ export function useIceConfig(opts: {
       lastError: lastError.value,
       serverUrls: normalizeIceUrls(servers.value),
       scores: probe.value?.scores ?? [],
+      filteredIceServers: filteredIceServers.value,
+      filteredIceSamples: filteredIceSamples.value,
     }
   }
 

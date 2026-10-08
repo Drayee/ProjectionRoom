@@ -44,6 +44,15 @@ const testTimeout = 5 * time.Second
 func startTestServer(t *testing.T, cfg *config.Config) *httptest.Server {
 	t.Helper()
 
+	srv, _, _ := startTestServerWithManager(t, cfg)
+	return srv
+}
+
+// startTestServerWithManager 额外把 Manager 暴露给用例：
+// S-3 的房间回收（清扫协程）、房间数上限、单帧预算等都需要直接观察 Manager。
+func startTestServerWithManager(t *testing.T, cfg *config.Config) (*httptest.Server, *usecase.Manager, *config.Config) {
+	t.Helper()
+
 	hub, cleanup, err := service.NewHub(cfg)
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
@@ -54,10 +63,12 @@ func startTestServer(t *testing.T, cfg *config.Config) *httptest.Server {
 	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil))
 	t.Cleanup(func() {
 		srv.Close()
+		// 后台清扫协程属于 Manager：测试结束必须停掉，否则用例之间会互相干扰。
+		rooms.Stop()
 		cleanup()
 	})
 
-	return srv
+	return srv, rooms, cfg
 }
 
 // newTestServer 起一个真实的 gin + WebSocket 服务，走完整链路（REST → Hub → usecase.Manager）。
@@ -152,7 +163,17 @@ func postJSON(t *testing.T, url string, body any) *http.Response {
 	return resp
 }
 
+// createRoom 创建房间并返回房间码（大多数用例只需要它）。
 func createRoom(t *testing.T, baseURL, password string) string {
+	t.Helper()
+
+	roomID, _ := createRoomFull(t, baseURL, password)
+	return roomID
+}
+
+// createRoomFull 创建房间并返回房间码 + 主播复位令牌（S-7）。
+// 宽限期内重连主播位的用例必须拿到令牌，否则会被服务端拒绝。
+func createRoomFull(t *testing.T, baseURL, password string) (roomID, hostToken string) {
 	t.Helper()
 
 	resp := postJSON(t, baseURL+"/api/rooms", map[string]any{"password": password})
@@ -162,7 +183,8 @@ func createRoom(t *testing.T, baseURL, password string) string {
 	}
 
 	var body struct {
-		RoomID string `json:"roomId"`
+		RoomID    string `json:"roomId"`
+		HostToken string `json:"hostToken"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("解析创建房间响应失败: %v", err)
@@ -170,13 +192,18 @@ func createRoom(t *testing.T, baseURL, password string) string {
 	if body.RoomID == "" {
 		t.Fatal("创建房间响应缺少 roomId")
 	}
-	return body.RoomID
+	if body.HostToken == "" {
+		t.Fatal("创建房间响应缺少 hostToken（S-7：宽限期内重连主播位要用它）")
+	}
+	return body.RoomID, body.HostToken
 }
 
 // wsClient 是测试用的 WebSocket 客户端。
 type wsClient struct {
 	t    *testing.T
 	conn *websocket.Conn
+	// hostToken 是该客户端持有的主播复位令牌（S-7）。只在"宽限期内接回主播位"时需要。
+	hostToken string
 }
 
 func dial(t *testing.T, srv *httptest.Server, roomID, clientID string) *wsClient {
@@ -207,6 +234,18 @@ func (c *wsClient) send(env model.Envelope) {
 
 	if err := c.conn.Write(ctx, websocket.MessageBinary, payload); err != nil {
 		c.t.Fatalf("发送消息失败: %v", err)
+	}
+}
+
+// sendRaw 直接发一段原始字节（S-1 的放大帧不是合法模型对象，只能手写）。
+func (c *wsClient) sendRaw(payload []byte) {
+	c.t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	if err := c.conn.Write(ctx, websocket.MessageBinary, payload); err != nil {
+		c.t.Fatalf("发送原始帧失败: %v", err)
 	}
 }
 
@@ -248,13 +287,15 @@ func (c *wsClient) join(displayName, role, password string) {
 		DisplayName: displayName,
 		Role:        role,
 		Password:    password,
+		// 带上客户端持有的令牌（没有则为空）：宽限期内接回主播位必须靠它（S-7）。
+		HostToken: c.hostToken,
 	})
 }
 
 func TestCreateRoomAPI(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{"password": "pw"})
+	resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{"password": "pass"})
 	defer resp.Body.Close()
 
 	var body struct {
@@ -312,10 +353,10 @@ func TestCreateRoomAPI(t *testing.T) {
 func TestRoomChatControlAndLeave(t *testing.T) {
 	// 宽限期压到 300ms：这里要验证的是"到期才关房"，真等 60s 会拖死测试。
 	srv, _ := newTestServerWithGrace(t, 300*time.Millisecond)
-	roomID := createRoom(t, srv.URL, "pw")
+	roomID := createRoom(t, srv.URL, "pass")
 
 	host := dial(t, srv, roomID, "host-1")
-	host.join("主播", model.RoleHost, "pw")
+	host.join("主播", model.RoleHost, "pass")
 	hostJoined := host.readUntil(model.TypeJoined)
 	if hostJoined.SelfID != "host-1" || hostJoined.HostID != "host-1" {
 		t.Fatalf("主播入房快照不正确: %+v", hostJoined)
@@ -330,7 +371,7 @@ func TestRoomChatControlAndLeave(t *testing.T) {
 		t.Fatalf("密码错误应返回 BAD_PASSWORD，实际 %q", errEnv.Code)
 	}
 
-	viewer.join("观众", model.RoleViewer, "pw")
+	viewer.join("观众", model.RoleViewer, "pass")
 	viewerJoined := viewer.readUntil(model.TypeJoined)
 	if len(viewerJoined.Members) != 2 {
 		t.Fatalf("观众入房时应看到 2 人: %+v", viewerJoined.Members)
@@ -370,7 +411,7 @@ func TestRoomChatControlAndLeave(t *testing.T) {
 
 	// 迟到的人必须立刻对齐到当前播放位置（SPEC §7.1）。
 	late := dial(t, srv, roomID, "viewer-2")
-	late.join("迟到观众", model.RoleViewer, "pw")
+	late.join("迟到观众", model.RoleViewer, "pass")
 	lateJoined := late.readUntil(model.TypeJoined)
 	if lateJoined.Playback == nil || lateJoined.Playback.Seq != 1 || lateJoined.Playback.CurrentTime != 5 {
 		t.Fatalf("入房快照应携带最新播放状态: %+v", lateJoined.Playback)
@@ -439,14 +480,14 @@ func TestHostDisconnectGraceAndReconnect(t *testing.T) {
 	if cfg.Room.HostGrace != 5*time.Second {
 		t.Fatalf("前置条件不成立：宽限期应为 5s，实际 %v", cfg.Room.HostGrace)
 	}
-	roomID := createRoom(t, srv.URL, "pw")
+	roomID, hostToken := createRoomFull(t, srv.URL, "pass")
 
 	host := dial(t, srv, roomID, "host-1")
-	host.join("主播", model.RoleHost, "pw")
+	host.join("主播", model.RoleHost, "pass")
 	host.readUntil(model.TypeJoined)
 
 	viewer := dial(t, srv, roomID, "viewer-1")
-	viewer.join("观众", model.RoleViewer, "pw")
+	viewer.join("观众", model.RoleViewer, "pass")
 	viewer.readUntil(model.TypeJoined)
 
 	index := sampleIndex(2_000_000)
@@ -475,7 +516,7 @@ func TestHostDisconnectGraceAndReconnect(t *testing.T) {
 	// 同一次抖动里掉线的**观众**也必须能回房：拿到保留的分片索引与断线前的播放状态，
 	// hostId 为空 + members 里没有 host，客户端据此显示"等待主播重连"。
 	late := dial(t, srv, roomID, "viewer-2")
-	late.join("迟到观众", model.RoleViewer, "pw")
+	late.join("迟到观众", model.RoleViewer, "pass")
 	lateJoined := late.readUntil(model.TypeJoined)
 	if lateJoined.HostID != "" {
 		t.Fatalf("主播离线期间入房快照的 hostId 必须为空: %+v", lateJoined)
@@ -491,8 +532,10 @@ func TestHostDisconnectGraceAndReconnect(t *testing.T) {
 	}
 
 	// 主播用同一个 clientId 重连：必须拿回房间，而不是 ROOM_NOT_FOUND。
+	// S-7：宽限期内接回主播位必须携带创建时下发的复位令牌。
 	rejoined := dial(t, srv, roomID, "host-1")
-	rejoined.join("主播", model.RoleHost, "pw")
+	rejoined.hostToken = hostToken
+	rejoined.join("主播", model.RoleHost, "pass")
 	joined := rejoined.readUntil(model.TypeJoined)
 	if joined.SelfID != "host-1" || joined.HostID != "host-1" {
 		t.Fatalf("主播重连后应恢复房主身份: %+v", joined)
@@ -719,6 +762,11 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 	}
 
 	// 上行降到 4 Mbps → K0 = 1 → 上限 2 人；房间已有 2 人，新观众必须被拒。
+	//
+	// 这里刻意等过一个 metrics 最小间隔（S-9 默认 1500ms）：两次都必须是
+	// "各自的间隔窗口内的第一次上报"，否则第二次会被闸门丢弃 —— 那条闸门
+	// 针对的正是"同一成员连发"，而不是"用户切换了网络环境"。
+	time.Sleep(1600 * time.Millisecond)
 	host.send(model.Envelope{
 		Type:    model.TypeMetrics,
 		Metrics: &model.Metrics{UploadCapacityBps: 4_000_000, RTTMs: 18},

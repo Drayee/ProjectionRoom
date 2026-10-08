@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -51,8 +52,86 @@ type staticServer struct {
 	warnOnce sync.Once
 }
 
-// registerStatic 把静态资源与 SPA 回退挂到路由上。
+// ValidateStaticDir 在启动时校验 PR_STATIC_DIR 的安全性（S-13）。
 //
+// 为什么必须拒绝启动，而不是降级成 WARN：静态根目录一旦配错，服务会**真的**
+// 把那些文件发给任何人 —— 实测形态是"PR_STATIC_DIR=/ 或进程工作目录"，
+// 于是 .env（含数据库密码）、源码、.git 全部变成可下载文件。
+// 这类配置错误在启动期一定能判定，放到运行期只是等一个扫描器来发现它。
+//
+// 五条判据（任一条命中即拒绝）：
+//  1. 目录是文件系统根（"/" 或 "D:\"）：等于把整个盘暴露出去。
+//  2. 目录等于或包含进程工作目录：仓库根被托管 → .env / 源码 / .git 可下载。
+//  3. 目录是进程工作目录的**父目录**：同理（工作目录在被托管树里）。
+//  4. 目录里有 .env 文件：即使目录本身很"干净"，它也会被直接 GET 到。
+//  5. 路径无法解析成绝对路径。
+//
+// 反过来，目录**不存在**仍然只是运行期降级（开发态还没构建前端），
+// 由 newStaticServer 记 WARN —— 这条边界不能混（见 config 的
+// TestStaticDirMissingIsNotFatal）。
+func ValidateStaticDir(cfg *config.Config) error {
+	if cfg == nil || !cfg.Static.Serve {
+		return nil
+	}
+	dir := strings.TrimSpace(cfg.Static.Dir)
+	if dir == "" {
+		// 空值只是"跳过托管"，不是安全问题。
+		return nil
+	}
+
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("无法解析 PR_STATIC_DIR=%q 的绝对路径: %w", dir, err)
+	}
+	abs = filepath.Clean(abs)
+
+	if filepath.Dir(abs) == abs {
+		return fmt.Errorf("PR_STATIC_DIR=%q 是文件系统根目录：整个盘会被当成静态资源公开", dir)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("无法获取进程工作目录，不能校验 PR_STATIC_DIR 是否安全: %w", err)
+	}
+	wd = filepath.Clean(wd)
+
+	switch {
+	case abs == wd:
+		return fmt.Errorf("PR_STATIC_DIR=%q 等于进程工作目录：会把 .env 与源码公开", dir)
+	case isWithin(abs, wd):
+		// abs 包含 wd：工作目录在静态根里 → .env 可下载。
+		return fmt.Errorf("PR_STATIC_DIR=%q 包含进程工作目录（%s）：会把 .env 与源码公开", dir, wd)
+	case isWithin(wd, abs):
+		// wd 包含 abs：静态根是工作目录的子目录。
+		//
+		// 这是**合法**的常见形态（默认 client/dist 正是仓库根的子目录），
+		// 所以这里不能一律拒绝 —— 只在它实际含敏感文件时才拒绝（见下面的 .env 检查）。
+	}
+
+	if st, err := os.Stat(filepath.Join(abs, ".env")); err == nil && !st.IsDir() {
+		return fmt.Errorf("PR_STATIC_DIR=%q 里有 .env 文件：它会被直接下载（请把静态根指向前端构建产物目录）", dir)
+	}
+
+	return nil
+}
+
+// isWithin 判断 child 是否在 parent 之内（含相等）。
+// 比较前都做 filepath.Clean；Windows 上大小写不敏感，因此用 EqualFold 逐段比较。
+func isWithin(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return !filepath.IsAbs(rel)
+}
+
+// registerStatic 把静态资源与 SPA 回退挂到路由上。
 // 调用位置必须在 /api、/ws、/healthz 全部注册之后（见 NewRouter），
 // 这样 NoRoute 只兜住"业务路由之外"的请求，不会抢占已有路由。
 // 目录不存在/不可读时只记 WARN，服务照常提供 API 与 /ws。

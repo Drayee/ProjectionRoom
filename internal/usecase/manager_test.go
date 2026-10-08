@@ -139,7 +139,7 @@ func newTestManager(t *testing.T, maxMembers int) (*Manager, *fakeBus) {
 func TestCreateAndJoinFlow(t *testing.T) {
 	m, bus := newTestManager(t, 8)
 
-	r, err := m.Create("", "pw", 0)
+	r, _, err := m.Create("", "pass", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
@@ -150,13 +150,13 @@ func TestCreateAndJoinFlow(t *testing.T) {
 		t.Fatalf("码率估计应回退到配置默认值，实际 %d", r.StreamBps)
 	}
 
-	if err := m.Join(r.ID, "viewer1", "观众", model.RoleViewer, "pw"); !errors.Is(err, ErrNotReady) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "viewer1", DisplayName: "观众", Role: model.RoleViewer, Password: "pass"}); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("主播未进房时应返回 ErrNotReady，实际 %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, "bad"); !errors.Is(err, ErrBadPassword) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: "bad"}); !errors.Is(err, ErrBadPassword) {
 		t.Fatalf("密码错误应返回 ErrBadPassword，实际 %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, "pw"); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: "pass"}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestCreateAndJoinFlow(t *testing.T) {
 		t.Fatalf("新房应处于暂停态: %+v", joined.Playback)
 	}
 
-	if err := m.Join(r.ID, "viewer1", "观众", model.RoleViewer, "pw"); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "viewer1", DisplayName: "观众", Role: model.RoleViewer, Password: "pass"}); err != nil {
 		t.Fatalf("观众进房失败: %v", err)
 	}
 
@@ -188,51 +188,51 @@ func TestCreateAndJoinFlow(t *testing.T) {
 
 func TestJoinRejectsDuplicateAndBadName(t *testing.T) {
 	m, _ := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); !errors.Is(err, ErrAlreadyJoined) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); !errors.Is(err, ErrAlreadyJoined) {
 		t.Fatalf("重复加入应返回 ErrAlreadyJoined，实际 %v", err)
 	}
-	if err := m.Join(r.ID, "host2", "", model.RoleHost, ""); !errors.Is(err, ErrBadName) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host2", DisplayName: "", Role: model.RoleHost, Password: ""}); !errors.Is(err, ErrBadName) {
 		t.Fatalf("空昵称应返回 ErrBadName，实际 %v", err)
 	}
-	if err := m.Join(r.ID, "host3", "x", model.RoleHost, ""); !errors.Is(err, ErrHostTaken) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host3", DisplayName: "x", Role: model.RoleHost, Password: ""}); !errors.Is(err, ErrHostTaken) {
 		t.Fatalf("第二主播应返回 ErrHostTaken，实际 %v", err)
 	}
-	if err := m.Join("NOPEXX", "v", "观众", model.RoleViewer, ""); !errors.Is(err, ErrNotFound) {
+	if err := m.Join(JoinRequest{RoomID: "NOPEXX", ClientID: "v", DisplayName: "观众", Role: model.RoleViewer, Password: ""}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("不存在的房间应返回 ErrNotFound，实际 %v", err)
 	}
 }
 
 func TestJoinRespectsMaxMembers(t *testing.T) {
 	m, _ := newTestManager(t, 2)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	if err := m.Join(r.ID, "v1", "观众1", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v1", DisplayName: "观众1", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("第一个观众应能进房: %v", err)
 	}
-	if err := m.Join(r.ID, "v2", "观众2", model.RoleViewer, ""); !errors.Is(err, ErrFull) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v2", DisplayName: "观众2", Role: model.RoleViewer, Password: ""}); !errors.Is(err, ErrFull) {
 		t.Fatalf("超出上限应返回 ErrFull，实际 %v", err)
 	}
 }
 
 func TestChatIsServerOrderedAndMemberOnly(t *testing.T) {
 	m, bus := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 
@@ -257,14 +257,14 @@ func TestChatIsServerOrderedAndMemberOnly(t *testing.T) {
 
 func TestOnlyHostCanControlAndSeqIsMonotonic(t *testing.T) {
 	m, bus := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	if err := m.Join(r.ID, "v1", "观众", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v1", DisplayName: "观众", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("观众进房失败: %v", err)
 	}
 
@@ -309,7 +309,7 @@ func TestOnlyHostCanControlAndSeqIsMonotonic(t *testing.T) {
 	}
 
 	// 后进房的人必须立刻拿到当前播放状态，否则会从 0 开始播（SPEC §7.1）。
-	if err := m.Join(r.ID, "v2", "迟到观众", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v2", DisplayName: "迟到观众", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("迟到观众进房失败: %v", err)
 	}
 	late := bus.lastDirectOfType(t, "v2", model.TypeJoined)
@@ -320,14 +320,14 @@ func TestOnlyHostCanControlAndSeqIsMonotonic(t *testing.T) {
 
 func TestLeaveLifecycle(t *testing.T) {
 	m, bus := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	if err := m.Join(r.ID, "v1", "观众", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v1", DisplayName: "观众", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("观众进房失败: %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestLeaveLifecycle(t *testing.T) {
 
 func TestLeaveUnknownMemberIsNoop(t *testing.T) {
 	m, _ := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
@@ -371,10 +371,10 @@ func TestLeaveUnknownMemberIsNoop(t *testing.T) {
 
 func TestCreateRejectsDuplicateRoomID(t *testing.T) {
 	m, _ := newTestManager(t, 8)
-	if _, err := m.Create("ROOM01", "", 0); err != nil {
+	if _, _, err := m.Create("ROOM01", "", 0); err != nil {
 		t.Fatalf("首次创建失败: %v", err)
 	}
-	if _, err := m.Create("ROOM01", "", 0); !errors.Is(err, ErrRoomExists) {
+	if _, _, err := m.Create("ROOM01", "", 0); !errors.Is(err, ErrRoomExists) {
 		t.Fatalf("重复房间码应返回 ErrRoomExists，实际 %v", err)
 	}
 }
@@ -399,14 +399,14 @@ func (f *fakeBus) lastExceptFor(t *testing.T, roomID, msgType string) string {
 
 func TestSetMediaIndexRequiresHostAndLocks(t *testing.T) {
 	m, bus := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	if err := m.Join(r.ID, "v1", "观众", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v1", DisplayName: "观众", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("观众进房失败: %v", err)
 	}
 
@@ -452,7 +452,7 @@ func TestSetMediaIndexRequiresHostAndLocks(t *testing.T) {
 	}
 
 	// 后进房的人必须直接拿到索引，否则无从请求分片。
-	if err := m.Join(r.ID, "v2", "迟到观众", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v2", DisplayName: "迟到观众", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("迟到观众进房失败: %v", err)
 	}
 	late := bus.lastDirectOfType(t, "v2", model.TypeJoined)
@@ -463,14 +463,14 @@ func TestSetMediaIndexRequiresHostAndLocks(t *testing.T) {
 
 func TestCapacityGateFollowsMeasuredUplink(t *testing.T) {
 	m, bus := newTestManager(t, 16)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
-	if err := m.Join(r.ID, "v1", "观众1", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v1", DisplayName: "观众1", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("观众1 进房失败: %v", err)
 	}
 
@@ -498,7 +498,7 @@ func TestCapacityGateFollowsMeasuredUplink(t *testing.T) {
 	}
 
 	// 房间已经满员（主播 + 1 个观众），再来人必须被拒，而不是一起卡。
-	if err := m.Join(r.ID, "v2", "观众2", model.RoleViewer, ""); !errors.Is(err, ErrFull) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "v2", DisplayName: "观众2", Role: model.RoleViewer, Password: ""}); !errors.Is(err, ErrFull) {
 		t.Fatalf("超出 1+K0 应返回 ErrFull，实际 %v", err)
 	}
 
@@ -520,7 +520,7 @@ func TestCapacityGateFollowsMeasuredUplink(t *testing.T) {
 
 func TestUpdateMetricsRejectsNonMember(t *testing.T) {
 	m, _ := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
@@ -536,12 +536,12 @@ func TestUpdateMetricsRejectsNonMember(t *testing.T) {
 
 func TestTopologyAssignmentsAreBroadcast(t *testing.T) {
 	m, bus := newTestManager(t, 16)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
 
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 	// 16 Mbps 上行 / 2 Mbps 码率 → K0 = 6：三个观众应全部直连主播。
@@ -554,7 +554,7 @@ func TestTopologyAssignmentsAreBroadcast(t *testing.T) {
 	}
 
 	for _, id := range []string{"v1", "v2", "v3"} {
-		if err := m.Join(r.ID, id, id, model.RoleViewer, ""); err != nil {
+		if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: id, DisplayName: id, Role: model.RoleViewer, Password: ""}); err != nil {
 			t.Fatalf("%s 进房失败: %v", id, err)
 		}
 	}
@@ -591,11 +591,11 @@ func TestTopologyAssignmentsAreBroadcast(t *testing.T) {
 
 func TestChainModeGivesHostExactlyOneChild(t *testing.T) {
 	m, bus := newTestManager(t, 16)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 	index := sampleMediaIndex(2_000_000)
@@ -603,7 +603,7 @@ func TestChainModeGivesHostExactlyOneChild(t *testing.T) {
 		t.Fatalf("发布索引失败: %v", err)
 	}
 	for _, id := range []string{"relay", "leaf1", "leaf2"} {
-		if err := m.Join(r.ID, id, id, model.RoleViewer, ""); err != nil {
+		if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: id, DisplayName: id, Role: model.RoleViewer, Password: ""}); err != nil {
 			t.Fatalf("%s 进房失败: %v", id, err)
 		}
 	}
@@ -643,18 +643,18 @@ func TestChainModeGivesHostExactlyOneChild(t *testing.T) {
 
 func TestDistributorHandoffBroadcast(t *testing.T) {
 	m, bus := newTestManager(t, 16)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 	index := sampleMediaIndex(2_000_000)
 	if err := m.SetMediaIndex(r.ID, "host", &index); err != nil {
 		t.Fatalf("发布索引失败: %v", err)
 	}
-	if err := m.Join(r.ID, "relay1", "转发1", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "relay1", DisplayName: "转发1", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("relay1 进房失败: %v", err)
 	}
 
@@ -669,7 +669,7 @@ func TestDistributorHandoffBroadcast(t *testing.T) {
 	}
 
 	// 再加入一个强得多的节点：换防必须发生，并且要广播出来。
-	if err := m.Join(r.ID, "relay2", "转发2", model.RoleViewer, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "relay2", DisplayName: "转发2", Role: model.RoleViewer, Password: ""}); err != nil {
 		t.Fatalf("relay2 进房失败: %v", err)
 	}
 	before := bus.broadcastCount(r.ID, model.TypeDistributorChange)
@@ -692,11 +692,11 @@ func TestDistributorHandoffBroadcast(t *testing.T) {
 
 func TestChunkReportIsRecorded(t *testing.T) {
 	m, _ := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 
@@ -719,11 +719,11 @@ func TestChunkReportIsRecorded(t *testing.T) {
 
 func TestSendTopologyForUnknownMember(t *testing.T) {
 	m, _ := newTestManager(t, 8)
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 	if err := m.SendTopology(r.ID, "ghost"); !errors.Is(err, ErrNotJoined) {
@@ -753,11 +753,11 @@ func (f *fakeBus) directCount(id, msgType string) int {
 func setupFanoutRoom(t *testing.T, m *Manager, bus *fakeBus) *Room {
 	t.Helper()
 
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 	if err := m.UpdateMetrics(r.ID, "host", model.Metrics{UploadCapacityBps: 5_000_000, RTTMs: 10}); err != nil {
@@ -768,7 +768,7 @@ func setupFanoutRoom(t *testing.T, m *Manager, bus *fakeBus) *Room {
 		t.Fatalf("发布索引失败: %v", err)
 	}
 	for _, id := range []string{"v1", "v2", "v3"} {
-		if err := m.Join(r.ID, id, id, model.RoleViewer, ""); err != nil {
+		if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: id, DisplayName: id, Role: model.RoleViewer, Password: ""}); err != nil {
 			t.Fatalf("%s 进房失败: %v", id, err)
 		}
 		if err := m.UpdateMetrics(r.ID, id, model.Metrics{UploadCapacityBps: 5_000_000, RTTMs: 30}); err != nil {
@@ -867,15 +867,15 @@ func setupDeepChainRoom(t *testing.T, maxDepth int) (*Manager, *fakeBus, *Room) 
 	// Manager 持的是同一个 cfg 指针，Room 在 Create 里读取它 → 必须在 Create 之前设好。
 	m.cfg.Room.MaxDepth = maxDepth
 
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 	for _, id := range []string{"relay", "l1", "l2", "l3"} {
-		if err := m.Join(r.ID, id, id, model.RoleViewer, ""); err != nil {
+		if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: id, DisplayName: id, Role: model.RoleViewer, Password: ""}); err != nil {
 			t.Fatalf("%s 进房失败: %v", id, err)
 		}
 	}
@@ -952,7 +952,7 @@ func TestRoomMaxDepthFallsBackToDefault(t *testing.T) {
 	m, _ := newTestManager(t, 16)
 	m.cfg.Room.MaxDepth = 0
 
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
@@ -972,15 +972,15 @@ func TestJoinGateStopsWhenTreeIsActuallyFull(t *testing.T) {
 	m, _ := newTestManager(t, 16)
 	m.cfg.Room.MaxDepth = 2 // 链只能铺到第 2 层
 
-	r, err := m.Create("", "", 0)
+	r, _, err := m.Create("", "", 0)
 	if err != nil {
 		t.Fatalf("创建房间失败: %v", err)
 	}
-	if err := m.Join(r.ID, "host", "主播", model.RoleHost, ""); err != nil {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "host", DisplayName: "主播", Role: model.RoleHost, Password: ""}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
 	}
 	for _, id := range []string{"relay", "l1", "l2"} {
-		if err := m.Join(r.ID, id, id, model.RoleViewer, ""); err != nil {
+		if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: id, DisplayName: id, Role: model.RoleViewer, Password: ""}); err != nil {
 			t.Fatalf("%s 进房失败: %v", id, err)
 		}
 	}
@@ -1012,7 +1012,7 @@ func TestJoinGateStopsWhenTreeIsActuallyFull(t *testing.T) {
 	}
 
 	// 第 5 个人必须被明确拒绝，而不是进来干等。
-	if err := m.Join(r.ID, "late", "迟到观众", model.RoleViewer, ""); !errors.Is(err, ErrFull) {
+	if err := m.Join(JoinRequest{RoomID: r.ID, ClientID: "late", DisplayName: "迟到观众", Role: model.RoleViewer, Password: ""}); !errors.Is(err, ErrFull) {
 		t.Fatalf("树已满时应返回 ErrFull，实际 %v", err)
 	}
 
