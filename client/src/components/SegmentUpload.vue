@@ -10,6 +10,8 @@
 //   3. 浏览器不支持 File System Access API → 退化为"下载 zip + 手动解压后选目录"。
 
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
+import BrandIcon from './BrandIcon.vue'
 import {
   SegmentApiError,
   fetchSegmentPartZip,
@@ -501,7 +503,10 @@ async function writeAndPublish() {
 <template>
   <div class="segment">
     <header>
-      <h3>服务端切片</h3>
+      <h3>
+        <BrandIcon name="upload" decorative :size="14" />
+        服务端切片
+      </h3>
       <span
         class="badge"
         :class="{ ok: reachable === 'ok', danger: reachable === 'unavailable' }"
@@ -516,12 +521,30 @@ async function writeAndPublish() {
       </span>
     </header>
 
+    <p class="muted small">
+      整条链路只在"开播前的媒体准备"阶段发生，直播期服务器不接触任何视频字节。
+      <RouterLink class="more-link" :to="{ name: 'help', hash: '#source' }">
+        <BrandIcon name="tips" decorative :size="12" />
+        片源准备说明
+      </RouterLink>
+    </p>
+
     <p class="muted small" v-if="reachable === 'unavailable'">
-      连不上 /api/v1/segment/jobs：后端 Go 服务没起来，或者 Vite 没代理 /api。上传与切片暂时不可用，
-      但下面的「切片工具下载」与「本地切片教程」只依赖静态托管的二进制与本机 ffmpeg，照旧可用。
+      连不上 /api/v1/segment/jobs：后端 Go 服务没起来，或者 Vite 没代理 /api。
+      上传与切片暂时不可用，下面的「切片工具下载」与「本地切片教程」照旧可用。
     </p>
     <div class="row" v-if="reachable === 'unavailable'">
-      <button @click="recheck">重新检测</button>
+      <!-- 点了之后 reachable 先变 'checking'，模板会切到上面的上传形态并在按钮上显示"检测中…"，
+           所以这里不需要额外的忙碌态。 -->
+      <button
+        class="icon-only"
+        aria-label="重新检测服务器切片可用性"
+        title="重新检测服务器切片可用性"
+        @click="recheck"
+      >
+        <BrandIcon name="refresh" decorative :size="15" />
+      </button>
+      <span class="muted small">重新检测</span>
     </div>
 
     <template v-else>
@@ -533,7 +556,15 @@ async function writeAndPublish() {
           accept="video/*"
           @change="onFileChosen"
         />
-        <button :disabled="busy || writing" @click="chooseFile">选择视频文件</button>
+        <button
+          class="icon-only"
+          :disabled="busy || writing"
+          aria-label="选择要上传的源视频文件"
+          title="选择要上传的源视频文件"
+          @click="chooseFile"
+        >
+          <BrandIcon name="upload" decorative :size="15" />
+        </button>
         <span v-if="file" class="muted small mono">{{ file.name }} · {{ humanBytes(file.size) }}</span>
         <span v-else class="muted small">选一个源视频（服务器上限：16GiB / 60 分钟）</span>
       </div>
@@ -573,7 +604,10 @@ async function writeAndPublish() {
       <p class="muted small" v-if="notice">{{ notice }}</p>
 
       <div class="error-block" v-if="errorText">
-        <p class="error-text">{{ errorText }}</p>
+        <p class="error-text">
+          <BrandIcon name="alert-triangle" label="错误" :size="14" />
+          <span>{{ errorText }}</span>
+        </p>
         <p class="muted small" v-if="errorCode">
           {{ errorCode }}<span v-if="segmentCodeText(errorCode)"> · {{ segmentCodeText(errorCode) }}</span>
         </p>
@@ -591,7 +625,15 @@ async function writeAndPublish() {
         </p>
 
         <div class="row" v-if="result.singleResponse">
-          <button class="primary" @click="downloadZip">下载 zip</button>
+          <button
+            class="primary icon-only"
+            data-testid="segment-download-zip"
+            aria-label="下载切片产物（zip）"
+            title="下载切片产物（zip）"
+            @click="downloadZip"
+          >
+            <BrandIcon name="download" decorative :size="15" />
+          </button>
           <span class="muted small">解压到任意目录后，用上面的「选择分片目录」即可开播；或直接写入目录（见下）。</span>
         </div>
 
@@ -603,6 +645,7 @@ async function writeAndPublish() {
           <ul class="parts">
             <li v-for="link in partLinks" :key="link.part.n">
               <button class="link" @click="downloadPart(link.part)">
+                <BrandIcon name="download" decorative :size="13" />
                 第 {{ segmentPartNumber(link.part) }} 份
               </button>
               <span class="muted small mono">{{ humanBytes(link.part.bytes) }}</span>
@@ -614,7 +657,15 @@ async function writeAndPublish() {
             </li>
           </ul>
           <div class="row">
-            <button @click="downloadAllParts">依次下载全部分份</button>
+            <button
+              class="icon-only"
+              aria-label="依次下载全部分份"
+              title="依次下载全部分份"
+              @click="downloadAllParts"
+            >
+              <BrandIcon name="download" decorative :size="15" />
+            </button>
+            <span class="muted small">依次下载全部分份（每份间隔 0.5s，避免浏览器拦下连续下载）</span>
           </div>
         </template>
 
@@ -728,6 +779,25 @@ header {
 h3 {
   margin: 0;
   font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.more-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* 纯图标按钮：只由图标承担点击区，可访问名走 aria-label / title。 */
+button.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 9px;
+  line-height: 0;
 }
 
 h4 {
@@ -810,6 +880,9 @@ p.muted.small {
   font-size: 12px;
   line-height: 1.6;
   word-break: break-word;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
 }
 
 .ok-text {
@@ -844,6 +917,9 @@ p.muted.small {
 button.link {
   padding: 2px 8px;
   font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .tutorial {

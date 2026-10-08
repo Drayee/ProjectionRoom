@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BrandIcon from './BrandIcon.vue'
 import { useRoomStore } from '../stores/room'
 
 const store = useRoomStore()
@@ -7,7 +8,10 @@ const store = useRoomStore()
 <template>
   <div class="members card">
     <header>
-      <h2>成员</h2>
+      <h2>
+        <BrandIcon name="users-group" decorative :size="15" />
+        成员
+      </h2>
       <span class="muted">{{ store.members.length }} 人</span>
     </header>
 
@@ -40,6 +44,9 @@ header {
 h2 {
   margin: 0;
   font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 ul {

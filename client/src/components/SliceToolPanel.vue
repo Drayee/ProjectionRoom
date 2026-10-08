@@ -11,6 +11,8 @@
 // 显示中文提示并保持页面可用，绝不抛错、不白屏。
 
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
+import BrandIcon from './BrandIcon.vue'
 import { copyText } from '../utils/clipboard'
 import { blockedLinkHint, resolveSafeLink } from '../utils/safeLink'
 
@@ -265,7 +267,10 @@ function toggleSha(entry: ToolEntry) {
 <template>
   <section class="slice-tool" data-testid="slice-tool-panel" :data-detected="detectedKey">
     <header>
-      <h4>切片工具下载（拖到 exe 上或命令行都行）</h4>
+      <h4>
+        <BrandIcon name="download" decorative :size="14" />
+        切片工具下载（拖到 exe 上或命令行都行）
+      </h4>
       <span
         class="badge"
         :class="{ ok: state === 'ok', danger: unavailable }"
@@ -276,11 +281,13 @@ function toggleSha(entry: ToolEntry) {
     </header>
 
     <p class="muted small">
-      切片产物要的是「<b>单条复用 fMP4 + 按 moof 切分</b>」——
-      <b>segmenter</b> 这个工具已经做好，不需要你自己拼 <code class="mono">index.json</code>。
-      下载对应平台的二进制后不用再装别的东西：<b>把视频文件直接拖到下载好的 exe 上</b>、
-      或者<b>双击 exe 后按提示输入路径</b>，都等价于下面的命令行；切完回主播页点
-      「选择分片目录」选中输出目录即可开播。
+      切片产物要的是「<b>单条复用 fMP4 + 按 moof 切分</b>」——<b>segmenter</b> 已经做好，
+      不用自己拼 <code class="mono">index.json</code>：把视频文件<b>直接拖到下载好的 exe 上</b>、
+      或<b>双击 exe</b> 后按提示输入路径，都等价于下面的命令行。
+      <RouterLink class="more-link" :to="{ name: 'help', hash: '#source' }">
+        <BrandIcon name="tips" decorative :size="12" />
+        片源准备说明
+      </RouterLink>
     </p>
 
     <p class="muted small warn-block" v-if="unavailable" data-testid="slice-tool-unavailable">
@@ -302,6 +309,7 @@ function toggleSha(entry: ToolEntry) {
           <span class="name">{{ platformLabel(entry) }}</span>
           <span class="tag" v-if="isRecommended(entry)">推荐（与你当前平台匹配）</span>
           <span class="muted small mono">{{ humanBytes(entry.bytes) }}</span>
+          <!-- 下载入口只留图标：可访问名（含平台名）走 aria-label。 -->
           <a
             v-if="entry.url"
             class="download"
@@ -309,8 +317,10 @@ function toggleSha(entry: ToolEntry) {
             download
             data-testid="slice-tool-download"
             :data-key="keyOf(entry)"
+            :aria-label="`下载 ${platformLabel(entry)} 的切片器`"
+            :title="`下载 ${platformLabel(entry)} 的切片器`"
           >
-            下载
+            <BrandIcon name="download" decorative :size="15" />
           </a>
           <template v-else>
             <!-- 服务端给的地址没过白名单：渲染成纯文本 + 可读提示，绝不生成可点击链接。 -->
@@ -327,11 +337,13 @@ function toggleSha(entry: ToolEntry) {
           </button>
           <button
             type="button"
-            class="tiny-btn"
+            class="tiny-btn icon-only"
             data-testid="slice-tool-sha-copy"
+            aria-label="复制完整 sha256"
+            title="复制完整 sha256"
             @click="copyInto('sha:' + keyOf(entry), entry.sha256)"
           >
-            复制完整 sha256
+            <BrandIcon name="copy" decorative :size="13" />
           </button>
           <span class="muted tiny mono" v-if="copyState['sha:' + keyOf(entry)] === 'ok'">已复制</span>
           <span class="muted tiny" v-else-if="copyState['sha:' + keyOf(entry)] === 'failed'">剪贴板不可用</span>
@@ -351,8 +363,15 @@ function toggleSha(entry: ToolEntry) {
       <p class="label-text">命令行用法</p>
       <pre class="mono" data-testid="slice-tool-usage">{{ usageText }}</pre>
       <div class="line">
-        <button type="button" data-testid="slice-tool-copy-usage" @click="copyInto('usage', usageText)">
-          复制用法
+        <button
+          type="button"
+          class="icon-only"
+          data-testid="slice-tool-copy-usage"
+          aria-label="复制命令行用法"
+          title="复制命令行用法"
+          @click="copyInto('usage', usageText)"
+        >
+          <BrandIcon :name="copyState.usage === 'failed' ? 'alert-triangle' : 'copy'" decorative :size="14" />
         </button>
         <span class="muted tiny" v-if="copyState.usage === 'ok'">已复制</span>
         <span class="muted tiny" v-else-if="copyState.usage === 'failed'">剪贴板不可用，请手动选中复制</span>
@@ -406,6 +425,16 @@ h4 {
   margin: 0;
   font-size: 12px;
   color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.more-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 .small {
@@ -475,16 +504,30 @@ p.muted.small {
 }
 
 .download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 12px;
   color: var(--accent);
   text-decoration: none;
   border: 1px solid var(--accent);
   border-radius: 4px;
-  padding: 2px 10px;
+  padding: 5px 9px;
+  line-height: 0;
 }
 
 .download:hover {
   background: var(--panel-2);
+}
+
+/* 纯图标按钮：只由图标承担点击区，可访问名走 aria-label / title。 */
+button.icon-only,
+.tiny-btn.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 7px;
+  line-height: 0;
 }
 
 .sha-line {

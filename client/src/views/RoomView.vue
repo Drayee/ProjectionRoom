@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import AppHeader from '../components/AppHeader.vue'
+import BrandIcon from '../components/BrandIcon.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import DiagnosticsDrawer from '../components/DiagnosticsDrawer.vue'
 import HostPanel from '../components/HostPanel.vue'
@@ -15,6 +16,9 @@ import { readJoin } from '../utils/joinSession'
 
 const props = defineProps<{ roomId: string }>()
 
+/** 站点默认标题（`index.html` 里那一份）；离开房间时还原。 */
+const DEFAULT_TITLE = '月喵 · 一起看'
+
 const router = useRouter()
 const store = useRoomStore()
 /**
@@ -27,6 +31,10 @@ const store = useRoomStore()
  */
 const copyState = ref<'' | 'ok' | 'failed'>('')
 let copyResetTimer: number | undefined
+
+/** 分享反馈：与复制房间码同一套状态机（分享也是往剪贴板里写东西，失败的原因完全一样）。 */
+const shareState = ref<'' | 'ok' | 'failed'>('')
+let shareResetTimer: number | undefined
 
 /** 连接状态文案：把"重连"这件事说清楚，否则用户只会看到一个红点。 */
 const connectionText = computed(() => {
@@ -47,18 +55,19 @@ const connectionClass = computed(() => ({
   danger: store.connection === 'closed',
 }))
 
-/** 信令没就绪时给一条明确的进度说明，而不是让页面看起来"卡住了"。 */
+/**
+ * 信令没就绪时给一条明确的进度说明，而不是让页面看起来"卡住了"。
+ *
+ * 只留**一句话**：重连机制、宽限期、为什么会断、卡顿怎么排查这些解释都在 `/help#faq`，
+ * 核心页不再堆成段说明（要点仍是"现在发生了什么 + 正在自动恢复"）。
+ */
 const linkHint = computed(() => {
   if (store.connection === 'closed') {
     if (store.isHost) {
       // 主播断线：说清楚"房间还在、还有多久"，否则用户会以为房间已经没了而直接关页面。
-      return (
-        '与服务端的信令连接断了（网络抖动、服务端重启都会这样）。已自动重连；' +
-        `服务端会为本房间保留约 ${store.hostGraceSeconds} 秒，期间重连成功即自动回到同一房间码，` +
-        '播放状态与已发布的分片索引都不会丢。'
-      )
+      return `与服务端的信令断了，正在自动重连；服务端会为本房间保留约 ${store.hostGraceSeconds} 秒，期间重连成功即回到同一房间码。`
     }
-    return '与服务端的信令连接断了（服务端重启、网络抖动都会这样）。已自动重连，重连成功后会重新进房并继续跟随主播。'
+    return '与服务端的信令断了，正在自动重连，成功后会自动重新进房并继续跟随主播。'
   }
   if (store.connection === 'connecting') {
     return '正在连接服务端信令…'
@@ -70,6 +79,9 @@ const linkHint = computed(() => {
 })
 
 onMounted(() => {
+  // 房间页标题带上房间码：多标签页时能一眼分清哪个标签是哪个房间。
+  document.title = `月喵 · 房间 ${props.roomId.toUpperCase()}`
+
   // 直接输 URL 进来没有凭据（密码/昵称/角色），回首页重新走流程。
   const stored = readJoin(props.roomId)
   if (!stored) {
@@ -92,6 +104,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (copyResetTimer !== undefined) window.clearTimeout(copyResetTimer)
+  if (shareResetTimer !== undefined) window.clearTimeout(shareResetTimer)
+  document.title = DEFAULT_TITLE
   store.leaveRoom()
 })
 
@@ -108,30 +122,74 @@ async function copyCode() {
   // 失败提示比成功提示多留一点：用户需要时间看完并改为手动选中。
   copyResetTimer = window.setTimeout(() => (copyState.value = ''), done ? 1500 : 2000)
 }
+
+/**
+ * 分享：把"房间码 + 网址"一次复制走（免登录进房，所以不需要登录链接）。
+ *
+ * 为什么不是复制 `/room/<码>` 这个 URL：直接打开那个地址时本机没有进房凭据，
+ * 会被路由送回首页 —— 那样的链接是**看起来能进、其实进不去**。
+ * 复制一段带房间码的说明文案，对方打开网址输码即可，才是真的能用。
+ */
+async function share() {
+  const code = props.roomId.toUpperCase()
+  const text = `月喵房间码 ${code} · 打开 ${window.location.origin} 输入房间码即可进房（不需要账号）`
+  const done = await copyText(text)
+  shareState.value = done ? 'ok' : 'failed'
+  if (shareResetTimer !== undefined) window.clearTimeout(shareResetTimer)
+  shareResetTimer = window.setTimeout(() => (shareState.value = ''), done ? 1500 : 2000)
+}
 </script>
 
 <template>
   <div class="room">
     <header class="room-head">
       <div class="left">
-        <span class="label muted">房间码</span>
+        <span class="label muted">
+          <BrandIcon name="ticket" decorative :size="12" />
+          房间码
+        </span>
         <!--
           点击复制，但房间码本身仍是可选中文本（.code-text 显式 user-select: text）：
           复制兜底也失败时，用户可以直接手动选中再 Ctrl+C，而不是"点了没反应"。
+          复制动作由按钮本身承担（图标 + title + aria-label），房间码文字必须留下 —— 它就是内容。
         -->
         <button
           class="code mono"
           :class="{ copied: copyState === 'ok', failed: copyState === 'failed' }"
           data-testid="room-code"
+          :aria-label="copyState === 'ok' ? '房间码已复制' : '复制房间码'"
           :title="copyState === 'ok' ? '已复制' : '点击复制房间码'"
           @click="copyCode"
         >
           <span class="code-text">{{ roomId.toUpperCase() }}</span>
+          <BrandIcon
+            :name="copyState === 'failed' ? 'alert-triangle' : copyState === 'ok' ? 'check-circle' : 'copy'"
+            decorative
+            :size="15"
+          />
           <span class="copy-state" v-if="copyState === 'ok'" data-testid="room-code-copied">已复制</span>
           <span class="copy-state failed" v-else-if="copyState === 'failed'" data-testid="room-code-copy-failed">
             复制失败，请手动选中
           </span>
         </button>
+
+        <!-- 分享：把"房间码 + 网址"一次复制走（免登录进房，所以不需要登录链接）。 -->
+        <button
+          class="icon-btn"
+          :class="{ failed: shareState === 'failed' }"
+          :aria-label="shareState === 'ok' ? '分享信息已复制' : '复制房间分享信息（房间码与网址）'"
+          :title="shareState === 'ok' ? '已复制分享信息' : '复制房间分享信息（房间码与网址）'"
+          data-testid="room-share"
+          @click="share"
+        >
+          <BrandIcon
+            :name="shareState === 'failed' ? 'alert-triangle' : shareState === 'ok' ? 'check-circle' : 'share'"
+            decorative
+            :size="16"
+          />
+        </button>
+        <span class="muted small" v-if="shareState === 'failed'">分享信息复制失败，请手动选中房间码</span>
+
         <span class="badge" :class="connectionClass">{{ connectionText }}</span>
         <span class="badge" :class="{ host: store.isHost }">{{ store.isHost ? '主播' : '观众' }}</span>
         <TopologyBadge />
@@ -142,6 +200,7 @@ async function copyCode() {
           账号区塞进**已有的**这一行（判据：不破坏房间页）。房间页是 height:100vh 的固定布局，
           单开一行顶栏就是从播放器身上抠高度，所以这里用 inline 形态，不新增行。
           「退出」是退出账号（判据⑤ 会回首页），与左边的「离开房间」是两件事。
+          inline 形态里已经带了帮助与开源仓库入口，核心页因此不需要再放一段说明文字。
         -->
         <AppHeader variant="inline" />
         <button @click="leave">离开房间</button>
@@ -150,6 +209,10 @@ async function copyCode() {
 
     <div class="link-bar" v-if="linkHint">
       <span>{{ linkHint }}</span>
+      <RouterLink class="bar-link" :to="{ name: 'help', hash: '#faq' }">
+        <BrandIcon name="tips" decorative :size="13" />
+        重连/卡顿的排查
+      </RouterLink>
     </div>
 
     <!--
@@ -230,6 +293,43 @@ async function copyCode() {
 
 .label {
   font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 纯图标按钮（分享）：点击区靠 padding 撑出来，可访问名走 aria-label / title。 */
+button.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+  line-height: 0;
+}
+
+button.icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+button.icon-btn.failed {
+  color: var(--danger);
+}
+
+.small {
+  font-size: 12px;
+}
+
+/* 说明条里的帮助入口：一句话提示 + 指向 /help 的链接，取代原先的成段解释。 */
+.bar-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  white-space: nowrap;
 }
 
 button.code {

@@ -4,6 +4,8 @@
 // 这些字段以前只存在于 window.__pr.snapshot().topology 里，排障时只能开控制台；
 // 现在收进一个可键盘操作的 <details>：不点开只占一行，点开有备用父、深度、换道原因。
 import { computed } from 'vue'
+import { RouterLink } from 'vue-router'
+import BrandIcon from './BrandIcon.vue'
 import { useRoomStore } from '../stores/room'
 
 const store = useRoomStore()
@@ -90,8 +92,12 @@ const tooltip = computed(() => {
         <span class="v mono">{{ store.lastDistributorChange || '无' }}</span>
       </div>
       <p class="muted tiny">
-        换道原因就写在「分配依据」里：深度越浅越好、同深度比余量/RTT/稳定性；
-        单链模式带 1.5 倍换防滞回。更多日志见页面底部的「诊断」抽屉。
+        「分配依据」= 服务端为什么把你挂在这个父节点下面。各指标的含义见
+        <RouterLink :to="{ name: 'help', hash: '#diagnostics' }">
+          <BrandIcon name="tips" decorative :size="12" />
+          帮助
+        </RouterLink>
+        。
       </p>
     </div>
   </details>
@@ -155,5 +161,25 @@ summary.topology::-webkit-details-marker {
   font-size: 11px;
   line-height: 1.6;
   margin: 8px 0 0;
+}
+
+.tiny a {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* 窄屏（375 档）：徽标左边距 + 88vw 的弹层会顶出视口（实测右侧超出 19px）。
+   这里改成以视口为界：左右各留 12px，宽度自适应 —— 不再依赖徽标的位置。 */
+@media (max-width: 460px) {
+  .topo-pop {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    top: auto;
+    width: auto;
+    max-height: 60vh;
+    overflow: auto;
+  }
 }
 </style>

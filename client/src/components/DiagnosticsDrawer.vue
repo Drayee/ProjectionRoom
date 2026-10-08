@@ -9,6 +9,8 @@
 //   - 复制的是**纯文本报告**：用户把它贴进 issue / 群里，比截图有用得多。
 
 import { computed, onBeforeUnmount, ref } from 'vue'
+import { RouterLink } from 'vue-router'
+import BrandIcon from './BrandIcon.vue'
 import { useRoomStore } from '../stores/room'
 import { copyText } from '../utils/clipboard'
 import { maskAddress } from '../utils/addressMask'
@@ -290,7 +292,7 @@ function hostOf(url: string): string {
 /** 复制出去的纯文本报告：按"先状态、后日志"排，日志保持时间顺序。 */
 const report = computed(() => {
   const lines: string[] = []
-  lines.push('ProjectionRoom 诊断报告')
+  lines.push('月喵 诊断报告')
   lines.push(`时间: ${new Date().toISOString()}`)
   lines.push(`房间: ${store.roomId || '—'}  角色: ${store.isHost ? '主播' : '观众'}  客户端: ${store.clientId || '—'}`)
   lines.push(`连接: ${connectionText.value}  已加入: ${store.joined}  错误: ${store.lastError || '无'}`)
@@ -347,8 +349,13 @@ onBeforeUnmount(() => {
 <template>
   <details class="diag" data-testid="diagnostics-drawer">
     <summary>
+      <!-- 『诊断』二字是既有验收脚本（verify-m4-panel）用来定位这个 details 的锚点，必须保留。 -->
+      <BrandIcon name="settings" decorative :size="14" />
       <span>诊断 / 排障日志</span>
-      <span class="muted tiny">（默认收起：这里的日志会持续刷新，避免刷屏）</span>
+      <RouterLink class="summary-help" :to="{ name: 'help', hash: '#diagnostics' }" @click.stop>
+        <BrandIcon name="tips" decorative :size="12" />
+        这些指标是什么意思
+      </RouterLink>
       <span class="muted tiny mono">
         连接 {{ store.connection }} · P2P {{ peers.length }} · 取数失败 {{ store.chunkErrors }}
       </span>
@@ -356,7 +363,16 @@ onBeforeUnmount(() => {
 
     <div class="body">
       <div class="toolbar">
-        <button type="button" data-testid="diag-copy" @click="copyReport">复制诊断报告</button>
+        <button
+          type="button"
+          class="icon-only"
+          data-testid="diag-copy"
+          aria-label="复制诊断报告"
+          title="复制诊断报告"
+          @click="copyReport"
+        >
+          <BrandIcon :name="copyState === 'failed' ? 'alert-triangle' : 'copy'" decorative :size="15" />
+        </button>
         <!--
           F-6：默认掩码本机/对端 IP（报告是要贴出去的，完整地址能定位到具体的人）。
           开关不写 localStorage：刷新技术性回到"掩码"这一安全默认。
@@ -383,7 +399,10 @@ onBeforeUnmount(() => {
         <span class="k">上游链路</span>
         <span class="v" :class="{ warn: unassigned }" data-testid="diag-upstream">{{ upstreamText }}</span>
 
-        <span class="k">播放健康度</span>
+        <span class="k">
+          <BrandIcon name="temperature" decorative :size="12" />
+          播放健康度
+        </span>
         <span class="v mono small" data-testid="diag-health">{{ healthText }}</span>
 
         <span class="k">每边速率</span>
@@ -410,7 +429,10 @@ onBeforeUnmount(() => {
         <span class="k">计数</span>
         <span class="v">{{ runtimeText }}</span>
 
-        <span class="k">内容校验</span>
+        <span class="k">
+          <BrandIcon name="shield-done" decorative :size="12" />
+          内容校验
+        </span>
         <span class="v mono small" data-testid="diag-hash">{{ hashText }}</span>
 
         <span class="k">拓扑</span>
@@ -496,6 +518,23 @@ summary .mono {
   margin-left: auto;
 }
 
+/* 摘要里的帮助入口：@click.stop 阻止它顺带把抽屉展开/收起。 */
+.summary-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* 纯图标按钮（复制诊断报告）：可访问名走 aria-label / title。 */
+button.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  line-height: 0;
+}
+
 .body {
   margin-top: 8px;
   border-top: 1px dashed var(--border);
@@ -546,6 +585,9 @@ summary .mono {
 
 .kv .k {
   color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .kv .v {

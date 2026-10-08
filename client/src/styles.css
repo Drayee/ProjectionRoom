@@ -149,3 +149,39 @@ label {
   border-color: var(--danger);
   color: var(--danger);
 }
+
+/* ---------- 图标按钮 ----------
+   只由图标承担点击区的控件（登出、复制、分享、刷新、上传、关闭、帮助、
+   诊断入口……）统一用这一套外形：点击区靠 padding 撑到可点，视觉上一律低调，
+   可访问名一律由 aria-label + title 提供（图标本身没有文字）。
+   组件里如需更紧的间距（例如错误条里的关闭按钮）再就地覆盖 padding。 */
+.icon-btn,
+button.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-dim);
+  text-decoration: none;
+  line-height: 0;
+}
+
+.icon-btn:hover,
+button.icon-only:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border);
+  text-decoration: none;
+}
+
+/* 成功态提示条（登录/注册成功后跳转前的一帧）。 */
+.ok-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ok);
+  font-size: 12px;
+  line-height: 1.6;
+}

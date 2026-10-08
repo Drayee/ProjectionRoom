@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import BrandIcon from './BrandIcon.vue'
 import { useRoomStore } from '../stores/room'
 
 const store = useRoomStore()
@@ -31,7 +32,10 @@ function formatTime(ts: number): string {
 <template>
   <div class="chat card">
     <header>
-      <h2>聊天</h2>
+      <h2>
+        <BrandIcon name="chat" decorative :size="15" />
+        聊天
+      </h2>
       <span class="muted">{{ store.chat.length }} 条</span>
     </header>
 
@@ -76,6 +80,9 @@ header {
 h2 {
   margin: 0;
   font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .list {
