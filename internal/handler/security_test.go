@@ -140,7 +140,7 @@ func TestCreateRoomRejectsIllegalRoomCode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{"roomId": tc.roomID})
+			resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{"roomId": tc.roomID}, roomFixtureToken(t))
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("非法房间码（%s）应返回 400，实际 %d", tc.name, resp.StatusCode)
@@ -156,7 +156,7 @@ func TestCreateRoomRejectsIllegalRoomCode(t *testing.T) {
 	}
 
 	// 规范化仍然生效：小写会被折成大写后按白名单校验（合法）。
-	resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{"roomId": "room01"})
+	resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{"roomId": "room01"}, roomFixtureToken(t))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("小写房间码应被规范化为大写后接受，实际 %d", resp.StatusCode)
@@ -189,14 +189,14 @@ func TestCreateRoomRejectsWeakPassword(t *testing.T) {
 	srv, _, _ := startTestServerWithManager(t, config.Default())
 
 	for _, pw := range []string{"a", "ab", "abc"} {
-		resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{"password": pw})
+		resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{"password": pw}, roomFixtureToken(t))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("%d 位密码应被拒（策略 0 或 4-64），实际 %d", len(pw), resp.StatusCode)
 		}
 	}
 	for _, pw := range []string{"", "abcd", strings.Repeat("x", 64)} {
-		resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{"password": pw})
+		resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{"password": pw}, roomFixtureToken(t))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("%d 位密码应被接受，实际 %d", len(pw), resp.StatusCode)
@@ -213,7 +213,7 @@ func TestCreateRoomCountLimitReturns503(t *testing.T) {
 	srv, rooms, _ := startTestServerWithManager(t, cfg)
 
 	for i := 0; i < 3; i++ {
-		resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{})
+		resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{}, roomFixtureToken(t))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("第 %d 个房间应创建成功，实际 %d", i+1, resp.StatusCode)
@@ -223,7 +223,7 @@ func TestCreateRoomCountLimitReturns503(t *testing.T) {
 		t.Fatalf("在册房间数应为 3，实际 %d", rooms.RoomCount())
 	}
 
-	resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{})
+	resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{}, roomFixtureToken(t))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("超出房间总数上限应返回 503，实际 %d", resp.StatusCode)
@@ -252,7 +252,7 @@ func TestCreateRoomRateLimitReturns429(t *testing.T) {
 
 	codes := make([]int, 0, 4)
 	for i := 0; i < 4; i++ {
-		resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{})
+		resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{}, roomFixtureToken(t))
 		codes = append(codes, resp.StatusCode)
 		resp.Body.Close()
 	}

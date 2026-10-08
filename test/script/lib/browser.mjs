@@ -293,10 +293,146 @@ export async function loadMedia(host, mediaDir, mediaServerRef) {
  */
 const hostTokens = new Map()
 
-export async function createRoom(serverUrl) {
-  const resp = await fetch(`${serverUrl}/api/rooms`, {
+/** serverUrl → 测试账号 token（见 ensureAccount 的说明）。 */
+const accountCache = new Map()
+
+/**
+ * 最小 Cookie jar。
+ *
+ * 为什么需要：Node 的 fetch（undici）**不会**自动保存/回送 cookie，而一期的
+ * refresh token 是 HttpOnly Cookie —— 刷新、重放、登出这些判据全部依赖它。
+ * 浏览器侧由 Chrome 自己管，这里只为 Node 侧的 API 级验收服务。
+ */
+export function newCookieJar() {
+  const jar = new Map()
+  return {
+    absorb(resp) {
+      const list = typeof resp.headers.getSetCookie === 'function' ? resp.headers.getSetCookie() : []
+      for (const raw of list) {
+        const [pair] = String(raw).split(';')
+        const idx = pair.indexOf('=')
+        if (idx > 0) jar.set(pair.slice(0, idx).trim(), pair.slice(idx + 1).trim())
+      }
+      return jar
+    },
+    header() {
+      return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ')
+    },
+    get(name) {
+      return jar.get(name) ?? null
+    },
+    /** 只删某个 cookie（用于模拟"客户端丢了 cookie"这类判据）。 */
+    clear(name) {
+      jar.delete(name)
+    },
+  }
+}
+
+async function readAuthBody(resp) {
+  const body = await resp.json().catch(() => null)
+  return body
+}
+
+function authError(resp, body, what) {
+  const code = body?.error?.code ?? body?.code ?? ''
+  const message = body?.error?.message ?? body?.error ?? ''
+  return new Error(`${what}失败：HTTP ${resp.status}${code ? ` ${code}` : ''}${message ? ` ${message}` : ''}`)
+}
+
+/** 注册一个账号，返回 {token, user}。成功状态码是 **201**（见 internal/handler/auth.go）。 */
+export async function registerUser(serverUrl, { username, password, displayName, cookieJar } = {}) {
+  const resp = await fetch(`${serverUrl}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, displayName: displayName ?? username }),
+  })
+  cookieJar?.absorb(resp)
+  const body = await readAuthBody(resp)
+  if (!resp.ok) throw authError(resp, body, '注册')
+  return { token: body.accessToken, user: body.user, username, status: resp.status }
+}
+
+/** 登录，返回 {token, user}。 */
+export async function loginUser(serverUrl, { username, password, cookieJar } = {}) {
+  const resp = await fetch(`${serverUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  cookieJar?.absorb(resp)
+  const body = await readAuthBody(resp)
+  if (!resp.ok) throw authError(resp, body, '登录')
+  return { token: body.accessToken, user: body.user, username, status: resp.status }
+}
+
+/**
+ * 取一个可用的测试账号 token。
+ *
+ * 三条路径，按优先级：
+ *  1. 已取过 → 直接复用（一次运行只注册/登录一次）；
+ *  2. 设了 PR_TEST_USER/PR_TEST_PASS → 先登录（复用既有账号，避免每跑一次脚本
+ *     就往库里塞一个用户）；登录失败再尝试注册；
+ *  3. 否则注册一个随机账号（t_<随机>）。
+ *
+ * **账号能力未开启时返回 null 而不是抛错**：那时服务端不注册 /api/auth/*（返回 404），
+ * 脚本应当退化为"匿名建房"，这样同一份脚本既能跑带账号的实例、也能跑没账号的实例
+ *（部署是分两步走的：先上代码、再配 PR_DB_DSN）。
+ */
+export async function ensureAccount(serverUrl, { cookieJar } = {}) {
+  // 缓存必须**按 serverUrl 分键**：同一次运行里脚本可能同时对着本地实例与公网实例
+  // （例如"本地跑通再对线上复跑"），共用一个缓存会把 A 的 token 拿去打 B ——
+  // 症状是 B 上出现"不该存在的登录态"（实测踩到过）。
+  if (accountCache.has(serverUrl)) return accountCache.get(serverUrl)
+  const username = process.env.PR_TEST_USER || `t_${Math.random().toString(36).slice(2, 10)}`
+  // 口令必须满足服务端策略：≥8 字符且同时含字母与数字。
+  const password = process.env.PR_TEST_PASS || 'pr-test-pass1'
+  const remember = (v) => {
+    accountCache.set(serverUrl, v)
+    return v
+  }
+  if (process.env.PR_TEST_USER) {
+    try {
+      const r = await loginUser(serverUrl, { username, password, cookieJar })
+      return remember(r.token)
+    } catch (err) {
+      if (process.env.PR_TEST_STRICT === '1') throw err
+      // 落到注册分支：固定的测试账号可能还没建出来
+    }
+  }
+  try {
+    const r = await registerUser(serverUrl, { username, password, cookieJar })
+    return remember(r.token)
+  } catch (err) {
+    const msg = String(err?.message ?? err)
+    if (msg.includes('HTTP 404') || msg.includes('HTTP 503')) {
+      // 账号能力关闭：这是**合法部署形态**，不是错误。
+      return remember(null)
+    }
+    if (msg.includes('HTTP 409')) {
+      // 随机用户名撞车（或固定账号已存在）→ 登录
+      try {
+        const r = await loginUser(serverUrl, { username, password, cookieJar })
+        return remember(r.token)
+      } catch (loginErr) {
+        if (process.env.PR_TEST_STRICT === '1') throw loginErr
+        return remember(null)
+      }
+    }
+    if (process.env.PR_TEST_STRICT === '1') throw err
+    return remember(null)
+  }
+}
+
+export async function createRoom(serverUrl, { token } = {}) {
+  // 建房必须登录（ACCOUNTS §6）。ensureAccount 会在账号能力关闭时返回 null，
+  // 此时不带 Authorization —— 那样脚本仍能对"无账号"的实例跑通。
+  const bearer = token ?? (await ensureAccount(serverUrl))
+  const resp = await fetch(`${serverUrl}/api/rooms`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+    },
     body: '{}',
   })
   if (!resp.ok) throw new Error(`创建房间失败：HTTP ${resp.status}`)

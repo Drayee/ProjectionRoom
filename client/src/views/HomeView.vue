@@ -1,16 +1,25 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import AppHeader from '../components/AppHeader.vue'
+import { useAuthStore } from '../stores/auth'
 import { useRoomStore } from '../stores/room'
 import { rememberJoin } from '../utils/joinSession'
 import type { CreateRoomResponse, Role, RoomInfoResponse } from '../types/protocol'
 
 const router = useRouter()
 const store = useRoomStore()
+const auth = useAuthStore()
 
 const NAME_KEY = 'pr:name'
 
-const displayName = ref(localStorage.getItem(NAME_KEY) ?? `观众${Math.floor(Math.random() * 900 + 100)}`)
+/**
+ * 本机昵称。优先级：本机上次用过的 > **账号昵称**（登录了就不用再想办法起名字）> 随机。
+ * 从登录页回跳到首页时组件会重新创建，所以用账号昵称兜底这件事在"登录后回到发起处"时也成立。
+ */
+const displayName = ref(
+  localStorage.getItem(NAME_KEY) ?? auth.profile?.displayName ?? `观众${Math.floor(Math.random() * 900 + 100)}`,
+)
 const createPassword = ref('')
 const joinCode = ref('')
 const joinPassword = ref('')
@@ -23,6 +32,12 @@ function remember(roomId: string, password: string, role: Role, hostToken?: stri
 
 async function createRoom() {
   error.value = ''
+  // 建房必须登录（判据②）：**就地拦截**，未登录直接把人送去登录页并带上回跳路径，
+  // 登录成功后回到这里（URL 与页面都还在），而不是先发一个注定 401 的请求。
+  if (!auth.ensureLoggedIn()) {
+    return
+  }
+
   const name = displayName.value.trim()
   if (!name) {
     error.value = '请先填写昵称'
@@ -31,11 +46,19 @@ async function createRoom() {
 
   busy.value = true
   try {
-    const resp = await fetch('/api/rooms', {
+    // 带 access token（服务端 T8 起 POST /api/rooms 挂 RequireAuth）。
+    // 401 时 authedFetch 会自动刷新一次再重试；刷新也失败才会抛错并把人送去登录页。
+    const resp = await auth.authedFetch('/api/rooms', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: createPassword.value }),
     })
+    if (resp.status === 401) {
+      // 走到这里说明"刷新一次再重试"之后仍然 401：不再重试，说清原因并把人送去登录页。
+      error.value = '登录状态已失效，请重新登录后重试'
+      void auth.redirectToLogin()
+      return
+    }
     if (!resp.ok) {
       error.value = `创建房间失败（HTTP ${resp.status}）`
       return
@@ -57,6 +80,7 @@ async function createRoom() {
   }
 }
 
+/** 进房（观众）**不需要登录**：这是产品决定，这里刻意不做任何账号拦截。 */
 async function joinRoom() {
   error.value = ''
   const code = joinCode.value.trim().toUpperCase()
@@ -97,6 +121,8 @@ async function joinRoom() {
 
 <template>
   <div class="home">
+    <AppHeader variant="page" />
+
     <header class="home-head">
       <h1>ProjectionRoom</h1>
       <p class="muted">
@@ -112,6 +138,11 @@ async function joinRoom() {
     <div class="grid">
       <section class="card">
         <h2>作为主播创建房间</h2>
+        <!-- 未登录时先说明门槛，用户不必点一下才知道要登录（点击本身也会被就地拦截并送去登录页）。 -->
+        <p class="muted note auth-hint" v-if="!auth.isLoggedIn" data-testid="home-create-login-hint">
+          创建房间需要登录（点下面的按钮会跳转登录，登录后回到本页）；
+          <strong>只是进房看片不需要账号</strong>，右侧输入房间码即可。
+        </p>
         <div class="field">
           <label>你的昵称</label>
           <input v-model="displayName" maxlength="24" placeholder="主播昵称" />
@@ -120,7 +151,13 @@ async function joinRoom() {
           <label>房间密码（可留空）</label>
           <input v-model="createPassword" type="password" placeholder="留空表示谁都能进" />
         </div>
-        <button class="primary" :disabled="busy" :aria-busy="busy" @click="createRoom">
+        <button
+          class="primary"
+          :disabled="busy"
+          :aria-busy="busy"
+          data-testid="home-create-room"
+          @click="createRoom"
+        >
           {{ busy ? '创建中…' : '创建房间' }}
         </button>
         <p class="muted note">
@@ -200,6 +237,12 @@ button {
 .note {
   margin-bottom: 0;
   font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 建房需要登录的说明：放在按钮**上方**，所以需要下边距（.note 默认是 0，它用在卡片尾部）。 */
+.auth-hint {
+  margin: 0 0 14px;
   line-height: 1.6;
 }
 </style>

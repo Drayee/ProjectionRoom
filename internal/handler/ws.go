@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,17 +18,31 @@ import (
 	"ProjectionRoom/internal/limiters"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/store"
 	"ProjectionRoom/internal/usecase"
 )
 
-// joinedOriginTodo 记录一条部署待办（S-5 的收尾项，docs/SPEC.md 同步）。
+// joinedOriginTodo 记录一条**部署决策与残余风险**（S-5 的收尾项，与 docs/SPEC.md 的 S1 条目同源）。
 //
 // 非浏览器客户端（curl/自动化脚本）不发 Origin，coder/websocket 对这种情况一律放行 ——
 // 这是我们**有意保留**的现状（本地工具链、verify-*.mjs 都依赖它）。
-// 但它意味着"任何能连到本端口的人都能发 join 指令"，
-// 因此账号层上线后这条放行必须改成"要求令牌"，否则信令端点是不设防的。
-const joinedOriginTodo = "TODO(账号层)：非浏览器客户端（无 Origin）目前按设计放行，" +
-	"账号层上线后必须改为要求令牌（见 docs/SPEC.md 的安全待办）。"
+//
+// T8（账号层一期）的更新：这条待办原先写的是"账号层上线后必须改成要求令牌"，
+// 而账号层的产品决定是**观众免登录进房**（带 ticket 只是把连接绑定到账号，
+// 用于封禁拦截与"我的房间"）。两件事不能同时成立：只要游客必须能进房，
+// "无 Origin 一律要求令牌"就不可能收紧到零例外。因此这里的现状是**保留**，
+// 并把真正的边界写清楚（供 docs/SPEC.md 的 S1 条目同步）：
+//
+//   - 无 Origin 的连接与浏览器游客的权限**完全相同**（不多也不少）：它同样只能 join、
+//     拿不到任何管理能力；
+//   - 它拿不到账号身份 —— 身份只来自一次性票据，而票据由 /api/auth/ws-ticket 签发，
+//     那个端点要求 access token；
+//   - "必须登录"的动作（建房 POST /api/rooms）走 REST + RequireAuth，与这里无关。
+//
+// 因此 S1 的条目应当改写成"无 Origin 客户端 = 游客权限"，而不是"必须要求令牌"。
+const joinedOriginTodo = "决策记录（T8）：无 Origin 的非浏览器客户端按设计放行，" +
+	"权限与浏览器游客相同（观众免登录进房是产品决定）；账号身份只由一次性票据绑定。" +
+	"docs/SPEC.md 的 S1 条目需按此决策同步改写。"
 
 // preAuthWriteTimeout 是"连接尚未注册进 Hub"时写单条帧的超时上限。
 //
@@ -36,15 +51,111 @@ const joinedOriginTodo = "TODO(账号层)：非浏览器客户端（无 Origin�
 // 客户端若已跑掉，10s 会拖住这个请求协程。2s 足够覆盖一次本地/局域网投递。
 const preAuthWriteTimeout = 2 * time.Second
 
-// wsHandler 是唯一的 WebSocket 入口：/ws?roomId=..&clientId=..
+// bannedCloseReason 是"票据有效但账号已被封禁"时的 **WS 关闭原因**（配合 1008）。
+//
+// 为什么这么短：WebSocket 的关闭原因只有 123 字节预算（中文字符 3 字节），
+// 超了会被截断甚至让关闭帧不合法。更完整的说明放在紧随其后的错误信封里
+// （writePreAuthError），客户端两者都能读到。
+const bannedCloseReason = "账号已被封禁，请勿重连"
+
+// wsTicketIdentity 是一次成功的票据解析结论。
+type wsTicketIdentity struct {
+	userID int64
+	// bannedReason 非空表示"票据本身有效，但账号当前不可用"。
+	//
+	// 它必须被带到**升级之后**才能表达：浏览器读不到失败握手的响应体，
+	// 只有升级成功后的 1008 + 可读原因能走到客户端的 onclose(e.code, e.reason)，
+	// 客户端据此提示"账号已被封禁"并停止重连（而不是无限重连）。
+	bannedReason string
+}
+
+// resolveWSTicket 解析 /ws 的一次性票据（T8 / ACCOUNTS §5、§6）。
+//
+// 返回值 ok=false 表示"已经写出了拒绝响应"，调用方直接 return。
+//
+// 判据（全部 fail closed）：
+//
+//  1. 请求里**没有** ticket 参数 → 游客路径（ident = nil, ok = true）；
+//  2. 有 ticket 但账号能力未装配 → 503：这是装配问题，不是"票据无效"，
+//     报成 401 会把故障归因到客户端的凭据上；
+//  3. 票据消费失败（不存在 / 已过期 / 已被使用过）→ 401 + WS_TICKET_INVALID；
+//  4. 票据对应的账号已不存在 → 401 + WS_TICKET_INVALID（票据对身份已无意义）；
+//     查库本身出错 → 503（**不确定时一律不放行**）。
+//
+// 两个刻意的取舍：
+//   - **"带了空票据"按严格路径处理**。空串是"取票失败/拼串拼错"的常见形态，
+//     若把它当游客处理，一次失败的鉴权就**静默降级**成匿名连接：客户端以为自己是
+//     登录态，服务端却按游客对待（封禁拦截、我的房间全部失效）。宁可让它 401。
+//   - **第 3 步不区分"不存在/过期/用过"**：客户端对三者的动作完全一样（重新取票），
+//     而区分它们只是给"猜票据"多一条侧信道。
+func resolveWSTicket(c *gin.Context, deps AuthDeps) (*wsTicketIdentity, bool) {
+	// 用 Query().Has 而不是 `Query("ticket") != ""`：两者的区别正是
+	// "没带票据"（游客）与"带了空票据"（鉴权失败）——这是本函数的第一个判据。
+	if !c.Request.URL.Query().Has("ticket") {
+		return nil, true
+	}
+
+	if deps.Tickets == nil || deps.Service == nil {
+		log.Printf("[WARN] /ws 带了 ticket 但账号能力未装配，拒绝握手（room=%s）", c.Query("roomId"))
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "账号能力暂时不可用（服务端未完成装配）",
+			"code":  CodeAuthUnavailable,
+		})
+		return nil, false
+	}
+
+	ticket := strings.TrimSpace(c.Query("ticket"))
+	userID, ok := deps.Tickets.Consume(ticket)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "WS 票据无效或已过期，请重新取票",
+			"code":  CodeWSTicketInvalid,
+		})
+		return nil, false
+	}
+
+	// 票据只证明"这张票是发给这个账号的"，不证明"这个账号现在还能用"：
+	// 封禁发生在取票之后是常态（管理端刚封禁，而客户端正好在重连）。
+	p, err := deps.Service.Me(c.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, usecase.StoreNotFound) || errors.Is(err, usecase.ErrSessionInvalid) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "票据对应的账号已不存在，请重新登录",
+				"code":  CodeWSTicketInvalid,
+			})
+			return nil, false
+		}
+		log.Printf("[ERROR] /ws 用票据换身份时查账号失败（user=%d）：%v", userID, err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "账号能力暂时不可用",
+			"code":  CodeAuthUnavailable,
+		})
+		return nil, false
+	}
+	if p.Status != store.StatusActive {
+		return &wsTicketIdentity{userID: userID, bannedReason: bannedCloseReason}, true
+	}
+	return &wsTicketIdentity{userID: userID}, true
+}
+
+// wsHandler 是唯一的 WebSocket 入口：/ws?roomId=..&clientId=..&ticket=..
 //
 // 连接建立时只把连接登记进 Hub（用于信令投递），
 // 真正的"进入房间"由第一条 join 消息完成 —— 那时才校验密码与成员上限（SPEC §5.1）。
 //
+// accountDeps 只为一次性票据服务（T8）：**没有 ticket 参数时这条路径一行都不走**，
+// 因此"观众免登录进房"的行为与账号层上线前逐字相同。
+//
 // joinLimiter 是 S-11 的第二半：join **失败**按 IP+房间码限速（成功不消耗令牌）。
 // 它放在 handler 层而不是 usecase：usecase 不认识 HTTP 语义（IP、状态码），
 // 而这条限速是"防在线猜房间密码"的外围闸门。
-func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, joinLimiter *limiters.Keyed) gin.HandlerFunc {
+func wsHandler(
+	cfg *config.Config,
+	hub *service.Hub,
+	rooms *usecase.Manager,
+	joinLimiter *limiters.Keyed,
+	accountDeps AuthDeps,
+) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		roomID := strings.ToUpper(strings.TrimSpace(c.Query("roomId")))
 		clientID := strings.TrimSpace(c.Query("clientId"))
@@ -80,6 +191,13 @@ func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, joi
 			return
 		}
 
+		// T8：一次性票据（ACCOUNTS §5/§6）。**没有 ticket 参数时这里直接返回 nil,true**，
+		// 游客路径因此与账号层上线前完全一致（含上面那套 Origin 判据，一行未动）。
+		ident, ok := resolveWSTicket(c, accountDeps)
+		if !ok {
+			return // 拒绝响应已经写出（401 / 503）
+		}
+
 		conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{
 			// 库的 Origin 校验已在上面被取代（它的同源判据可以被伪造的 Host 满足）。
 			InsecureSkipVerify: true,
@@ -92,6 +210,20 @@ func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, joi
 		// 第一道闸：单条消息的字节长度上限。
 		conn.SetReadLimit(cfg.Signal.MaxMessageBytes)
 
+		// 票据换来的账号已不可用（封禁）：**必须在升级之后**用 1008 拒掉。
+		//
+		// 为什么不放在握手前：浏览器读不到失败握手的响应体（只有 console 里一行
+		// "WebSocket connection failed"），而 1008 + 可读原因能走到客户端的
+		// onclose(e.code, e.reason) —— 那正是"提示账号被封禁、不要再重连"的唯一通道。
+		// 同时也不把它注册进 Hub：这条连接从未成为一条可用的信令连接。
+		if ident != nil && ident.bannedReason != "" {
+			writePreAuthError(cfg, conn, model.ErrorEnvelope(CodeUserBanned, "该账号已被封禁"))
+			log.Printf("ws: %s（room=%s）的票据属于已封禁账号 user=%d，以 %d 关闭",
+				clientID, roomID, ident.userID, websocket.StatusPolicyViolation)
+			_ = conn.Close(websocket.StatusPolicyViolation, ident.bannedReason)
+			return
+		}
+
 		client, err := hub.Register(clientID, roomID, conn)
 		if err != nil {
 			// 在拒绝之前先把原因告诉客户端：否则它只会看到一次策略违规关闭，
@@ -103,6 +235,13 @@ func wsHandler(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, joi
 				clientID, roomID, err, model.CodeClientIDTaken)
 			_ = conn.Close(websocket.StatusPolicyViolation, "clientId 已存在活跃连接")
 			return
+		}
+
+		// 账号绑定：注册连接时**不传** userID —— 账号是握手之后由票据确定的第二个时刻
+		//（浏览器无法给 WebSocket 加请求头，票据只能走查询串），见 (*service.Client).SetUserID。
+		if ident != nil {
+			client.SetUserID(ident.userID)
+			log.Printf("ws: %s 已绑定账号（user=%d，room=%s）", clientID, ident.userID, roomID)
 		}
 
 		// 第二道闸（S-1）：**每连接的字节速率配额**。

@@ -15,9 +15,11 @@ import (
 
 	"github.com/coder/websocket"
 
+	"ProjectionRoom/internal/auth"
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/store"
 	"ProjectionRoom/internal/usecase"
 )
 
@@ -60,7 +62,7 @@ func startTestServerWithManager(t *testing.T, cfg *config.Config) (*httptest.Ser
 	rooms := usecase.NewManager(cfg, hub)
 
 	// 信令用例不涉及切片端点，这里传 nil 跳过 /api/v1/segment/* 的注册。
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil))
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, roomTestAccountDeps(t, cfg), AdminDeps{}))
 	t.Cleanup(func() {
 		srv.Close()
 		// 后台清扫协程属于 Manager：测试结束必须停掉，否则用例之间会互相干扰。
@@ -69,6 +71,61 @@ func startTestServerWithManager(t *testing.T, cfg *config.Config) (*httptest.Ser
 	})
 
 	return srv, rooms, cfg
+}
+
+// —— T8 之后"建房必须登录"给既有用例带来的夹具改造 ——
+//
+// 这些用例（信令、安全、ICE、代理信任）把 `POST /api/rooms` 当**夹具工厂**用，
+// 它们要验的是 /ws、限速、S-7，与账号无关。改造分两步，都只落在测试侧：
+//
+//  1. roomTestAccountDeps：给测试服务注入一套"账号能力已开启"的假依赖
+//     （DSN 非空 + 假 AccountService），于是 RequireAuth 生效且能通过；
+//  2. roomFixtureToken：造一张**任何一台测试服务都认**的 access token。
+//
+// 为什么同一张票可以跨测试服务使用：所有测试服务的假 AccountService 都用同一个
+// 固定测试密钥（handlerTestSecret，见 auth_test.go），并且都种下同一个确定性的
+// 账号（第一个 seeded 的用户必然是 id=roomFixtureUserID、role=user、tv=1、active）。
+// 于是"签名有效"与"库里的当前状态一致"两个判据对每一台测试服务都成立。
+//
+// 这样做的收益是**调用点零改动**：createRoom(t, baseURL, pw) 的签名不变，
+// 不必把凭据穿过几十处调用（那样每个用例的装配行都要改，噪音远大于收益）。
+const roomFixtureUserID = 1
+
+// roomTestAccountDeps 造一套只用于夹具的账号依赖（假 service + 假票据表）。
+func roomTestAccountDeps(t *testing.T, cfg *config.Config) AuthDeps {
+	t.Helper()
+
+	svc := newFakeAccountService(t)
+	if u := svc.seeded("room-owner", "stored-passw0rd", store.RoleUser, store.StatusActive); u.ID != roomFixtureUserID {
+		t.Fatalf("夹具账号的 id 必须是 %d（roomFixtureToken 依赖这个确定性），实际 %d", roomFixtureUserID, u.ID)
+	}
+	// 让 registerAccountRoutes / registerAdminRoutes 认为"账号能力已开启"。
+	// 只影响这两组路由的注册，本文件关心的建房/信令路径不读它。
+	cfg.Auth.DBDSN = "host=127.0.0.1 dbname=fixture sslmode=disable"
+
+	return AuthDeps{
+		Service: svc,
+		Session: SessionConfig{
+			AccessTTL:   cfg.Auth.AccessTTL,
+			RefreshTTL:  cfg.Auth.RefreshTTL,
+			WSTicketTTL: cfg.Auth.WSTicketTTL,
+		},
+	}
+}
+
+// roomFixtureToken 给建房夹具签发一张有效的 access token。
+func roomFixtureToken(t *testing.T) string {
+	t.Helper()
+
+	signer, err := auth.NewSigner(handlerTestSecret, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("构造测试 Signer 失败: %v", err)
+	}
+	tok, _, err := signer.Issue(roomFixtureUserID, store.RoleUser, 1)
+	if err != nil {
+		t.Fatalf("签发夹具 token 失败: %v", err)
+	}
+	return tok
 }
 
 // newTestServer 起一个真实的 gin + WebSocket 服务，走完整链路（REST → Hub → usecase.Manager）。
@@ -152,11 +209,26 @@ func waitRoomHasNoHost(t *testing.T, baseURL, roomID string) roomInfo {
 func postJSON(t *testing.T, url string, body any) *http.Response {
 	t.Helper()
 
+	return postJSONAuth(t, url, body, "")
+}
+
+// postJSONAuth 发一个 JSON POST，可选带上 Bearer（建房夹具用，见 roomFixtureToken）。
+func postJSONAuth(t *testing.T, url string, body any, bearer string) *http.Response {
+	t.Helper()
+
 	payload, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("序列化请求体失败: %v", err)
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("构造 POST %s 失败: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s 失败: %v", url, err)
 	}
@@ -173,10 +245,12 @@ func createRoom(t *testing.T, baseURL, password string) string {
 
 // createRoomFull 创建房间并返回房间码 + 主播复位令牌（S-7）。
 // 宽限期内重连主播位的用例必须拿到令牌，否则会被服务端拒绝。
+//
+// T8 之后建房必须登录，因此这里带夹具 token（见 roomFixtureToken 的说明）。
 func createRoomFull(t *testing.T, baseURL, password string) (roomID, hostToken string) {
 	t.Helper()
 
-	resp := postJSON(t, baseURL+"/api/rooms", map[string]any{"password": password})
+	resp := postJSONAuth(t, baseURL+"/api/rooms", map[string]any{"password": password}, roomFixtureToken(t))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("创建房间应返回 200，实际 %d", resp.StatusCode)
@@ -295,7 +369,7 @@ func (c *wsClient) join(displayName, role, password string) {
 func TestCreateRoomAPI(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{"password": "pass"})
+	resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{"password": "pass"}, roomFixtureToken(t))
 	defer resp.Body.Close()
 
 	var body struct {

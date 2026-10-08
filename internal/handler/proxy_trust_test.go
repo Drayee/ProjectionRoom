@@ -99,6 +99,9 @@ func TestCreateRoomLimitersResistForgedXFF(t *testing.T) {
 	post := func(remoteAddr, xff string) int {
 		req := httptest.NewRequest(http.MethodPost, "/api/rooms", nil)
 		req.RemoteAddr = remoteAddr
+		// T8 之后建房必须登录：这里带一张有效的夹具 token（见 roomFixtureToken），
+		// 本用例验的是"伪造 XFF 不能刷新每 IP 令牌桶"，与账号无关。
+		req.Header.Set("Authorization", "Bearer "+roomFixtureToken(t))
 		if xff != "" {
 			req.Header.Set("X-Forwarded-For", xff)
 		}
@@ -135,7 +138,7 @@ func newRouterForTest(t *testing.T, cfg *config.Config) *gin.Engine {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
 	rooms := usecase.NewManager(cfg, hub)
-	engine := NewRouter(cfg, hub, rooms, nil)
+	engine := NewRouter(cfg, hub, rooms, nil, roomTestAccountDeps(t, cfg), AdminDeps{})
 	t.Cleanup(func() {
 		rooms.Stop()
 		cleanup()

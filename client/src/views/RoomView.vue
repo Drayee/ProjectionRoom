@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import AppHeader from '../components/AppHeader.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import DiagnosticsDrawer from '../components/DiagnosticsDrawer.vue'
 import HostPanel from '../components/HostPanel.vue'
@@ -137,6 +138,12 @@ async function copyCode() {
       </div>
       <div class="right">
         <span class="muted">{{ store.displayName }}</span>
+        <!--
+          账号区塞进**已有的**这一行（判据：不破坏房间页）。房间页是 height:100vh 的固定布局，
+          单开一行顶栏就是从播放器身上抠高度，所以这里用 inline 形态，不新增行。
+          「退出」是退出账号（判据⑤ 会回首页），与左边的「离开房间」是两件事。
+        -->
+        <AppHeader variant="inline" />
         <button @click="leave">离开房间</button>
       </div>
     </header>

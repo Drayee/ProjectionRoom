@@ -13,6 +13,7 @@ type Config struct {
 	Static    StaticConfig
 	Downloads DownloadsConfig
 	Security  SecurityConfig
+	Auth      AuthConfig
 	IPC       IPCConfig
 	LogLevel  string
 	// MemoryLimitBytes 是进程软内存上限（PR_MEMORY_LIMIT，默认 512 MiB）。
@@ -145,6 +146,65 @@ type IPCConfig struct {
 	// 30/分钟 把这条路压到需要几天；同时留给正常人"打错 3 次"的余量。
 	JoinFailPerMinute float64
 	JoinFailBurst     int
+
+	// —— 账号层（ACCOUNTS §5）的三个入口，同样是每 IP 令牌桶。
+	//
+	// 为什么和建房共用这个结构体：它们的语义完全一样（按来源 IP 限速、突发友好、
+	// 持续攻击有硬上限），而 IPCConfig 已经是这个语义的 owner。
+	// 另建一套"AuthRateConfig"会立刻产生两个限速 owner，后续调参必然漏改一处。
+
+	// LoginPerMinute / LoginBurst 是登录尝试的每 IP 限速
+	//（PR_AUTH_LOGIN_PER_MINUTE、PR_AUTH_LOGIN_BURST，默认 10/分钟、容量 5）。
+	// 依据：bcrypt cost=12 单次约 200ms，10/分钟意味着攻击者最多让服务端
+	// 每秒多花 33ms 在校验上；而正常人打错密码三四次完全在容量内。
+	// 登录失败**也计入**（与 join 失败不同）：这里要挡的正是撞库。
+	LoginPerMinute float64
+	LoginBurst     int
+	// RegisterPerMinute / RegisterBurst 是注册的每 IP 限速
+	//（PR_AUTH_REGISTER_PER_MINUTE、PR_AUTH_REGISTER_BURST，默认 5/分钟、容量 3）。
+	// 注册同样要跑一次 bcrypt，且它会写入数据库，所以比登录更严。
+	RegisterPerMinute float64
+	RegisterBurst     int
+	// RefreshPerMinute / RefreshBurst 是刷新会话的每 IP 限速
+	//（PR_AUTH_REFRESH_PER_MINUTE、PR_AUTH_REFRESH_BURST，默认 30/分钟、容量 10）。
+	// 它比登录宽松：客户端必然周期性刷新（多标签页会叠加），
+	// 且刷新本身不跑 bcrypt，代价只是一次数据库查询。
+	RefreshPerMinute float64
+	RefreshBurst     int
+}
+
+// AuthConfig 是账号层的数据库与凭据配置（ACCOUNTS §5）。
+//
+// 独立成一块而不是塞进 Room/Signal：账号是**新增的一条面**，
+// 它的开关语义也与其它配置不同 —— DBDSN 为空表示"账号能力整体关闭"，
+// 此时服务端退回纯游客模式（观众仍可按房间码进房，建房返回明确错误）。
+// 这样做的目的是让"先部署代码、再逐步开启账号"成为可能。
+type AuthConfig struct {
+	// DBDSN 是 PostgreSQL 连接串（PR_DB_DSN，形如
+	// `host=127.0.0.1 port=5432 user=pr_app password=… dbname=projectionroom sslmode=disable`）。
+	// 为空即账号能力关闭：不连库、不注册认证路由，启动时打印一条 WARN。
+	DBDSN string
+	// JWTSecret 是 HS256 签名密钥（PR_JWT_SECRET，至少 32 字节，
+	// 生成：`openssl rand -hex 32`）。DBDSN 非空时**必填**，否则启动失败 ——
+	// 一个缺失/临时密钥会导致"所有人随机掉线"这种最难排查的症状，宁可拒绝启动。
+	JWTSecret string
+	// AccessTTL 是 access token 有效期（PR_ACCESS_TTL，默认 15m，范围 (0, 24h]）。
+	AccessTTL time.Duration
+	// RefreshTTL 是 refresh（会话）有效期（PR_REFRESH_TTL，默认 720h）。
+	RefreshTTL time.Duration
+	// BcryptCost 是口令哈希代价（PR_BCRYPT_COST，默认 12，范围 [10,14]）。
+	BcryptCost int
+	// HashingConcurrency 是并发口令哈希的闸门容量（PR_AUTH_HASH_CONCURRENCY，默认 4，范围 [1,64]）。
+	//
+	// 为什么需要它：bcrypt 是纯 CPU 的，本机实测 cost=12 单次约 0.57s，而服务器
+	// 只有 2 vCPU。没有闸门时，少量 IP 并发打登录/注册就能把 CPU 占满，让正常
+	// 用户从"0.6 秒登录"退化到"几秒登录"（甚至触发上游超时）。拿到闸门之外
+	// 的请求**立刻**被拒（429），而不是排队 —— 排队会把响应时间变成无上界，
+	// 且队列本身成为第二个被打爆的资源。
+	// 默认 4 的依据：2 vCPU 上留一半余量给信令与静态托管。
+	HashingConcurrency int
+	// WSTicketTTL 是 WebSocket 一次性票据的有效期（PR_WS_TICKET_TTL，默认 30s）。
+	WSTicketTTL time.Duration
 }
 
 // SignalConfig 控制 WebSocket 信令层的超时与限额。
@@ -212,6 +272,16 @@ type SecurityConfig struct {
 	//   - media-src 必须含 blob:：MSE 用 URL.createObjectURL(MediaSource) 播放。
 	// 现有 client/dist 没有内联 <script>，所以 script-src 可以只留 'self'。
 	CSP string
+	// TrustedProxies 是**允许其转发头（X-Forwarded-For / X-Real-IP）被采信**的来源
+	//（PR_TRUSTED_PROXIES，默认 127.0.0.1 与 ::1）。
+	//
+	// 为什么必须是显式白名单：gin 默认信任所有代理，于是 `c.ClientIP()` 会取
+	// X-Forwarded-For 的最左值 —— 那是请求方可以随便写的。按 IP 的限速与
+	// join 失败退避全部建立在 ClientIP 上，一旦被伪造就等于把这些闸门关掉
+	//（审计实测：直连来源换 3 个伪造 XFF 就能连发 3 次建房）。
+	// 本部署的形态是"nginx 在 127.0.0.1 上反代"，因此默认只信任回环；
+	// 多层代理/容器 sidecar 需要显式把它们加进来。
+	TrustedProxies []string
 }
 
 // SegmentConfig 控制「服务端视频切片」的配额、校验与生命周期。

@@ -192,7 +192,25 @@ func (m *Manager) roomMaxDepth() int {
 //   - 同时在册房间总数上限（ErrTooManyRooms）。
 //
 // 返回的 token 只在这一次响应里下发，服务端只存哈希。
+//
+// 本入口**不绑定房主**（ownerUserID = 0）。REST 建房走 CreateOwned；这里保留
+// 三参数形态，是因为 usecase 的多个单测与 handler 的夹具都以它建"无房主房间"，
+// 而那些用例与账号无关。
 func (m *Manager) Create(roomID, password string, streamBps int64) (*Room, string, error) {
+	return m.create(roomID, password, streamBps, 0)
+}
+
+// CreateOwned 是账号路径上的建房（ACCOUNTS §6 / T8）：房间在内存里就带上房主。
+//
+// 为什么不给 Create 直接加第四个参数：那样每个既有调用点都要写一个 0，
+// 而"这次建房到底绑没绑账号"会变成一个要读调用方才知道的细节。
+// 拆成两个具名方法之后，"哪些入口在建房时确定房主"是可 grep 的。
+func (m *Manager) CreateOwned(roomID, password string, streamBps int64, ownerUserID int64) (*Room, string, error) {
+	return m.create(roomID, password, streamBps, ownerUserID)
+}
+
+// create 是 Create / CreateOwned 的共用实现（ownerUserID = 0 表示无房主）。
+func (m *Manager) create(roomID, password string, streamBps int64, ownerUserID int64) (*Room, string, error) {
 	if !ValidRoomCode(roomID) && roomID != "" {
 		return nil, "", ErrBadRoomCode
 	}
@@ -233,6 +251,7 @@ func (m *Manager) Create(roomID, password string, streamBps int64) (*Room, strin
 		Password:     password,
 		StreamBps:    streamBps,
 		CreatedAt:    time.Now(),
+		ownerUserID:  ownerUserID,
 		MaxDepth:     m.roomMaxDepth(),
 		members:      make(map[string]*Member),
 		avoidPrimary: make(map[string]string),
@@ -241,8 +260,8 @@ func (m *Manager) Create(roomID, password string, streamBps int64) (*Room, strin
 	}
 	r.setHostToken(token)
 	m.rooms[roomID] = r
-	log.Printf("room %s: 已创建（密码保护=%t，码率估计=%d bps，深度上限=%d，在册 %d 间）",
-		roomID, password != "", streamBps, r.MaxDepth, len(m.rooms))
+	log.Printf("room %s: 已创建（密码保护=%t，码率估计=%d bps，深度上限=%d，房主=%d，在册 %d 间）",
+		roomID, password != "", streamBps, r.MaxDepth, ownerUserID, len(m.rooms))
 
 	return r, token, nil
 }

@@ -201,7 +201,7 @@ func TestICEAPIHasNoTURNAndCarriesTTL(t *testing.T) {
 func TestCreateRoomResponseCarriesSameICEPayload(t *testing.T) {
 	srv, cfg := newTestServer(t)
 
-	resp := postJSON(t, srv.URL+"/api/rooms", map[string]any{"password": "pass"})
+	resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{"password": "pass"}, roomFixtureToken(t))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("建房间应返回 200，实际 %d", resp.StatusCode)
 	}

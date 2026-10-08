@@ -79,6 +79,62 @@ const (
 
 	// —— S-1 兜底：进程软内存上限。
 	envMemoryLimit = "PR_MEMORY_LIMIT"
+
+	// —— 账号层（ACCOUNTS §5）：数据库与凭据。
+	envDBDSN       = "PR_DB_DSN"
+	envJWTSecret   = "PR_JWT_SECRET"
+	envAccessTTL   = "PR_ACCESS_TTL"
+	envRefreshTTL  = "PR_REFRESH_TTL"
+	envBcryptCost  = "PR_BCRYPT_COST"
+	envWSTicketTTL = "PR_WS_TICKET_TTL"
+	// envAuthHashConcurrency 是并发口令哈希闸门容量（见 AuthConfig.HashingConcurrency）。
+	envAuthHashConcurrency = "PR_AUTH_HASH_CONCURRENCY"
+
+	// —— 审计残留项 S2：只信任本机反代传来的转发头，避免伪造 XFF 绕过按 IP 限速。
+	envTrustedProxies = "PR_TRUSTED_PROXIES"
+
+	// —— 账号层的每 IP 令牌桶（沿用 IPCConfig 这个 owner，不再另建一套）。
+	envAuthLoginPerMinute    = "PR_AUTH_LOGIN_PER_MINUTE"
+	envAuthLoginBurst        = "PR_AUTH_LOGIN_BURST"
+	envAuthRegisterPerMinute = "PR_AUTH_REGISTER_PER_MINUTE"
+	envAuthRegisterBurst     = "PR_AUTH_REGISTER_BURST"
+	envAuthRefreshPerMinute  = "PR_AUTH_REFRESH_PER_MINUTE"
+	envAuthRefreshBurst      = "PR_AUTH_REFRESH_BURST"
+)
+
+// —— 账号层（ACCOUNTS §5）的默认值与允许范围。
+const (
+	// DefaultAccessTTL = 15m：access token 只存内存 + sessionStorage，
+	// 泄漏窗口越短越好；15 分钟配合"刷新即轮换 + 重放检测"是常见折中。
+	DefaultAccessTTL = 15 * time.Minute
+	// DefaultRefreshTTL = 720h（30 天）：refresh 是不透明随机串、入库可撤销，
+	// 因此可以长；它决定"多久不登录还能免密回来"。
+	DefaultRefreshTTL = 30 * 24 * time.Hour
+	// MinRefreshTTL / MaxRefreshTTL 是允许范围（1 小时 ~ 1 年）。
+	MinRefreshTTL = time.Hour
+	MaxRefreshTTL = 365 * 24 * time.Hour
+	// DefaultBcryptCost = 12：低配 2 vCPU 上单次校验约 200ms，配合登录限速
+	//（默认 10/分钟）仍余量充足；11 是更弱机器的退路，10 是下限。
+	DefaultBcryptCost = 12
+	MinBcryptCost     = 10
+	MaxBcryptCost     = 14
+	// DefaultWSTicketTTL = 30s：票据是"从取票到建立 WS"的时间预算，
+	// 单次使用 + 30 秒过期，即便它出现在反代 access log 里也无法复用。
+	DefaultWSTicketTTL = 30 * time.Second
+	// DefaultHashingConcurrency = 4 是并发 bcrypt 的闸门容量（见 AuthConfig 的说明）。
+	// 与 usecase.DefaultHashingConcurrency 同值：两处都要改的耦合由测试钉住。
+	DefaultHashingConcurrency = 4
+	MinHashingConcurrency     = 1
+	MaxHashingConcurrency     = 64
+	// MinJWTSecretBytes = 32：HS256 密钥必须有足够熵（openssl rand -hex 32）。
+	MinJWTSecretBytes = 32
+	// 登录/注册/刷新的每 IP 令牌桶默认值（依据见 IPCConfig 注释）。
+	DefaultAuthLoginPerMinute    = 10
+	DefaultAuthLoginBurst        = 5
+	DefaultAuthRegisterPerMinute = 5
+	DefaultAuthRegisterBurst     = 3
+	DefaultAuthRefreshPerMinute  = 30
+	DefaultAuthRefreshBurst      = 10
 )
 
 // DefaultPackSize 是分片打包的默认粒度（每个 .bin 容纳多少片）。
@@ -308,10 +364,29 @@ func Default() *Config {
 			CreateBurst:       DefaultRoomCreateBurst,
 			JoinFailPerMinute: DefaultJoinFailPerMinute,
 			JoinFailBurst:     DefaultJoinFailBurst,
+
+			LoginPerMinute:    DefaultAuthLoginPerMinute,
+			LoginBurst:        DefaultAuthLoginBurst,
+			RegisterPerMinute: DefaultAuthRegisterPerMinute,
+			RegisterBurst:     DefaultAuthRegisterBurst,
+			RefreshPerMinute:  DefaultAuthRefreshPerMinute,
+			RefreshBurst:      DefaultAuthRefreshBurst,
 		},
 		Security: SecurityConfig{
 			Headers: true,
 			CSP:     DefaultSecurityCSP,
+			// 默认只信任回环：本部署的形态是"nginx 在 127.0.0.1 上反代"。
+			// 多层代理需要显式把它加进 PR_TRUSTED_PROXIES。
+			TrustedProxies: []string{"127.0.0.1", "::1"},
+		},
+		// 账号能力默认**关闭**（DBDSN 为空）：这样"先部署代码、再开启账号"是安全的，
+		// 也让所有既有测试与脚本在未配置数据库时保持原行为。
+		Auth: AuthConfig{
+			AccessTTL:          DefaultAccessTTL,
+			RefreshTTL:         DefaultRefreshTTL,
+			BcryptCost:         DefaultBcryptCost,
+			WSTicketTTL:        DefaultWSTicketTTL,
+			HashingConcurrency: DefaultHashingConcurrency,
 		},
 		MemoryLimitBytes: DefaultMemoryLimitBytes,
 		Signal: SignalConfig{
@@ -408,6 +483,10 @@ func Load() (*Config, error) {
 	}
 
 	if err := applySecurityEnv(&cfg.Security); err != nil {
+		return nil, err
+	}
+
+	if err := applyAuthEnv(&cfg.Auth); err != nil {
 		return nil, err
 	}
 
@@ -786,6 +865,9 @@ func applyIPCEnv(ic *IPCConfig) error {
 	}{
 		{envRoomCreatePerMinute, &ic.CreatePerMinute, 0.001, MaxRoomCreatePerMinute},
 		{envJoinFailPerMinute, &ic.JoinFailPerMinute, 0.001, MaxRoomCreatePerMinute},
+		{envAuthLoginPerMinute, &ic.LoginPerMinute, 0.001, MaxRoomCreatePerMinute},
+		{envAuthRegisterPerMinute, &ic.RegisterPerMinute, 0.001, MaxRoomCreatePerMinute},
+		{envAuthRefreshPerMinute, &ic.RefreshPerMinute, 0.001, MaxRoomCreatePerMinute},
 	}
 	for _, tc := range cases {
 		v := os.Getenv(tc.name)
@@ -808,6 +890,9 @@ func applyIPCEnv(ic *IPCConfig) error {
 	}{
 		{envRoomCreateBurst, &ic.CreateBurst},
 		{envJoinFailBurst, &ic.JoinFailBurst},
+		{envAuthLoginBurst, &ic.LoginBurst},
+		{envAuthRegisterBurst, &ic.RegisterBurst},
+		{envAuthRefreshBurst, &ic.RefreshBurst},
 	}
 	for _, tc := range bursts {
 		v := os.Getenv(tc.name)
@@ -838,6 +923,93 @@ func applySecurityEnv(sc *SecurityConfig) error {
 			return fmt.Errorf("config: %s 不能为空（要关闭 CSP 请用 PR_SECURITY_HEADERS=0）, got %q", envSecurityCSP, v)
 		}
 		sc.CSP = csp
+	}
+	// 审计残留项 S2：可配置的受信代理（默认回环）。
+	//
+	// 显式传空串（PR_TRUSTED_PROXIES=""，即环境变量存在但值为空）表示"谁的转发头都不信"，
+	// 这在"服务端直接对外"时是正确选择；不设置则保持默认的回环白名单。
+	// 因此这里区分"未设置"与"设置为空"，与其它配置项一致地不做静默回退。
+	if v, ok := os.LookupEnv(envTrustedProxies); ok {
+		list := splitList(v)
+		if len(list) == 0 {
+			sc.TrustedProxies = []string{}
+			// gin 的约定：空列表表示"不信任任何代理"，转发头一律忽略。
+		} else {
+			sc.TrustedProxies = uniqueList(list)
+		}
+	}
+	return nil
+}
+
+// applyAuthEnv 应用账号层的数据库与凭据覆盖（ACCOUNTS §5）。
+//
+// 这里有一条**故意**的启动期硬校验：DBDSN 非空而 JWTSecret 缺失/过短时直接报错。
+// 原因是这两种配置错误的症状都极其难以归因：
+//   - 缺密钥 → 所有已登录用户随时掉线（token 校验失败），看起来像网络问题；
+//   - 密钥过短 → HS256 可被暴力破解，而线上不会有任何异常表现。
+//
+// 另外，密钥支持 `PR_JWT_SECRET_FILE`（见下）以外的两种写法都不做：只读环境变量，
+// 避免"从文件读密钥"这条额外路径被误配成世界可读。
+func applyAuthEnv(ac *AuthConfig) error {
+	if v := strings.TrimSpace(os.Getenv(envDBDSN)); v != "" {
+		ac.DBDSN = v
+	}
+	if v := os.Getenv(envJWTSecret); v != "" {
+		ac.JWTSecret = v
+	}
+	if ac.DBDSN != "" && len(ac.JWTSecret) < MinJWTSecretBytes {
+		return fmt.Errorf(
+			"config: 已配置 %s 但 %s 缺失或过短（当前 %d 字节，至少需要 %d）："+
+				"请生成一个强密钥，例如 `openssl rand -hex 32`。"+
+				"（缺少密钥会让所有已登录用户随机掉线，且症状像网络故障，所以这里拒绝启动。）",
+			envDBDSN, envJWTSecret, len(ac.JWTSecret), MinJWTSecretBytes)
+	}
+	if v := os.Getenv(envAccessTTL); v != "" {
+		d, err := positiveDuration(envAccessTTL, v)
+		if err != nil {
+			return err
+		}
+		if d > 24*time.Hour {
+			return fmt.Errorf("config: %s 不得超过 24h, got %q", envAccessTTL, v)
+		}
+		ac.AccessTTL = d
+	}
+	if v := os.Getenv(envRefreshTTL); v != "" {
+		d, err := positiveDuration(envRefreshTTL, v)
+		if err != nil {
+			return err
+		}
+		if d < MinRefreshTTL || d > MaxRefreshTTL {
+			return fmt.Errorf("config: %s 必须落在 [%s, %s] 区间, got %q",
+				envRefreshTTL, MinRefreshTTL, MaxRefreshTTL, v)
+		}
+		ac.RefreshTTL = d
+	}
+	if v := os.Getenv(envBcryptCost); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < MinBcryptCost || n > MaxBcryptCost {
+			return fmt.Errorf("config: %s 必须是 [%d, %d] 区间内的整数, got %q",
+				envBcryptCost, MinBcryptCost, MaxBcryptCost, v)
+		}
+		ac.BcryptCost = n
+	}
+	if v := os.Getenv(envAuthHashConcurrency); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < MinHashingConcurrency || n > MaxHashingConcurrency {
+			return fmt.Errorf("config: %s 必须是 [%d, %d] 区间内的整数, got %q",
+				envAuthHashConcurrency, MinHashingConcurrency, MaxHashingConcurrency, v)
+		}
+		ac.HashingConcurrency = n
+	}
+	if v := os.Getenv(envWSTicketTTL); v != "" {
+		d, err := positiveDuration(envWSTicketTTL, v)
+		if err != nil {
+			return err
+		}
+		if d > 10*time.Minute {
+			return fmt.Errorf("config: %s 不得超过 10m（票据只是「取票到建连」的窗口）, got %q", envWSTicketTTL, v)
+		}
+		ac.WSTicketTTL = d
 	}
 	return nil
 }

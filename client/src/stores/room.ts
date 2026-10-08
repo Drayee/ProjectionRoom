@@ -1,5 +1,6 @@
 import { computed, ref, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
+import { useAuthStore } from './auth'
 import { useSignaling } from '../composables/useSignaling'
 import { useMediaIndex } from '../composables/useMediaIndex'
 import { useChunkStore } from '../composables/useChunkStore'
@@ -167,6 +168,13 @@ function newClockEpoch(): string {
 }
 
 export const useRoomStore = defineStore('room', () => {
+  /**
+   * 账号会话。**只**用于给"建房 / 重建房间"那一条 REST 请求带上 access token
+   *（T8 起 `POST /api/rooms` 挂了 RequireAuth）；房间的实时链路（WS / WebRTC / 分片）
+   * 与账号无关 —— 观众本来就不需要登录。
+   */
+  const auth = useAuthStore()
+
   // ---------- 房间状态 ----------
   const credentials = ref<JoinCredentials | null>(null)
   const joined = ref(false)
@@ -836,16 +844,24 @@ export const useRoomStore = defineStore('room', () => {
         if (!isHost.value) return
 
         try {
-          const resp = await fetch('/api/rooms', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              roomId: creds.roomId,
-              password: creds.password,
-              // 码率估计交给已知的分片索引：省略也行，服务端会退回默认值。
-              streamBps: mediaIndex.value?.bitrateBps ?? 0,
-            }),
-          })
+          // 建房要登录：带 access token，401 时由 authedFetch 自动刷新一次再重试。
+          // `redirectOnAuthFailure: false` 是刻意的 —— 把主播从房间里拽到登录页等于
+          // **顺手掐掉整个房间**（他自己是唯一的源），比"这次重建失败"严重得多；
+          // 失败就走下面的重试与"房间重建失败"文案。
+          const resp = await auth.authedFetch(
+            '/api/rooms',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                roomId: creds.roomId,
+                password: creds.password,
+                // 码率估计交给已知的分片索引：省略也行，服务端会退回默认值。
+                streamBps: mediaIndex.value?.bitrateBps ?? 0,
+              }),
+            },
+            { redirectOnAuthFailure: false },
+          )
           if (resp.ok || resp.status === 409) {
             // 409 = 房间已存在（ErrRoomExists），与 200 等价地视为"房间已就绪"。
             noteLifecycle(`房间 ${creds.roomId} 已就绪（HTTP ${resp.status}），重新进房`)

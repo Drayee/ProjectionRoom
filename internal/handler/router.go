@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/service/ice"
 	"ProjectionRoom/internal/service/segment"
+	"ProjectionRoom/internal/store"
 	"ProjectionRoom/internal/usecase"
 )
 
@@ -37,12 +39,103 @@ var newICERegistry = func(cfg *config.Config) *ice.Registry {
 // createRoomCodeHint 是房间码非法时的用户可读文案（REST 与 WS 共用，保证两条入口口径一致）。
 const createRoomCodeHint = "房间码必须是 4-12 位大写字母或数字（A-Z、0-9）"
 
+// RoomMetaSink 是"房间元数据异步落库"的能力（ACCOUNTS §9 的**事件类**：不可丢、
+// 有界队列、投递即返回）。
+//
+// 为什么要一个接口而不是直接用 *store.Writer：
+//   - 写作业的签名是 func(ctx, *gorm.DB) error —— 本层不 import gorm（同 errors.go
+//     里 storeNotFound 别名的那条理由：让"handler 依赖了什么"一眼可读）；
+//   - 建房路径的"元数据投递"因此可以在单测里断言（假 sink 记一次投递），
+//     真库验证留给 store 自己的用例。
+type RoomMetaSink interface {
+	// SubmitRoomMeta 投递一次 rooms_meta 的 upsert；
+	// 返回 false = 被丢弃（队列满 / 写入器已关闭）。
+	SubmitRoomMeta(meta *store.RoomMeta) bool
+}
+
+// roomMetaSink 是 RoomMetaSink 的生产实现。
+type roomMetaSink struct {
+	store  *store.Store
+	writer *store.Writer
+}
+
+// NewRoomMetaSink 构造生产实现；任一依赖为 nil 时返回 nil（调用方按"没有写队列"处理）。
+//
+// 返回 **nil 接口**而不是"一个方法会失败的值"：nil 接口可以被 `sink == nil` 直接判出来，
+// 而"带 nil 指针的非 nil 接口"会让判空失效（那正是这类装配最常见的崩溃来源）。
+func NewRoomMetaSink(st *store.Store, w *store.Writer) RoomMetaSink {
+	if st == nil || w == nil {
+		return nil
+	}
+	return &roomMetaSink{store: st, writer: w}
+}
+
+// SubmitRoomMeta 把一次 upsert 投进事件写队列。
+//
+// 借用 usecase.SubmitAccountJob 做签名翻译（它把 func(ctx) error 翻成写入器要的
+// func(ctx, *gorm.DB) error）：房间元数据与账号事件同属 §9 的"事件类"，
+// 投递语义完全一致（不阻塞调用方、队列满即丢弃、失败重试）。
+func (s *roomMetaSink) SubmitRoomMeta(meta *store.RoomMeta) bool {
+	if s == nil || meta == nil {
+		return false
+	}
+	return usecase.SubmitAccountJob(s.writer, func(ctx context.Context) error {
+		return s.store.UpsertRoomMeta(ctx, meta)
+	})
+}
+
+// submitRoomMeta 在建房成功后投递房间元数据（T8 / ACCOUNTS §6、§9）。
+//
+// 三条取舍：
+//
+//  1. **异步**：元数据不是"能开播"的前提（真相在内存房间里，见不变量 I2），
+//     把它同步写进建房路径等于给建房加一次数据库往返，而 §9 的硬约束是
+//     "任何写库都不出现在 WS/REST 处理路径上"（I4）。
+//  2. **失败不回滚**：投递失败（队列满 / 写入器已关闭 / 装配缺写队列）时**只记日志**。
+//     回滚的代价是"数据库抖动 → 用户建不了房"，而缺一行元数据只影响派生视图
+//     （我的房间、公开房列表的标题）；反过来，回滚也救不了什么：
+//     房间已经在内存里、hostToken 也已下发给客户端，服务端无法把那个房间码收回来。
+//  3. **默认值显式写死**（title=""、is_public=false）：标题与公开性由房主之后
+//     通过 PATCH 修改，建房时不留"未设置"这种第三种状态。
+func submitRoomMeta(sink RoomMetaSink, roomID string, ownerUserID int64, hasPassword bool) {
+	if sink == nil {
+		log.Printf("[WARN] 房间元数据未投递（room=%s owner=%d）：装配里没有事件写队列，房间照常可用",
+			roomID, ownerUserID)
+		return
+	}
+	meta := &store.RoomMeta{
+		RoomID:      roomID,
+		OwnerUserID: ownerUserID,
+		Title:       "",
+		IsPublic:    false,
+		HasPassword: hasPassword,
+	}
+	if !sink.SubmitRoomMeta(meta) {
+		log.Printf("[WARN] 房间元数据入队失败（room=%s owner=%d）：队列满或写入器已关闭，房间照常可用",
+			roomID, ownerUserID)
+	}
+}
+
 // NewRouter 组装 HTTP 路由。
 // 返回 *gin.Engine 让 wire 能直接把它注入 main 的 http.Server。
 //
 // seg 是服务端切片队列；为 nil 时跳过 /api/v1/segment/* 的注册（单测可以只关心信令链路）。
 // 正常装配必须传真实实例，见 cmd/wire.go。
-func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, seg *segment.Queue) *gin.Engine {
+//
+// accountDeps / adminDeps 是**参数**（T8/T9 的收口改造：它们曾经是包级变量）：
+//
+//	为什么要参数化：包级变量是"装配期写一次、此后只读"的隐藏全局状态 ——
+//	它无法在单测里复位（一个用例改了，后面的用例就跟着变），而 handler 恰恰需要
+//	假依赖来覆盖 401/403/503 与建房绑定这些协议面判据。做成参数之后，
+//	生产装配与测试装配走的是同一条注册路径，且没有任何跨用例的状态。
+func NewRouter(
+	cfg *config.Config,
+	hub *service.Hub,
+	rooms *usecase.Manager,
+	seg *segment.Queue,
+	accountDeps AuthDeps,
+	adminDeps AdminDeps,
+) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
 	// S-13：静态根目录的安全校验必须在**启动时**做，而且不能降级成 WARN。
@@ -106,7 +199,18 @@ func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, seg
 	joinLimiter := limiters.NewKeyed(cfg.IPC.JoinFailPerMinute, cfg.IPC.JoinFailBurst)
 
 	api := r.Group("/api")
-	api.POST("/rooms", roomCreateLimiter(createLimiter), createRoomHandler(cfg, rooms, iceReg))
+	// T8 / ACCOUNTS §6：建房必须登录（房主要写进内存房间与 rooms_meta）。
+	//
+	// 注意别和"观众进房"搞混：观众按房间码进房走的是 /ws，**依然免登录**
+	// （那是产品决定，见 ws.go 的游客路径）。
+	//
+	// 顺序（RequireAuth → 限速）：先认证再计入令牌桶，于是"匿名 401 洪水"不消耗
+	// 建房配额，而"拿自己账号反复建房"仍然受每 IP 限速约束（S-3 的口径不变）。
+	api.POST("/rooms",
+		RequireAuth(accountDeps.Service),
+		roomCreateLimiter(createLimiter),
+		createRoomHandler(cfg, rooms, iceReg, accountDeps),
+	)
 	api.GET("/rooms/:roomId", roomInfoHandler(cfg, rooms))
 	api.GET("/ice", func(c *gin.Context) {
 		c.JSON(http.StatusOK, iceReg.Payload())
@@ -115,11 +219,22 @@ func NewRouter(cfg *config.Config, hub *service.Hub, rooms *usecase.Manager, seg
 	// 服务端切片端点（一次性预处理，不参与直播链路，因此不违反不变量 I1）。
 	registerSegmentRoutes(api, seg)
 
+	// 账号层的认证路由（ACCOUNTS §10）。
+	//
+	// 生产路径上它就是下面这个调用：DSN 为空 → 内部直接 return → 这些路由**不注册**
+	// （与 seg == nil 跳过 /api/v1/segment/* 是同一条约定）。
+	registerAccountRoutes(api, accountDeps, cfg)
+
+	// 管理端（ACCOUNTS §8 / T9）。同一条"能力关闭即不注册"的约定；
+	// RequireAuth 用的账号服务与认证路由是同一个实例（见 registerAdminRoutes 的说明）。
+	registerAdminRoutes(api, adminDeps, cfg, accountDeps.Service)
+
 	// 客户端切片器二进制的只读清单：只回 JSON（平台/大小/sha256），
 	// 二进制本身由静态托管 /downloads/<file> 送出，所以这里先于 registerStatic 注册。
 	registerDownloadRoutes(api, cfg)
 
-	r.GET("/ws", wsHandler(cfg, hub, rooms, joinLimiter))
+	// T8：/ws 支持一次性票据（绑定账号 + 封禁拦截）；无票据时是**逐字不变**的游客路径。
+	r.GET("/ws", wsHandler(cfg, hub, rooms, joinLimiter, accountDeps))
 
 	// 静态资源与 SPA 回退必须放在最后：NoRoute 只兜住业务路由之外的请求，
 	// 这样 /api、/ws、/healthz 永远优先（详见 static.go）。
@@ -234,8 +349,17 @@ type createRoomRequest struct {
 	StreamBps int64  `json:"streamBps"`
 }
 
-func createRoomHandler(cfg *config.Config, rooms *usecase.Manager, iceReg *ice.Registry) gin.HandlerFunc {
+func createRoomHandler(cfg *config.Config, rooms *usecase.Manager, iceReg *ice.Registry, deps AuthDeps) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// 房主身份只来自**校验过的 access token**（RequireAuth 已挡掉匿名请求）。
+		// 绝不从请求体/查询串取 ownerUserId：那等于让任何人把房间挂到别人名下。
+		// 这道判空是"中间件被绕过"的兜底（fail closed，返回 401 而不是当匿名处理）。
+		owner, ok := CurrentUser(c)
+		if !ok {
+			abortUnauthorized(c, CodeUnauthorized, "建房需要登录")
+			return
+		}
+
 		var req createRoomRequest
 		// 允许空 body：等价于"自动生成房间码、无密码、用默认码率估计"。
 		if c.Request.ContentLength > 0 {
@@ -253,12 +377,15 @@ func createRoomHandler(cfg *config.Config, rooms *usecase.Manager, iceReg *ice.R
 			return
 		}
 
-		created, hostToken, err := rooms.Create(roomID, req.Password, req.StreamBps)
+		created, hostToken, err := rooms.CreateOwned(roomID, req.Password, req.StreamBps, owner.ID)
 		if err != nil {
 			status, code, message := roomErrorResponse(err)
 			c.JSON(status, gin.H{"error": message, "code": code})
 			return
 		}
+
+		// 房间元数据异步落库（§9 的事件类）。投递失败不回滚建房，理由见 submitRoomMeta。
+		submitRoomMeta(deps.RoomMeta, created.ID, owner.ID, req.Password != "")
 
 		resp := gin.H{
 			"roomId":   created.ID,

@@ -147,6 +147,13 @@ type Room struct {
 	ID        string
 	Password  string
 	CreatedAt time.Time
+	// ownerUserID 是建房者（0 = 无房主：游客路径或单测直接建房）。
+	//
+	// ACCOUNTS §6：REST 建房必须登录，房主在**内存房间**上就确定下来，
+	// 同时异步落 rooms_meta。为什么不等于"主播"：主播位由 hostToken 决定（S-7），
+	// 房主是"谁建的房"（用于"我的房间"与后续的房间管理），两者可以不同人。
+	// 与 ID/Password 一样是构造后不再变更的只读字段。
+	ownerUserID int64
 
 	HostID string
 	// StreamBps 是容量模型的码率输入：主播发布索引前用配置估计值，之后用索引里的实测码率。
@@ -208,6 +215,9 @@ type Room struct {
 	// lastDegradedReplanAt 是上一次因卡顿触发换路的时间，用于给换路限流。
 	lastDegradedReplanAt time.Time
 }
+
+// OwnerUserID 返回房主账号 id（0 = 没有房主）。见 ownerUserID 的说明。
+func (r *Room) OwnerUserID() int64 { return r.ownerUserID }
 
 // Info 返回某个成员的信息。
 func (r *Room) Info(memberID string) (model.MemberInfo, bool) {
