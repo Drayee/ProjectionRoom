@@ -226,9 +226,17 @@ func newAdminDeps(
 	// Users/Writer 来自 dbResources：账号能力开启时它们必然非 nil（见 newDBResources）。
 	if res.Store != nil {
 		deps.Users = res.Store
+		// 二次（T4）：管理端房间列表/强关/下架要写的元数据，以及审计读取。
+		// 两者都由 *store.Store 满足（方法集逐字匹配 handler 的窄接口）。
+		deps.RoomMeta = res.Store
+		deps.Audit = res.Store
+		deps.AuditWriter = res.Store
 	}
-	if res.Writer != nil {
-		deps.Writer = res.Writer
+	// 审计的异步投递出口：usecase.WriterJobs 同时满足 AdminWriterStats（指标）
+	// 与 AdminAuditSink（无 gorm 参数的投递），装配处因此只需写一次。
+	if jobs := usecase.NewWriterJobs(res.Writer); jobs != nil {
+		deps.Writer = jobs
+		deps.AuditSink = jobs
 	}
 	deps.Accounts = svc
 	if hub != nil {
@@ -288,6 +296,12 @@ func newEngineDeps(
 	// 建房时的 rooms_meta 异步投递（T8）。返回 nil 接口表示"没有写队列"，
 	// 建房路径会据此只记一条日志（元数据缺失不影响开播）。
 	deps.RoomMeta = handler.NewRoomMetaSink(res.Store, res.Writer)
+	// 二次（T2）：公开房列表取房主昵称的**窄出口**（只返回一个 string）。
+	// nil 表示"查不了昵称"，列表会把 ownerName 显示成空串 —— 与"账号能力关闭"
+	// 时的降级路径是同一个方向，因此不需要在这里判错。
+	if names := usecase.NewProfileNameLookup(res.Store); names != nil {
+		deps.ProfileNames = names
+	}
 	return deps, nil
 }
 

@@ -219,6 +219,14 @@ type Room struct {
 // OwnerUserID 返回房主账号 id（0 = 没有房主）。见 ownerUserID 的说明。
 func (r *Room) OwnerUserID() int64 { return r.ownerUserID }
 
+// HasPassword 返回本房间是否设了密码（T2/T3 需要判断"这是不是一个密码房"）。
+//
+// 为什么给一个只回答布尔的出口，而不是让调用方读 r.Password != ""：
+// 密码原文是房间对象上最敏感的那个字段，而调用方（handler）只需要知道"有没有"。
+// 多一个只读方法，就让"不小心把密码带出这个包"从"需要自觉"变成"需要写出来"。
+// Password 是构造后不再变更的只读字段，因此这里不需要加锁。
+func (r *Room) HasPassword() bool { return r.Password != "" }
+
 // Info 返回某个成员的信息。
 func (r *Room) Info(memberID string) (model.MemberInfo, bool) {
 	r.mu.Lock()

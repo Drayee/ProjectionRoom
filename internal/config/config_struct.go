@@ -171,6 +171,29 @@ type IPCConfig struct {
 	// 且刷新本身不跑 bcrypt，代价只是一次数据库查询。
 	RefreshPerMinute float64
 	RefreshBurst     int
+
+	// PublicRoomsPerMinute / PublicRoomsBurst 是 GET /api/public-rooms 的每 IP 限速
+	//（PR_PUBLIC_ROOMS_PER_MINUTE、PR_PUBLIC_ROOMS_BURST，默认 60/分钟、容量 20）。
+	//
+	// 为什么需要它（T2）：这是二期里**唯一免登录、且会触发数据库查询**的读取端点。
+	// 没有它时，一个匿名 IP 就能持续拉列表，每次都换来一次 rooms_meta 批量查询
+	// 与一次内存房间快照遍历；而列表页本身是"翻页看"的形态，60/分钟对任何正常
+	// 浏览都过剩（那是每分钟 60 次翻页）。
+	// 容量取 20：列表页首屏会有"进页面 + 立刻翻一页 + 改筛选重查"这种小簇，
+	// 容量太小会让正常用户在头几秒就被 429。
+	PublicRoomsPerMinute float64
+	PublicRoomsBurst     int
+
+	// AdminLogsPerMinute / AdminLogsBurst 是 GET /api/admin/logs 的每 IP 限速
+	//（PR_ADMIN_LOGS_PER_MINUTE、PR_ADMIN_LOGS_BURST，默认 60/分钟、容量 10）。
+	//
+	// 这是补一期自报的缺口：日志端点把服务端环形缓冲整段交出去，是一条读取面，
+	// 而它此前**没有任何限速**。口径取"管理员手点刷新"的量级（一分钟十几次），
+	// 容量 10 让"连点几次 + 分页"仍然顺畅。
+	// 注意它按 IP 计数而不是按管理员账号：管理端目前是一台机器上的一个运维入口，
+	// 按账号计数需要在这里再引入一个维度，而收益（防单账号刷）在本期并不成立。
+	AdminLogsPerMinute float64
+	AdminLogsBurst     int
 }
 
 // AuthConfig 是账号层的数据库与凭据配置（ACCOUNTS §5）。

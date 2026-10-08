@@ -336,9 +336,15 @@ func newAdminDeps(
 
 	if res.Store != nil {
 		deps.Users = res.Store
+
+		deps.RoomMeta = res.Store
+		deps.Audit = res.Store
+		deps.AuditWriter = res.Store
 	}
-	if res.Writer != nil {
-		deps.Writer = res.Writer
+
+	if jobs := usecase.NewWriterJobs(res.Writer); jobs != nil {
+		deps.Writer = jobs
+		deps.AuditSink = jobs
 	}
 	deps.Accounts = svc
 	if hub != nil {
@@ -396,6 +402,10 @@ func newEngineDeps(
 	}
 
 	deps.RoomMeta = handler.NewRoomMetaSink(res.Store, res.Writer)
+
+	if names := usecase.NewProfileNameLookup(res.Store); names != nil {
+		deps.ProfileNames = names
+	}
 	return deps, nil
 }
 

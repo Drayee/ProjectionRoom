@@ -100,6 +100,14 @@ const (
 	envAuthRegisterBurst     = "PR_AUTH_REGISTER_BURST"
 	envAuthRefreshPerMinute  = "PR_AUTH_REFRESH_PER_MINUTE"
 	envAuthRefreshBurst      = "PR_AUTH_REFRESH_BURST"
+
+	// —— 二期（T2）的公开房列表限速：同样并入 IPCConfig，理由见上面的说明。
+	envPublicRoomsPerMinute = "PR_PUBLIC_ROOMS_PER_MINUTE"
+	envPublicRoomsBurst     = "PR_PUBLIC_ROOMS_BURST"
+
+	// —— 一期缺口的补齐：管理端日志端点的每 IP 限速。
+	envAdminLogsPerMinute = "PR_ADMIN_LOGS_PER_MINUTE"
+	envAdminLogsBurst     = "PR_ADMIN_LOGS_BURST"
 )
 
 // —— 账号层（ACCOUNTS §5）的默认值与允许范围。
@@ -135,6 +143,12 @@ const (
 	DefaultAuthRegisterBurst     = 3
 	DefaultAuthRefreshPerMinute  = 30
 	DefaultAuthRefreshBurst      = 10
+	// 公开房列表的每 IP 令牌桶默认值（依据见 IPCConfig.PublicRoomsPerMinute）。
+	DefaultPublicRoomsPerMinute = 60
+	DefaultPublicRoomsBurst     = 20
+	// 管理端日志端点的每 IP 令牌桶默认值（依据见 IPCConfig.AdminLogsPerMinute）。
+	DefaultAdminLogsPerMinute = 60
+	DefaultAdminLogsBurst     = 10
 )
 
 // DefaultPackSize 是分片打包的默认粒度（每个 .bin 容纳多少片）。
@@ -371,6 +385,12 @@ func Default() *Config {
 			RegisterBurst:     DefaultAuthRegisterBurst,
 			RefreshPerMinute:  DefaultAuthRefreshPerMinute,
 			RefreshBurst:      DefaultAuthRefreshBurst,
+
+			PublicRoomsPerMinute: DefaultPublicRoomsPerMinute,
+			PublicRoomsBurst:     DefaultPublicRoomsBurst,
+
+			AdminLogsPerMinute: DefaultAdminLogsPerMinute,
+			AdminLogsBurst:     DefaultAdminLogsBurst,
 		},
 		Security: SecurityConfig{
 			Headers: true,
@@ -868,6 +888,8 @@ func applyIPCEnv(ic *IPCConfig) error {
 		{envAuthLoginPerMinute, &ic.LoginPerMinute, 0.001, MaxRoomCreatePerMinute},
 		{envAuthRegisterPerMinute, &ic.RegisterPerMinute, 0.001, MaxRoomCreatePerMinute},
 		{envAuthRefreshPerMinute, &ic.RefreshPerMinute, 0.001, MaxRoomCreatePerMinute},
+		{envPublicRoomsPerMinute, &ic.PublicRoomsPerMinute, 0.001, MaxRoomCreatePerMinute},
+		{envAdminLogsPerMinute, &ic.AdminLogsPerMinute, 0.001, MaxRoomCreatePerMinute},
 	}
 	for _, tc := range cases {
 		v := os.Getenv(tc.name)
@@ -893,6 +915,8 @@ func applyIPCEnv(ic *IPCConfig) error {
 		{envAuthLoginBurst, &ic.LoginBurst},
 		{envAuthRegisterBurst, &ic.RegisterBurst},
 		{envAuthRefreshBurst, &ic.RefreshBurst},
+		{envPublicRoomsBurst, &ic.PublicRoomsBurst},
+		{envAdminLogsBurst, &ic.AdminLogsBurst},
 	}
 	for _, tc := range bursts {
 		v := os.Getenv(tc.name)

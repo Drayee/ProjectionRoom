@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -145,4 +146,120 @@ func (s *Store) ListPublicRoomIDs(ctx context.Context, limit int) ([]string, err
 		return nil, fmt.Errorf("store: 查询公开房间列表失败: %w", err)
 	}
 	return ids, nil
+}
+
+// ListRoomMetas 按房间码批量取元数据，返回 room_id → 元数据 的映射（T1）。
+//
+// 为什么是批量而不是循环调用 RoomMetaByID：公开房列表（T2）与管理端房间列表（T4）
+// 都是"内存里 N 个房间 → 补 N 条元数据"的形态。逐个查会变成 N 次往返，
+// 而 N 的上限就是同时在册房间数（PR_MAX_ROOMS，默认 256）——
+// 一次 IN 查询与 256 次查询的差别在这个端点上就是"能不能用"的差别。
+//
+// 三条约定：
+//   - **空 ids 返回空 map 且不报错**：调用方（列表端点）经常会拿到空集合，
+//     把它当成错误会让"当前没有房间"变成一个 500；
+//   - **缺行的房间码不出现在 map 里**（不是补零值）：调用方据此区分
+//     "元数据缺失，需要降级 + 自愈投递"与"元数据存在但字段为空"；
+//   - ids 会被去重（重复的房间码在 IN 列表里既无意义又浪费）。
+func (s *Store) ListRoomMetas(ctx context.Context, ids []string) (map[string]RoomMeta, error) {
+	out := make(map[string]RoomMeta, len(ids))
+	if len(ids) == 0 {
+		// 空集合：不发查询，也不报错。
+		return out, nil
+	}
+
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return out, nil
+	}
+
+	// IN 列表走参数绑定（GORM 展开成 $1..$n），房间码从不进 SQL 文本。
+	rows := make([]RoomMeta, 0, len(unique))
+	if err := s.db.WithContext(ctx).Model(&RoomMeta{}).
+		Where("room_id IN ?", unique).
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("store: 批量查询房间元数据失败: %w", err)
+	}
+	for _, m := range rows {
+		out[m.RoomID] = m
+	}
+	return out, nil
+}
+
+// RoomMetaQuery 是管理端房间列表的查询条件（T1 / §8）。
+//
+// 三个可选筛选各自独立，互不牵连：Search 是子串匹配（房间码或标题），
+// PublicOnly / PrivateOnly 是公开性筛选。**两者同时为 true 时返回空集**，
+// 不做"取并集"这种自作聪明的解释 —— "只要公开"与"只要非公开"的交集就是空，
+// 让调用方看到空结果比让它在两个互相矛盾的条件下拿到一堆数据更诚实。
+type RoomMetaQuery struct {
+	Search string
+	// PublicOnly 只返回 is_public = true 的行。
+	PublicOnly bool
+	// PrivateOnly 只返回 is_public = false 的行。
+	PrivateOnly bool
+	// Limit <= 0 取默认值（50），> 200 被截断；Offset < 0 视为 0（与 store.clampPage 同口径）。
+	Limit  int
+	Offset int
+}
+
+// QueryRoomMetas 按筛选条件分页返回房间元数据与其总数（管理端房间列表，T4）。
+//
+// 排序固定为 last_seen_at DESC, room_id ASC：
+//
+//   - 第一顺位是"最近还活着的房间更有价值"（与 ListPublicRoomIDs 同口径）；
+//   - **必须补第二顺位**：last_seen_at 是 timestamptz，同一次测试里写入的多行很可能
+//     落在同一微秒上，只按它排序时 PostgreSQL 的返回顺序不保证稳定 ——
+//     那会让 offset 分页出现"第 2 页重复第 1 页的某一行"这种查不出来的抖动。
+//     room_id 是主键（唯一、单调可比），加上它之后顺序完全确定。
+//
+// 返回空切片而不是 nil：调用方（JSON 列表）不必再判空。
+func (s *Store) QueryRoomMetas(ctx context.Context, q RoomMetaQuery) ([]RoomMeta, int64, error) {
+	limit, offset := clampPage(q.Limit, q.Offset)
+
+	// filter 每次返回一个全新的查询：Count 与 Find 必须各自构造
+	//（复用同一个 *gorm.DB 会把 Count 的 SELECT 串进 Find，见 ListUsers 的同一条说明）。
+	filter := func() *gorm.DB {
+		tx := s.db.WithContext(ctx).Model(&RoomMeta{})
+		if pattern := likePattern(q.Search); pattern != "" {
+			tx = tx.Where(`room_id ILIKE ? ESCAPE '\' OR title ILIKE ? ESCAPE '\'`, pattern, pattern)
+		}
+		if q.PublicOnly && q.PrivateOnly {
+			// 互斥条件同时成立：交集为空。用一条恒假条件表达，而不是在 Go 侧提前返回，
+			// 这样"为什么是空"在下一次读代码时仍然是显式的（而不是靠记得某个 if 分支）。
+			tx = tx.Where("1 = 0")
+		} else if q.PublicOnly {
+			tx = tx.Where("is_public = ?", true)
+		} else if q.PrivateOnly {
+			tx = tx.Where("is_public = ?", false)
+		}
+		return tx
+	}
+
+	var total int64
+	if err := filter().Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("store: 统计房间元数据数失败: %w", err)
+	}
+
+	rows := make([]RoomMeta, 0, limit)
+	if err := filter().
+		Order("last_seen_at DESC, room_id ASC").
+		Limit(limit).
+		Offset(offset).
+		Find(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("store: 查询房间元数据列表失败: %w", err)
+	}
+	return rows, total, nil
 }

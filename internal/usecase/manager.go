@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -282,6 +283,165 @@ func (m *Manager) RoomCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.rooms)
+}
+
+// RoomSnapshot 是房间**实时状态**的只读投影（T1），供公开房列表（T2，免登录）
+// 与管理端房间列表（T4）使用。
+//
+// 为什么单独一个类型而不是直接暴露 *Room：*Room 带 mu、Password、members、
+// hostToken 等一切内部状态；把指针交给 handler 之后，"响应里不会出现密码"
+// 就只能靠调用方自觉。这个类型**在字段层面**就不含密码与成员明细，
+// 于是"泄露"这件事在类型系统里就不可能发生（与 usecase.Profile 之于 PasswordHash 同一条理由）。
+//
+// HasPassword 仍然要外露：它是列表页"🔒"标记的依据（§6 明说列表要能看出密码房），
+// 而它只是一个布尔量，不构成密码面。
+type RoomSnapshot struct {
+	ID          string
+	OwnerUserID int64
+	HasPassword bool
+	MemberCount int
+	// HostOnline 表示此刻**真有**主播在房里；HostInGrace 表示主播已断线、
+	// 房间处于离线宽限期内。两者互斥。
+	//
+	// 为什么要把"宽限期内"单独标出来（§6）：宽限期内的房间仍然可以按码进入
+	//（成员表/播放状态/分片索引都还在），所以列表里必须算它"存在"，
+	// 但观众有权知道此刻房里没有主播 —— 否则点进去看到的是"主播尚未进房"。
+	HostOnline  bool
+	HostInGrace bool
+	MaxDepth    int
+	// PlayingIndex 是主播已发布的播放 seq（0 = 还没下发过任何控制指令）。
+	PlayingIndex int64
+}
+
+// ListRooms 返回全部在册房间的快照（T1）。
+//
+// **只在 m.mu 下取一次快照，不做任何 DB 访问**：
+//   - 这条约束是给公开房列表用的 —— 它是一个免登录端点，若它触发数据库往返，
+//     匿名流量就能直接把库拖垮（I4 的另一面：读也不该在热路径上放大）；
+//   - 锁序与仓库其余部分一致（m.mu → r.mu，见 closeRoomIf 的说明），
+//     持 m.mu.RLock 期间再取 r.mu 不会与任何写路径形成环：写路径同样是 m.mu 先行。
+//
+// 返回的切片是**全新分配**的：调用方（或它启动的 goroutine）持有它时，
+// 后续任何 SetRoomMeta / Join / Leave / 关房都不会再改动里面的值。
+func (m *Manager) ListRooms() []RoomSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]RoomSnapshot, 0, len(m.rooms))
+	for _, r := range m.rooms {
+		if snap, ok := readRoomSnapshot(r); ok {
+			out = append(out, snap)
+		}
+	}
+	return out
+}
+
+// readRoomSnapshot 读取一个房间的快照；房间已被销毁（closed）时返回 ok=false。
+//
+// 为什么必须判 closed：从 m.rooms 里"摘出"与置 closed 是同一个临界区里成对发生的
+// （见 closeRoomIf / Leave），因此拿到指针、还没拿到 r.mu 的那一瞬间，
+// 房间可能已经关掉了。不判它就会把"刚被管理员强关的房间"继续列出来。
+// 它与 readRoomMetaSnapshot 共用这条读法，保证两个列表端点看到的是同一套事实。
+func readRoomSnapshot(r *Room) (RoomSnapshot, bool) {
+	if r == nil {
+		return RoomSnapshot{}, false
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return RoomSnapshot{}, false
+	}
+	return RoomSnapshot{
+		ID:          r.ID,
+		OwnerUserID: r.ownerUserID,
+		HasPassword: r.Password != "",
+		MemberCount: len(r.members),
+		// HostOnline 取 HostID（主播位有人的**唯一**依据，见 S-7）；
+		// hostOffline 是宽限期标志，两者在正常路径下互斥。
+		HostOnline:   r.HostID != "",
+		HostInGrace:  r.hostOffline,
+		MaxDepth:     r.maxDepth(),
+		PlayingIndex: r.Seq,
+	}, true
+}
+
+// ErrNotRoomOwner 表示调用者不是该房间的房主（房主改标题/公开性时的授权判据）。
+var ErrNotRoomOwner = errors.New("room: 只有房主可以修改房间信息")
+
+// ErrRoomChanged 表示内存里的房间已经换了房主（房间码被复用后重新建房）。
+//
+// 它存在的理由与"身份核对"这条既有约定一致（见 Leave 里 cur == r 的那次比较）：
+// 房间码是可复用的，而 handler 的"查房主 → 授权 → 写内存"是三个独立步骤。
+// 中间若发生"旧房间被销毁、新房间用同一个码建起来"，不核对就会把新房主的房间
+// 按旧房主的意图改掉（甚至改名）。
+var ErrRoomChanged = errors.New("room: 房间已重建，请刷新后重试")
+
+// ErrBadRoomMeta 表示房间元数据的修改请求本身不合法（例如 title 与 isPublic 都没给）。
+var ErrBadRoomMeta = errors.New("room: 至少要指定 title 或 isPublic 之一")
+
+// SetRoomMeta 在**内存侧**修改房主可改的房间元数据（T1 / T3）。
+//
+// 授权判据是 ownerUserID == actorUserID（不是"是不是主播"）：主播位由 hostToken
+// 决定（S-7），而房主是"谁建的房"（§6），两者可以是不同人；房间标题与公开性是
+// 房主的资产，与谁此刻在推流无关。
+//
+// 注意它**不碰数据库**：rooms_meta 的落库是 §9 的"事件类"，由调用方（handler）
+// 走异步 RoomMetaSink 投递 —— usecase 只向接口投递事件，不持有写队列（I4）。
+//
+// 房间已被销毁 / 从未存在 → ErrNotFound（与房间用例的既有 not-found 语义一致）。
+func (m *Manager) SetRoomMeta(roomID string, actorUserID int64, title *string, isPublic *bool) error {
+	if title == nil && isPublic == nil {
+		return ErrBadRoomMeta
+	}
+
+	r, ok := m.Get(roomID)
+	if !ok {
+		return ErrNotFound
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return ErrNotFound
+	}
+	if actorUserID <= 0 || r.ownerUserID != actorUserID {
+		return ErrNotRoomOwner
+	}
+
+	// 这两项**在内存房间上本来就没有副本**：标题与公开性是 rooms_meta 的事实
+	//（见 RoomMeta 的说明），权威副本在库里，handler 拿到本次读到的元数据后
+	// 用 UpsertRoomMeta 整体覆盖它。
+	//
+	// 为什么这里不另存一份"内存侧的公开性"（曾考虑过）：那会立刻产生**两个 owner**——
+	// 库里一份、房间对象里一份。重启后内存那份消失、覆盖后两处不一致，
+	// 而"列表里这个房间到底是不是公开的"就会取决于读的是哪一份。
+	// 这个函数因此只负责**只有内存才答得出来**的那部分判据：
+	// 房间是否仍然存在、以及调用者是不是它的房主。
+	_ = title
+	_ = isPublic
+	return nil
+}
+
+// CloseRoomByAdmin 是 closeRoom 的**受控导出**（T1 / T4 的强制关闭）。
+//
+// 为什么必须是"导出同一个实现"而不是复制一份逻辑：关房这件事有三条不变式
+// （摘出 m.rooms 与置 closed 成对、终止宽限定时器、作废 hostToken），
+// 任何一处漏掉都会留下"房间已被关掉但还能被加入/还能用旧令牌抢主播位"这种状态。
+// 走同一条 closeRoomIf 路径，就等于这些不变式只有一处实现。
+//
+// 与后台回收的区别只在**理由文本**上（reason 会广播给房内的连接）：
+// 观众看到的应该是"管理员关闭了房间"，而不是"房间已空置"。
+func (m *Manager) CloseRoomByAdmin(roomID, reason string) error {
+	// 先做一次存在性判定：closeRoomIf 对不存在的房间是静默 no-op（后台清扫需要它这样），
+	// 而管理端的强关必须能区分"关掉了"与"本来就没了"（否则 404 就永远返回不出来）。
+	if _, ok := m.Get(roomID); !ok {
+		return ErrNotFound
+	}
+	m.closeRoom(roomID, reason)
+	return nil
 }
 
 // newHostToken 生成 32 字节（64 位十六进制）的主播复位令牌。

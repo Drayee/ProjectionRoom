@@ -139,3 +139,120 @@ func SubmitAccountJob(w *store.Writer, fn func(ctx context.Context) error) bool 
 		return fn(ctx)
 	})
 }
+
+// SubmitWriterJob 让 *store.Writer **直接**满足 handler 的 AdminAuditSink
+// （SubmitJob(func(ctx) error) bool）。
+//
+// 为什么需要它（而不是让 handler 拿 *store.Writer 自己调 Submit）：
+// handler 从一期起就不 import gorm（见 handler/errors.go 里 storeNotFound 别名的说明），
+// 而 Submit 的参数类型是 func(ctx, *gorm.DB) error。这个一行包装把 GORM 挡在
+// 已经认识它的那一层（本文件是本包唯一 import gorm 的文件），
+// 于是"审计由谁写、写几次"在 handler 里仍然只表现为一次 SubmitJob 调用。
+func SubmitWriterJob(w *store.Writer, fn func(ctx context.Context) error) bool {
+	return SubmitAccountJob(w, fn)
+}
+
+// WriterJobs 是给 handler 用的**写队列出口**：指标 + 无 gorm 参数的投递。
+//
+// 为什么把它做成一个类型而不是让 handler 拿 *store.Writer：
+// handler.AdminWriterStats 需要 QueueLen/Stats，handler.AdminAuditSink 需要 SubmitJob，
+// 两者都是同一个对象的两个面。让本类型的**方法集**同时满足它们，
+// 装配处就只需要写一次 deps.Writer = usecase.NewWriterJobs(res.Writer)。
+//
+// 它零语义、零状态（只持一个指针），因此按值/按指针传递都安全。
+type WriterJobs struct {
+	w *store.Writer
+}
+
+// NewWriterJobs 构造写队列出口；w 为 nil 时返回 nil（调用方按"没有写队列"处理）。
+func NewWriterJobs(w *store.Writer) *WriterJobs {
+	if w == nil {
+		return nil
+	}
+	return &WriterJobs{w: w}
+}
+
+// SubmitJob 投递一个"只吃 context"的作业（签名翻译见 SubmitAccountJob）。
+func (j *WriterJobs) SubmitJob(fn func(ctx context.Context) error) bool {
+	if j == nil {
+		return false
+	}
+	return SubmitWriterJob(j.w, fn)
+}
+
+// QueueLen 转发写入器的队列长度指标（瞬时 gauge）。
+func (j *WriterJobs) QueueLen() int {
+	if j == nil || j.w == nil {
+		return 0
+	}
+	return j.w.QueueLen()
+}
+
+// Stats 转发写入器的累计统计指标。
+func (j *WriterJobs) Stats() store.WriterStats {
+	if j == nil || j.w == nil {
+		return store.WriterStats{}
+	}
+	return j.w.Stats()
+}
+
+// Writer 返回被包装的写入器（装配层排关闭顺序时用）。
+func (j *WriterJobs) Writer() *store.Writer {
+	if j == nil {
+		return nil
+	}
+	return j.w
+}
+
+// ProfileNameLookup 是"取昵称"的窄出口（二期 T2 的公开房列表用）。
+//
+// 它为什么必须是**独立于 usecase.Profile** 的一个类型：Profile 里带 email /
+// role / status（那是账号档案的面），而公开房列表只需要一个字符串。
+// 让 handler 拿到的唯一形态就是"一个 int64 → 一个 string"，
+// 于是"列表响应里不会出现房主邮箱/角色/状态"这件事在类型层面成立，
+// 而不是靠"记得别把那几个字段写进响应"。
+//
+// 实现细节：它走 store.UserByID（既有只读方法，返回完整 *store.User）。
+//
+//	为什么不用一条只 SELECT display_name 的自定义查询：那需要改动 store 的文件面
+//	（本期范围冻结在 roommeta.go 一个文件）。这里如实记录代价：昵称查询会多读
+//	几列（含 password_hash）到**进程内存**，但它一步都没有离开本函数 ——
+//	返回给调用方的只有一个 string。数据库往返次数、查询数都没有变。
+//	若将来想要"连内存都不经过"，正确的做法是在 store 侧加一个
+//	DisplayNameByID(ctx, id) (string, error)（带单列 Pluck），本函数改调它即可。
+type ProfileNameLookup struct {
+	store *store.Store
+}
+
+// NewProfileNameLookup 构造昵称出口。st 为 nil 时返回 nil（调用方按"查不了昵称"处理：
+// 公开房列表会把 ownerName 显示成空串，而不是报错）。
+func NewProfileNameLookup(st *store.Store) *ProfileNameLookup {
+	if st == nil {
+		return nil
+	}
+	return &ProfileNameLookup{store: st}
+}
+
+// ProfileNameByID 返回账号的昵称。
+//
+// 账号不存在时返回空串 + nil：调用方（公开房列表）要的是"显示什么"，
+// 而"房主账号已被删除"这件事在那一层没有任何可操作的差别 ——
+// 把它们合成一个错误会让列表因为一个已删除的房主而整体失败。
+//
+// 真正的查询错误（连接断了/超时）原样返回，让调用方能记一条可排查的日志。
+func (p *ProfileNameLookup) ProfileNameByID(ctx context.Context, id int64) (string, error) {
+	if p == nil || p.store == nil || id <= 0 {
+		return "", nil
+	}
+	u, err := p.store.UserByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if u == nil {
+		return "", nil
+	}
+	return u.DisplayName, nil
+}

@@ -41,6 +41,8 @@ func clearAuthEnv(t *testing.T) {
 		envAuthLoginPerMinute, envAuthLoginBurst,
 		envAuthRegisterPerMinute, envAuthRegisterBurst,
 		envAuthRefreshPerMinute, envAuthRefreshBurst,
+		envPublicRoomsPerMinute, envPublicRoomsBurst,
+		envAdminLogsPerMinute, envAdminLogsBurst,
 	} {
 		unsetEnv(t, name)
 	}

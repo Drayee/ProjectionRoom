@@ -229,6 +229,23 @@ func NewRouter(
 	// RequireAuth 用的账号服务与认证路由是同一个实例（见 registerAdminRoutes 的说明）。
 	registerAdminRoutes(api, adminDeps, cfg, accountDeps.Service)
 
+	// 二期（T2/T3）：公开房列表（免登录）与房主改房间元数据（RequireAuth）。
+	//
+	// 依赖来自两条既有链路，**不新增 NewRouter 的参数位**（硬约束）：
+	//   - rooms（usecase.Manager）提供内存实况（ListRooms / Get / SetRoomMeta / CloseRoomByAdmin）；
+	//   - accountDeps.Store 提供 rooms_meta 的读写与房主昵称查询；
+	//   - accountDeps.RoomMeta 是一期的异步落库出口（§9 的事件类）。
+	//
+	// 顺序说明：写端点必须在只读端点之后挂载，这样 GET /api/rooms/:roomId（既有）
+	// 与 GET /api/public-rooms 的路径不会互相遮蔽（gin 的路由树按段匹配，两条不同路径本就不冲突，
+	// 但把同一前缀下的读与写按"读在写之前"排列可以让注册表读起来更符合直觉）。
+	registerPublicRoomRoutes(api, publicRoomDeps(rooms, accountDeps, adminDeps), cfg)
+	registerRoomMetaRoutes(api, RoomMetaDeps{
+		Rooms: rooms,
+		Meta:  roomMetaReader(accountDeps, adminDeps),
+		Sink:  accountDeps.RoomMeta,
+	}, cfg, accountDeps.Service)
+
 	// 客户端切片器二进制的只读清单：只回 JSON（平台/大小/sha256），
 	// 二进制本身由静态托管 /downloads/<file> 送出，所以这里先于 registerStatic 注册。
 	registerDownloadRoutes(api, cfg)
@@ -241,6 +258,56 @@ func NewRouter(
 	registerStatic(r, cfg)
 
 	return r
+}
+
+// publicRoomDeps 把既有依赖组装成公开房列表需要的形状（T2）。
+//
+// 元数据来源有两个候选，优先级是刻意的：
+//
+//	① adminDeps.RoomMeta（管理端的元数据端口，它的方法集是 PublicRoomMetaStore 的超集）
+//	② accountDeps.Store （生产装配里的真 store）
+//
+// 为什么把①放前面：两个候选在生产里**指向同一个 *store.Store**，所以顺序不影响行为；
+// 而它让"只有一套元数据端口"的测试装配（管理端用例的假内存表）也能驱动公开房列表 ——
+// 否则同一条链路上会出现"管理端看得见房间、公开列表看不见"这种只存在于测试里的怪象。
+//
+// 缺装配时的行为写在这里，而不是留给读者猜：Rooms 为 nil → 端点返回空列表；
+// Meta 为 nil → 全部按"缺元数据行"降级（标题空）；Names 为 nil → ownerName 为空串。
+// 三种情况都不是错误：公开列表是只读派生视图，它只有"现在没有内容"这一种降级形态。
+func publicRoomDeps(rooms *usecase.Manager, accountDeps AuthDeps, adminDeps AdminDeps) PublicRoomDeps {
+	deps := PublicRoomDeps{}
+	if rooms != nil {
+		deps.Rooms = rooms
+	}
+	if adminDeps.RoomMeta != nil {
+		deps.Meta = adminDeps.RoomMeta
+	} else if accountDeps.Store != nil {
+		deps.Meta = accountDeps.Store
+	}
+	if accountDeps.ProfileNames != nil {
+		deps.Names = accountDeps.ProfileNames
+	}
+	deps.Sink = accountDeps.RoomMeta
+	return deps
+}
+
+// roomMetaReader 选出房主改元数据时"读当前行"的实现（T3）。
+//
+// 两个候选的优先级与 publicRoomDeps 一致：生产里它们指向同一个 *store.Store，
+// 所以顺序不影响行为；而它让**只有一套元数据端口**的测试装配也能驱动这条路由。
+//
+// 这里必须显式判空并回落到另一个候选，不能直接写 Meta: accountDeps.Store ——
+// 把 nil 的 *store.Store 塞进接口会得到一个**非 nil 的接口**，
+// 于是 registerRoomMetaRoutes 的装配判空失效，请求进来才会在方法内部崩（500 而不是 503）。
+// 这类"typed nil"是 Go 里最容易漏的一种空指针。
+func roomMetaReader(accountDeps AuthDeps, adminDeps AdminDeps) RoomMetaReader {
+	if accountDeps.Store != nil {
+		return accountDeps.Store
+	}
+	if adminDeps.RoomMeta != nil {
+		return adminDeps.RoomMeta
+	}
+	return nil
 }
 
 // logProxyTrustWarning 在监听地址不是回环时打印一条醒目警告。
@@ -423,13 +490,26 @@ func roomInfoHandler(cfg *config.Config, rooms *usecase.Manager) gin.HandlerFunc
 
 // corsMiddleware 允许本机前端开发源访问 REST 接口（前后端分离，端口不同）。
 // WebSocket 的来源校验在 wsHandler 里单独处理。
+//
+// 二期的两处补齐（T4 顺手补一期缺口）：
+//
+//	Allow-Methods 补 PATCH      —— 新增的 PATCH /api/rooms/:id/meta、PATCH /api/admin/users/:id
+//	                              在跨源预检时会因"方法不在列表里"直接被浏览器拦掉，
+//	                              表现为"接口用 curl 通、页面打不通"；
+//	Allow-Headers 补 Authorization —— 账号层的凭据走 Authorization 头（§5），
+//	                              预检不声明它时浏览器不会把该头发出去，结果一律 401。
+//
+// **刻意不动 Origin 的处理方式**：这里仍然是"反射请求的 Origin"（开发态本机两个端口）。
+// 来源白名单属于 WS 的一侧（S-5 的 PR_ALLOWED_ORIGINS），本中间件不参与授权判断 ——
+// 它只影响浏览器愿不愿意发出请求，而真正的闸门在服务端每一条路由上。
+// 把它改成"收紧到白名单"是另一件事（需要区分生产/开发），本期不做。
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if origin := c.GetHeader("Origin"); origin != "" {
 			c.Header("Access-Control-Allow-Origin", origin)
 			c.Header("Vary", "Origin")
-			c.Header("Access-Control-Allow-Headers", "Content-Type")
-			c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
 		}
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

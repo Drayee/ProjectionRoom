@@ -68,6 +68,13 @@ type AuthDeps struct {
 	Writer   *store.Writer
 	Tickets  TicketConsumer
 	RoomMeta RoomMetaSink
+	// ProfileNames 是公开房列表取**房主昵称**的专用出口（T2）。
+	//
+	// 为什么它挂在 AuthDeps 而不是新开一个参数：硬约束是"不改 NewRouter 的参数个数与语义"，
+	// 而这份依赖的来源（账号存储）与 Store 完全一致 —— 它只是同一个数据源上
+	// 一个**只回答昵称**的更窄的出口（实现见 usecase.ProfileNameLookup）。
+	// 它不放在 AdminDeps 里，是因为它服务的端点是免登录的公开列表，不是管理端。
+	ProfileNames PublicRoomProfileStore
 }
 
 // SessionConfig 是会话在 HTTP 层的参数。
