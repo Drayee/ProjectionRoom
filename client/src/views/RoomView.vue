@@ -178,7 +178,7 @@ async function share() {
           class="icon-btn"
           :class="{ failed: shareState === 'failed' }"
           :aria-label="shareState === 'ok' ? '分享信息已复制' : '复制房间分享信息（房间码与网址）'"
-          :title="shareState === 'ok' ? '已复制分享信息' : '复制房间分享信息（房间码与网址）'"
+          v-tip="shareState === 'ok' ? '已复制分享信息' : '复制房间分享信息（房间码与网址）'"
           data-testid="room-share"
           @click="share"
         >

@@ -47,3 +47,6 @@ pnpm-debug.log*
 # 需要复核别人的验收结果时，用 test/script/verify-*.mjs 指向自己的分片目录。
 /test/resource/
 
+
+# 调试钩子构建产物（真机验收用，不进仓库）
+client/dist-debug/

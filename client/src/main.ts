@@ -3,12 +3,16 @@ import { createPinia } from 'pinia'
 import App from './App.vue'
 import { router } from './router'
 import { installDebugHook } from './debug'
+import { tipDirective } from './directives/tip'
 import { useAuthStore } from './stores/auth'
 import './styles.css'
 
 const app = createApp(App)
 app.use(createPinia())
 app.use(router)
+// 全局提示指令（`v-tip`）：必须在 mount 之前注册，否则首屏渲染时指令解析不到。
+// 图层本体挂在 App.vue 里（全局唯一一份），指令只负责写状态。
+app.directive('tip', tipDirective)
 app.mount('#app')
 
 // 账号会话的启动引导（必须在 app.use(createPinia()) 之后：useAuthStore() 需要已激活的 pinia）。

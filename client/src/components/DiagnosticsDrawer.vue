@@ -368,7 +368,7 @@ onBeforeUnmount(() => {
           class="icon-only"
           data-testid="diag-copy"
           aria-label="复制诊断报告"
-          title="复制诊断报告"
+          v-tip="'复制诊断报告'"
           @click="copyReport"
         >
           <BrandIcon :name="copyState === 'failed' ? 'alert-triangle' : 'copy'" decorative :size="15" />

@@ -96,6 +96,9 @@ function readStoredProfile(): AuthProfile | null {
     email: typeof value.email === 'string' ? value.email : '',
     role: typeof value.role === 'string' ? value.role : 'user',
     status: typeof value.status === 'string' ? value.status : 'active',
+    // 加入时间：老缓存里没有这个键（它是后加的），缺就留空串 —— 用户详情页会显示"服务端未返回"，
+    // 而不是把它当成"用户不存在"。下一次 /me 或刷新会把真值补回来。
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : '',
     unread: typeof value.unread === 'number' && value.unread > 0 ? value.unread : 0,
   }
 }

@@ -135,7 +135,7 @@ async function joinRoom() {
     <div class="error-bar" v-if="error">
       <BrandIcon name="alert-triangle" label="错误" :size="15" />
       <span class="msg">{{ error }}</span>
-      <button type="button" class="icon-btn" aria-label="关闭错误提示" title="关闭错误提示" @click="error = ''">
+      <button type="button" class="icon-btn" aria-label="关闭错误提示" v-tip="'关闭错误提示'" @click="error = ''">
         <BrandIcon name="close" decorative :size="14" />
       </button>
     </div>

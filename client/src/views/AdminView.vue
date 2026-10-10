@@ -229,7 +229,7 @@ function userBusy(user: AdminUser): boolean {
       <div class="error-bar" v-if="store.noticeError" data-testid="admin-action-error">
         <BrandIcon name="alert-triangle" label="操作失败" :size="15" />
         <span class="msg">{{ store.noticeError }}</span>
-        <button type="button" class="icon-btn" aria-label="关闭错误提示" title="关闭错误提示" @click="store.noticeError = ''">
+        <button type="button" class="icon-btn" aria-label="关闭错误提示" v-tip="'关闭错误提示'" @click="store.noticeError = ''">
           <BrandIcon name="close" decorative :size="14" />
         </button>
       </div>
@@ -302,7 +302,7 @@ function userBusy(user: AdminUser): boolean {
           <div class="error-bar" v-if="store.users.error">
             <BrandIcon name="alert-triangle" label="加载失败" :size="15" />
             <span class="msg">{{ store.users.error }}</span>
-            <button type="button" class="icon-btn" aria-label="重试" title="重试" @click="store.loadUsers(store.users.offset)">
+            <button type="button" class="icon-btn" aria-label="重试" v-tip="'重试'" @click="store.loadUsers(store.users.offset)">
               <BrandIcon name="refresh" decorative :size="15" />
             </button>
           </div>
@@ -407,7 +407,7 @@ function userBusy(user: AdminUser): boolean {
           <div class="error-bar" v-if="store.rooms.error">
             <BrandIcon name="alert-triangle" label="加载失败" :size="15" />
             <span class="msg">{{ store.rooms.error }}</span>
-            <button type="button" class="icon-btn" aria-label="重试" title="重试" @click="store.loadRooms(store.rooms.offset)">
+            <button type="button" class="icon-btn" aria-label="重试" v-tip="'重试'" @click="store.loadRooms(store.rooms.offset)">
               <BrandIcon name="refresh" decorative :size="15" />
             </button>
           </div>
@@ -499,7 +499,7 @@ function userBusy(user: AdminUser): boolean {
               :disabled="store.metrics.loading"
               :aria-busy="store.metrics.loading"
               aria-label="刷新指标"
-              title="刷新指标"
+              v-tip="'刷新指标'"
               data-testid="admin-metrics-refresh"
               @click="store.loadMetrics()"
             >
@@ -557,7 +557,7 @@ function userBusy(user: AdminUser): boolean {
               :disabled="store.logs.loading"
               :aria-busy="store.logs.loading"
               aria-label="刷新日志"
-              title="刷新日志"
+              v-tip="'刷新日志'"
               data-testid="admin-logs-refresh"
               @click="store.loadLogs(store.logs.offset)"
             >
@@ -612,7 +612,7 @@ function userBusy(user: AdminUser): boolean {
               :disabled="store.audit.loading"
               :aria-busy="store.audit.loading"
               aria-label="刷新审计"
-              title="刷新审计"
+              v-tip="'刷新审计'"
               data-testid="admin-audit-refresh"
               @click="store.loadAudit(store.audit.offset)"
             >

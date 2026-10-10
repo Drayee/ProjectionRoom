@@ -85,6 +85,15 @@ async function createRoom() {
     busy.value = false
   }
 }
+
+/**
+ * 把建房动作暴露给首页（FAB 的「新建房间」）。
+ *
+ * 为什么是"暴露同一个函数"而不是在 FAB 里再写一遍建房：建房这条路径上有未登录拦截
+ * （`ensureLoggedIn` 带 `?redirect=`）、401 刷新重试、昵称空值、房间凭据落 sessionStorage、
+ * 主播复位令牌随行 —— 抄一份出来必然会分叉。FAB 只负责"把卡片带到眼前 + 触发它"。
+ */
+defineExpose({ createRoom })
 </script>
 
 <template>
@@ -124,7 +133,7 @@ async function createRoom() {
     <div class="error-bar" v-if="error">
       <BrandIcon name="alert-triangle" label="错误" :size="15" />
       <span class="msg">{{ error }}</span>
-      <button type="button" class="icon-btn" aria-label="关闭错误提示" title="关闭错误提示" @click="error = ''">
+      <button type="button" class="icon-btn" aria-label="关闭错误提示" v-tip="'关闭错误提示'" @click="error = ''">
         <BrandIcon name="close" decorative :size="14" />
       </button>
     </div>

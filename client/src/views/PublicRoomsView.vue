@@ -61,7 +61,7 @@ function roomPath(roomId: string): string {
         :disabled="store.loading"
         :aria-busy="store.loading"
         aria-label="刷新公开房间列表"
-        title="刷新公开房间列表"
+        v-tip="'刷新公开房间列表'"
         data-testid="public-rooms-refresh"
         @click="store.load()"
       >
@@ -78,7 +78,7 @@ function roomPath(roomId: string): string {
         class="icon-btn retry"
         :disabled="store.loading"
         aria-label="重试"
-        title="重试"
+        v-tip="'重试'"
         data-testid="public-rooms-retry"
         @click="store.load()"
       >

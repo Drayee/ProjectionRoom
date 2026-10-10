@@ -3,8 +3,10 @@
  * 顶部导航壳：品牌、帮助/GitHub 入口与账号区的**唯一**渲染点
  *（首页、房间页、登录/注册页共用一份，避免三处各写一套"未登录/恢复中/已登录"的判定而慢慢漂移）。
  *
- * 三种形态（一个用法一种，不做"什么都能配"的万能组件）：
- *   - page：首页顶栏；
+ * 四种形态（一个用法一种，不做"什么都能配"的万能组件）：
+ *   - page：普通功能页顶栏（公开房间列表等）；
+ *   - shell：**首页已登录态的标题栏** —— 在 page 的基础上多一行「分区」（房间室/番剧论坛/
+ *     帖子/消息，管理员多一个管理界面），并把右上角的账号区升级为「头像 + 昵称」；
  *   - inline：房间页头，塞进已有的 `.room-head .right` 那一行里 ——
  *     **不新增一行**，因为房间页是 `height:100vh` 的固定布局，多一行就是从播放器身上抠高度；
  *   - bare：登录/注册页，只放品牌与帮助/GitHub（不放账号区：这一屏本身就是登录入口）。
@@ -17,7 +19,10 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from './BrandIcon.vue'
 import { useAuthStore } from '../stores/auth'
 
-const props = withDefaults(defineProps<{ variant?: 'page' | 'inline' | 'bare' }>(), { variant: 'page' })
+const props = withDefaults(
+  defineProps<{ variant?: 'page' | 'inline' | 'bare' | 'shell' }>(),
+  { variant: 'page' },
+)
 
 /** 开源仓库地址（作者 drayee）。 */
 const REPO_URL = 'https://github.com/Drayee/ProjectionRoom'
@@ -28,6 +33,7 @@ const auth = useAuthStore()
 
 const busy = ref(false)
 const isBare = computed(() => props.variant === 'bare')
+const isShell = computed(() => props.variant === 'shell')
 
 /** 登录/注册链接带上**当前路径**：登录成功后回到发起处（判据②，不留死路）。 */
 const toAuth = computed(() => ({ redirect: route.fullPath }))
@@ -44,112 +50,204 @@ async function doLogout() {
     busy.value = false
   }
 }
+
+// ---------- 头像兜底 ----------
+//
+// 本轮**没有任何头像图**（服务端档案里没有这个字段），所以"头像"就是兜底方案本身：
+// 昵称首字 + 主题色圆底。为什么不做成 `<img>` 再靠 onerror 兜底：那会在每次进首页时
+// 稳定打一个注定 404 的请求，且首帧会闪一下空白圆。
+//
+// 配色由用户名哈希决定（同一个人永远同一个颜色，不同人大概率不同色），
+// 全部取自既有主题色，不新增色板。
+const AVATAR_COLORS = ['var(--accent)', 'var(--accent-2)', '#8b7bf0', '#3ddc97'] as const
+
+const avatarChar = computed(() => {
+  const name = auth.displayName.trim()
+  if (name === '') return '月'
+  // 用扩展运算符取**第一个码点**：直接取 [0] 会把 emoji/星号平面字符切成半个代理对。
+  return [...name][0] ?? '月'
+})
+
+const avatarColor = computed(() => {
+  const seed = auth.profile?.username || auth.displayName
+  let hash = 0
+  for (const ch of seed) hash = (hash * 31 + ch.codePointAt(0)!) % 9973
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length]
+})
+
+/** 头像可访问名：带上昵称，读屏才知道这个圆是谁。 */
+const avatarLabel = computed(() => `我的主页（${auth.displayName}）`)
 </script>
 
 <template>
   <header class="app-bar" :class="props.variant">
-    <div class="brand-group">
-      <!-- 品牌标走 <img>：它是彩色品牌物，遮罩化会丢掉颜色。alt 留空，可访问名由链接文字承担。 -->
-      <RouterLink
-        class="brand"
-        to="/"
-        :aria-label="'月喵（返回首页）'"
-        data-testid="auth-brand"
-      >
-        <img class="logo" src="/icons/夜晚.svg" alt="" width="22" height="22" aria-hidden="true" />
-        <span class="brand-text">月喵</span>
-      </RouterLink>
-
-      <nav class="quick" aria-label="站点入口">
-        <!-- 公开房间列表（二期 T5）：**对所有访客可见**（含未登录）。
-             它是"发现房间"的入口，与"按房间码进房"并列，而不是登录后的特权。 -->
+    <div class="top-row">
+      <div class="brand-group">
+        <!-- 品牌标走 <img>：它是彩色品牌物，遮罩化会丢掉颜色。alt 留空，可访问名由链接文字承担。 -->
         <RouterLink
-          class="icon-btn"
-          :to="{ name: 'public-rooms' }"
-          aria-label="公开房间"
-          title="公开房间"
-          data-testid="nav-public-rooms"
+          class="brand"
+          to="/"
+          :aria-label="'月喵（返回首页）'"
+          data-testid="auth-brand"
         >
-          <BrandIcon name="video" decorative :size="17" />
+          <img class="logo" src="/icons/夜晚.svg" alt="" width="22" height="22" aria-hidden="true" />
+          <span class="brand-text">月喵</span>
         </RouterLink>
-        <RouterLink
-          class="icon-btn"
-          :to="{ name: 'help' }"
-          aria-label="帮助与说明"
-          title="帮助与说明"
-          data-testid="nav-help"
-        >
-          <BrandIcon name="tips" decorative :size="17" />
-        </RouterLink>
-        <!-- 管理端（二期 T7）：入口只对管理员显示 —— 但**显示不是授权**。
-             服务端才是授权判定的唯一来源（RequireAdmin），非 admin 打开 /admin
-             会拿到 403 并看到「无权限」提示。这里读的是本地缓存的 role：它可能过期，
-             因此宁可晚显示一步，也绝不据此判断"能不能操作"（一期不变量 I3）。 -->
-        <RouterLink
-          v-if="!isBare && auth.profile?.role === 'admin'"
-          class="icon-btn"
-          :to="{ name: 'admin' }"
-          aria-label="管理端"
-          title="管理端"
-          data-testid="nav-admin"
-        >
-          <BrandIcon name="settings" decorative :size="17" />
-        </RouterLink>
-        <a
-          class="icon-btn"
-          :href="REPO_URL"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="开源仓库（作者 drayee）"
-          title="开源仓库（作者 drayee）"
-          data-testid="nav-github"
-        >
-          <BrandIcon name="github" decorative :size="17" />
-        </a>
-      </nav>
-    </div>
 
-    <div class="app-nav" :class="props.variant" data-testid="auth-nav">
-      <div v-if="!isBare" class="row">
-        <!-- 恢复登录中：只在"没有 token 但有档案缓存"的首屏出现（等一次 refresh），
-             避免先把已登录的用户显示成"未登录"再变回来。 -->
-        <span v-if="auth.restoring" class="muted small" data-testid="auth-restoring">恢复登录中…</span>
-
-        <template v-else-if="auth.isLoggedIn">
-          <!-- 昵称一律文本插值：服务端已做字符白名单与去零宽/Bidi（规格 §7.3），前端不再碰 DOM。 -->
-          <span class="who" :title="auth.displayName" data-testid="auth-user">{{ auth.displayName }}</span>
-          <button
-            class="chip icon-btn"
-            :disabled="busy"
-            :aria-busy="busy"
-            :aria-label="busy ? '正在退出登录…' : '退出登录（清除本机会话）'"
-            :title="busy ? '正在退出登录…' : '退出登录（清除本机会话）'"
-            data-testid="auth-logout"
-            @click="doLogout"
+        <nav class="quick" aria-label="站点入口">
+          <!-- 公开房间列表（二期 T5）：**对所有访客可见**（含未登录）。
+               它是"发现房间"的入口，与"按房间码进房"并列，而不是登录后的特权。 -->
+          <RouterLink
+            class="icon-btn"
+            :to="{ name: 'public-rooms' }"
+            aria-label="公开房间"
+            v-tip="'公开房间'"
+            data-testid="nav-public-rooms"
           >
-            <BrandIcon :name="busy ? 'refresh' : 'logout'" decorative :size="16" :class="{ spinning: busy }" />
-          </button>
-        </template>
-
-        <template v-else>
-          <RouterLink class="link" :to="{ name: 'login', query: toAuth }" data-testid="nav-login">
-            <BrandIcon name="login" decorative :size="15" />
-            登录
+            <BrandIcon name="video" decorative :size="17" />
           </RouterLink>
-          <RouterLink class="link" :to="{ name: 'register', query: toAuth }" data-testid="nav-register">
-            <BrandIcon name="users-group" decorative :size="15" />
-            注册
+          <RouterLink
+            class="icon-btn"
+            :to="{ name: 'help' }"
+            aria-label="帮助与说明"
+            v-tip="'帮助与说明'"
+            data-testid="nav-help"
+          >
+            <BrandIcon name="tips" decorative :size="17" />
           </RouterLink>
-        </template>
+          <!-- 作者介绍页：内容最小（"待补充"），但入口先立住。 -->
+          <RouterLink
+            class="icon-btn"
+            :to="{ name: 'about' }"
+            aria-label="关于作者"
+            v-tip="'关于作者'"
+            data-testid="nav-about"
+          >
+            <BrandIcon name="star" decorative :size="17" />
+          </RouterLink>
+          <!-- 管理端（二期 T7）：入口只对管理员显示 —— 但**显示不是授权**。
+               服务端才是授权判定的唯一来源（RequireAdmin），非 admin 打开 /admin
+               会拿到 403 并看到「无权限」提示。这里读的是本地缓存的 role：它可能过期，
+               因此宁可晚显示一步，也绝不据此判断"能不能操作"（一期不变量 I3）。 -->
+          <RouterLink
+            v-if="!isBare && !isShell && auth.profile?.role === 'admin'"
+            class="icon-btn"
+            :to="{ name: 'admin' }"
+            aria-label="管理端"
+            v-tip="'管理端'"
+            data-testid="nav-admin"
+          >
+            <BrandIcon name="settings" decorative :size="17" />
+          </RouterLink>
+          <a
+            class="icon-btn"
+            :href="REPO_URL"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="开源仓库（作者 drayee）"
+            v-tip="'开源仓库（作者 drayee）'"
+            data-testid="nav-github"
+          >
+            <BrandIcon name="github" decorative :size="17" />
+          </a>
+        </nav>
       </div>
 
-      <p v-if="auth.notice" class="notice" data-testid="auth-notice">{{ auth.notice }}</p>
+      <div class="app-nav" :class="props.variant" data-testid="auth-nav">
+        <div v-if="!isBare" class="row">
+          <!-- 恢复登录中：只在"没有 token 但有档案缓存"的首屏出现（等一次 refresh），
+               避免先把已登录的用户显示成"未登录"再变回来。 -->
+          <span v-if="auth.restoring" class="muted small" data-testid="auth-restoring">恢复登录中…</span>
+
+          <template v-else-if="auth.isLoggedIn">
+            <!-- 头像：昵称首字 + 主题色圆底（本轮没有头像图，这就是最终形态）。 -->
+            <RouterLink
+              class="avatar"
+              :to="{ name: 'user', params: { id: String(auth.profile?.id ?? 0) } }"
+              :aria-label="avatarLabel"
+              v-tip="avatarLabel"
+              data-testid="nav-avatar"
+            >
+              <span class="avatar-char" :style="{ background: avatarColor }" aria-hidden="true">
+                {{ avatarChar }}
+              </span>
+            </RouterLink>
+            <!-- 昵称一律文本插值：服务端已做字符白名单与去零宽/Bidi（规格 §7.3），前端不再碰 DOM。 -->
+            <span class="who" :title="auth.displayName" data-testid="auth-user">{{ auth.displayName }}</span>
+            <button
+              class="chip icon-btn"
+              :disabled="busy"
+              :aria-busy="busy"
+              :aria-label="busy ? '正在退出登录…' : '退出登录（清除本机会话）'"
+              v-tip="busy ? '正在退出登录…' : '退出登录（清除本机会话）'"
+              data-testid="auth-logout"
+              @click="doLogout"
+            >
+              <BrandIcon :name="busy ? 'refresh' : 'logout'" decorative :size="16" :class="{ spinning: busy }" />
+            </button>
+          </template>
+
+          <template v-else>
+            <RouterLink class="link" :to="{ name: 'login', query: toAuth }" data-testid="nav-login">
+              <BrandIcon name="login" decorative :size="15" />
+              登录
+            </RouterLink>
+            <RouterLink class="link" :to="{ name: 'register', query: toAuth }" data-testid="nav-register">
+              <BrandIcon name="users-group" decorative :size="15" />
+              注册
+            </RouterLink>
+          </template>
+        </div>
+      </div>
     </div>
+
+    <!-- 分区（只在首页已登录态出现）：房间室（公开/好友/官方）、番剧论坛、帖子、消息。
+         管理员多一个管理界面入口 —— 同样遵循"显示不是授权"（服务端判定）。 -->
+    <nav v-if="isShell" class="zones" aria-label="站点分区" data-testid="shell-zones">
+      <div class="zone-group" data-testid="zone-rooms">
+        <span class="zone-title">
+          <BrandIcon name="video" decorative :size="15" />
+          房间室
+        </span>
+        <RouterLink class="zone-link" :to="{ name: 'public-rooms' }" data-testid="zone-rooms-public">公开</RouterLink>
+        <RouterLink class="zone-link" :to="{ name: 'friends' }" data-testid="zone-rooms-friends">好友</RouterLink>
+        <RouterLink class="zone-link" :to="{ name: 'official' }" data-testid="zone-rooms-official">官方</RouterLink>
+      </div>
+      <RouterLink class="zone-link" :to="{ name: 'forum' }" data-testid="zone-forum">
+        <BrandIcon name="chat" decorative :size="15" />
+        番剧论坛
+      </RouterLink>
+      <RouterLink class="zone-link" :to="{ name: 'posts' }" data-testid="zone-posts">
+        <BrandIcon name="tips" decorative :size="15" />
+        帖子
+      </RouterLink>
+      <RouterLink class="zone-link" :to="{ name: 'messages' }" data-testid="zone-messages">
+        <BrandIcon name="share" decorative :size="15" />
+        消息
+      </RouterLink>
+      <RouterLink
+        v-if="auth.profile?.role === 'admin'"
+        class="zone-link admin"
+        :to="{ name: 'admin' }"
+        data-testid="nav-admin"
+      >
+        <BrandIcon name="settings" decorative :size="15" />
+        管理界面
+      </RouterLink>
+    </nav>
+
+    <p v-if="auth.notice" class="notice" data-testid="auth-notice">{{ auth.notice }}</p>
   </header>
 </template>
 
 <style scoped>
 .app-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.top-row {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -157,7 +255,7 @@ async function doLogout() {
   flex-wrap: wrap;
 }
 
-.app-bar.inline {
+.app-bar.inline .top-row {
   align-items: center;
   gap: 8px;
 }
@@ -199,7 +297,7 @@ async function doLogout() {
   color: var(--text-dim);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 999px;
   text-decoration: none;
   line-height: 0;
 }
@@ -242,6 +340,86 @@ async function doLogout() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 头像（兜底形态）：昵称首字 + 主题色圆底。 */
+.avatar {
+  display: inline-flex;
+  border-radius: 50%;
+  text-decoration: none;
+  flex: none;
+}
+
+.avatar-char {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: #04141b;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.avatar:hover .avatar-char {
+  box-shadow: 0 0 0 2px var(--border);
+}
+
+/* ----- 分区行（首页已登录态）----- */
+.zones {
+  display: flex;
+  align-items: center;
+  gap: 6px 10px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.zone-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 3px 10px 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.zone-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.zone-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  text-decoration: none;
+}
+
+.zone-link:hover {
+  color: var(--text);
+  background: var(--panel-2);
+  text-decoration: none;
+}
+
+/* 分区里的"公开/好友/官方"是房间室内部的三个页签，样式更轻一档。 */
+.zone-group .zone-link {
+  padding: 1px 6px;
+}
+
+.zone-link.admin {
+  border: 1px solid var(--accent);
+  color: var(--accent);
 }
 
 button.chip {
@@ -287,6 +465,10 @@ button.chip {
 
   .app-bar .app-nav {
     align-items: flex-start;
+  }
+
+  .zones {
+    gap: 6px 8px;
   }
 }
 </style>

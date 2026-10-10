@@ -10,6 +10,16 @@
   --danger: #ff5c5c;
   --ok: #3ddc97;
   color-scheme: dark;
+
+  /* ---------- 落地页动图槽位 ----------
+     标题背后的动图尺寸/柔化/不透明度集中在这里（`HeroMotion.vue` 里还各留了同值兜底，
+     单独去调那个组件时不必动这里）。素材放 `client/public/hero/`，
+     清单在 `src/heroAssets.ts`，替换步骤见 `client/public/hero/README.md`。
+     现在**没有素材**：槽位只有纯 CSS 渐变，不会出现破图。 */
+  --hero-motion-w: min(560px, 86vw);
+  --hero-motion-h: min(440px, 58vh);
+  --hero-motion-opacity: 0.55;
+  --hero-motion-blur: 34px;
 }
 
 * {

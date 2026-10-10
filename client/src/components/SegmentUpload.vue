@@ -539,7 +539,7 @@ async function writeAndPublish() {
       <button
         class="icon-only"
         aria-label="重新检测服务器切片可用性"
-        title="重新检测服务器切片可用性"
+        v-tip="'重新检测服务器切片可用性'"
         @click="recheck"
       >
         <BrandIcon name="refresh" decorative :size="15" />
@@ -560,7 +560,7 @@ async function writeAndPublish() {
           class="icon-only"
           :disabled="busy || writing"
           aria-label="选择要上传的源视频文件"
-          title="选择要上传的源视频文件"
+          v-tip="'选择要上传的源视频文件'"
           @click="chooseFile"
         >
           <BrandIcon name="upload" decorative :size="15" />
@@ -629,7 +629,7 @@ async function writeAndPublish() {
             class="primary icon-only"
             data-testid="segment-download-zip"
             aria-label="下载切片产物（zip）"
-            title="下载切片产物（zip）"
+            v-tip="'下载切片产物（zip）'"
             @click="downloadZip"
           >
             <BrandIcon name="download" decorative :size="15" />
@@ -660,7 +660,7 @@ async function writeAndPublish() {
             <button
               class="icon-only"
               aria-label="依次下载全部分份"
-              title="依次下载全部分份"
+              v-tip="'依次下载全部分份'"
               @click="downloadAllParts"
             >
               <BrandIcon name="download" decorative :size="15" />

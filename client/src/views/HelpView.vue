@@ -45,7 +45,7 @@ const toc = [
             target="_blank"
             rel="noopener noreferrer"
             aria-label="开源仓库（作者 drayee）"
-            title="开源仓库（作者 drayee）"
+            v-tip="'开源仓库（作者 drayee）'"
             data-testid="help-github"
           >
             <BrandIcon name="github" decorative :size="18" />
@@ -376,7 +376,7 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k -uplink-
         target="_blank"
         rel="noopener noreferrer"
         aria-label="开源仓库（作者 drayee）"
-        title="开源仓库（作者 drayee）"
+        v-tip="'开源仓库（作者 drayee）'"
       >
         <BrandIcon name="github" decorative :size="16" />
       </a>

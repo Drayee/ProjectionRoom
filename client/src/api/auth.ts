@@ -26,6 +26,12 @@ export interface AuthUser {
   role: string
   /** active | banned。 */
   status: string
+  /**
+   * 加入时间（RFC3339）。服务端 `usecase.Profile.createdAt` 一直在返回它，
+   * 只是前端以前没接（用户详情页要显示"加入时间"才接上）。
+   * 归一成字符串：缺失/类型不对一律空串，界面上显示"服务端未返回"而不是 `undefined`。
+   */
+  createdAt: string
 }
 
 /** register / login / refresh 三个端点的统一响应。 */
@@ -136,6 +142,8 @@ function normalizeUser(raw: unknown): AuthUser {
     email: asString(user.email),
     role: asString(user.role) || 'user',
     status: asString(user.status) || 'active',
+    // 服务端给的是 RFC3339；缺失时留空串（界面负责说"服务端未返回"，不在这里编时间）。
+    createdAt: asString(user.createdAt),
   }
 }
 

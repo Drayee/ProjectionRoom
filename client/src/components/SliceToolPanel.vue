@@ -318,7 +318,7 @@ function toggleSha(entry: ToolEntry) {
             data-testid="slice-tool-download"
             :data-key="keyOf(entry)"
             :aria-label="`下载 ${platformLabel(entry)} 的切片器`"
-            :title="`下载 ${platformLabel(entry)} 的切片器`"
+            v-tip="`下载 ${platformLabel(entry)} 的切片器`"
           >
             <BrandIcon name="download" decorative :size="15" />
           </a>
@@ -340,7 +340,7 @@ function toggleSha(entry: ToolEntry) {
             class="tiny-btn icon-only"
             data-testid="slice-tool-sha-copy"
             aria-label="复制完整 sha256"
-            title="复制完整 sha256"
+            v-tip="'复制完整 sha256'"
             @click="copyInto('sha:' + keyOf(entry), entry.sha256)"
           >
             <BrandIcon name="copy" decorative :size="13" />
@@ -368,7 +368,7 @@ function toggleSha(entry: ToolEntry) {
           class="icon-only"
           data-testid="slice-tool-copy-usage"
           aria-label="复制命令行用法"
-          title="复制命令行用法"
+          v-tip="'复制命令行用法'"
           @click="copyInto('usage', usageText)"
         >
           <BrandIcon :name="copyState.usage === 'failed' ? 'alert-triangle' : 'copy'" decorative :size="14" />
