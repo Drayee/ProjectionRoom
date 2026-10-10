@@ -116,7 +116,7 @@ const avatarLabel = computed(() => `我的主页（${auth.displayName}）`)
           <span class="brand-text">月喵</span>
         </RouterLink>
 
-        <nav class="quick" aria-label="站点入口">
+        <nav v-if="!isShell" class="quick" aria-label="站点入口">
           <!-- 公开房间列表（二期 T5）：**对所有访客可见**（含未登录）。
                它是"发现房间"的入口，与"按房间码进房"并列，而不是登录后的特权。 -->
           <RouterLink
@@ -264,8 +264,9 @@ const avatarLabel = computed(() => `我的主页（${auth.displayName}）`)
                 {{ avatarChar }}
               </span>
             </RouterLink>
-            <!-- 昵称一律文本插值：服务端已做字符白名单与去零宽/Bidi（规格 §7.3），前端不再碰 DOM。 -->
-            <span class="who" :title="auth.displayName" data-testid="auth-user">{{ auth.displayName }}</span>
+            <!-- 昵称一律文本插值：服务端已做字符白名单与去零宽/Bidi（规格 §7.3），前端不再碰 DOM。
+                 shell 标题栏只留头像（icon-first，与 HTML 原型一致），昵称仅在其它形态显示。 -->
+            <span v-if="!isShell" class="who" :title="auth.displayName" data-testid="auth-user">{{ auth.displayName }}</span>
             <button
               class="chip icon-btn"
               :disabled="busy"
@@ -436,15 +437,15 @@ const avatarLabel = computed(() => `我的主页（${auth.displayName}）`)
   justify-content: flex-start;
 }
 
-/* 月喵放大 1.5 倍（15px → 22px），居中。 */
+/* 月喵放大 1.5 倍（15px → 24px），居中（与 HTML 原型一致）。 */
 .app-bar.shell .brand.brand-center {
   justify-self: center;
-  font-size: 22px;
+  font-size: 24px;
 }
 
 .app-bar.shell .brand.brand-center .logo {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
 }
 
 .app-bar.shell .app-nav {
