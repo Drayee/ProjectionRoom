@@ -5,8 +5,9 @@
  *
  * 四种形态（一个用法一种，不做"什么都能配"的万能组件）：
  *   - page：普通功能页顶栏（公开房间列表等）；
- *   - shell：**首页已登录态的标题栏** —— 在 page 的基础上多一行「分区」（房间室/番剧论坛/
- *     帖子/消息，管理员多一个管理界面），并把右上角的账号区升级为「头像 + 昵称」；
+ *   - shell：**首页已登录态的标题栏** —— 月喵**居中放大**，分区 **icon-first** 分列两侧
+ *     （房间室/番剧论坛 在左，帖子/消息/管理界面 在右，房间室的公开/好友/官方收进 hover 下拉），
+ *     右上角账号区升级为「头像 + 昵称」；
  *   - inline：房间页头，塞进已有的 `.room-head .right` 那一行里 ——
  *     **不新增一行**，因为房间页是 `height:100vh` 的固定布局，多一行就是从播放器身上抠高度；
  *   - bare：登录/注册页，只放品牌与帮助/GitHub（不放账号区：这一屏本身就是登录入口）。
@@ -51,6 +52,26 @@ async function doLogout() {
   }
 }
 
+// ---------- 房间室下拉（分区 icon-first 后，「公开/好友/官方」收进 hover/focus 下拉） ----------
+/** 下拉是否展开。鼠标 hover 或键盘 focus 进入都会展开；`aria-expanded` 与视觉同源。 */
+const roomsOpen = ref(false)
+
+function openRooms(): void {
+  roomsOpen.value = true
+}
+
+function closeRooms(): void {
+  roomsOpen.value = false
+}
+
+/** focus 在「按钮 ↔ 菜单项」之间移动时不收起；只有真移出容器才收。 */
+function onRoomsFocusOut(event: FocusEvent): void {
+  const container = event.currentTarget as HTMLElement
+  const next = event.relatedTarget as Node | null
+  if (next && container.contains(next)) return
+  closeRooms()
+}
+
 // ---------- 头像兜底 ----------
 //
 // 本轮**没有任何头像图**（服务端档案里没有这个字段），所以"头像"就是兜底方案本身：
@@ -83,8 +104,9 @@ const avatarLabel = computed(() => `我的主页（${auth.displayName}）`)
   <header class="app-bar" :class="props.variant">
     <div class="top-row">
       <div class="brand-group">
-        <!-- 品牌标走 <img>：它是彩色品牌物，遮罩化会丢掉颜色。alt 留空，可访问名由链接文字承担。 -->
+        <!-- 品牌标（非 shell）：放左侧，与快捷入口同行。 -->
         <RouterLink
+          v-if="!isShell"
           class="brand"
           to="/"
           :aria-label="'月喵（返回首页）'"
@@ -151,9 +173,79 @@ const avatarLabel = computed(() => `我的主页（${auth.displayName}）`)
             <BrandIcon name="github" decorative :size="17" />
           </a>
         </nav>
+
+        <!-- 左分区（shell）：房间室（下拉）、番剧论坛 —— icon-first。 -->
+        <nav v-if="isShell" class="zones" aria-label="站点分区（左）" data-testid="shell-zones-left">
+          <div
+            class="zone-dropdown"
+            data-testid="zone-rooms"
+            @mouseenter="openRooms"
+            @mouseleave="closeRooms"
+            @focusin="openRooms"
+            @focusout="onRoomsFocusOut"
+          >
+            <button
+              type="button"
+              class="zone-pill"
+              aria-label="房间室"
+              v-tip="'房间室'"
+              :aria-expanded="roomsOpen"
+              aria-haspopup="true"
+            >
+              <BrandIcon name="video" decorative :size="18" />
+            </button>
+            <div class="zone-menu" :class="{ open: roomsOpen }" role="menu" aria-label="房间室">
+              <RouterLink role="menuitem" class="zone-menu-link" :to="{ name: 'public-rooms' }" data-testid="zone-rooms-public">
+                公开
+              </RouterLink>
+              <RouterLink role="menuitem" class="zone-menu-link" :to="{ name: 'friends' }" data-testid="zone-rooms-friends">
+                好友
+              </RouterLink>
+              <RouterLink role="menuitem" class="zone-menu-link" :to="{ name: 'official' }" data-testid="zone-rooms-official">
+                官方
+              </RouterLink>
+            </div>
+          </div>
+
+          <RouterLink class="zone-pill" :to="{ name: 'forum' }" aria-label="番剧论坛" v-tip="'番剧论坛'" data-testid="zone-forum">
+            <BrandIcon name="chat" decorative :size="18" />
+          </RouterLink>
+        </nav>
       </div>
 
+      <!-- 品牌（shell）：居中 + 放大 1.5 倍。 -->
+      <RouterLink
+        v-if="isShell"
+        class="brand brand-center"
+        to="/"
+        :aria-label="'月喵（返回首页）'"
+        data-testid="auth-brand"
+      >
+        <img class="logo" src="/icons/夜晚.svg" alt="" width="28" height="28" aria-hidden="true" />
+        <span class="brand-text">月喵</span>
+      </RouterLink>
+
       <div class="app-nav" :class="props.variant" data-testid="auth-nav">
+        <!-- 右分区（shell）：帖子、消息、管理界面 —— icon-first。 -->
+        <nav v-if="isShell" class="zones" aria-label="站点分区（右）" data-testid="shell-zones-right">
+          <RouterLink class="zone-pill" :to="{ name: 'posts' }" aria-label="帖子" v-tip="'帖子'" data-testid="zone-posts">
+            <BrandIcon name="tips" decorative :size="18" />
+          </RouterLink>
+          <RouterLink class="zone-pill" :to="{ name: 'messages' }" aria-label="消息" v-tip="'消息'" data-testid="zone-messages">
+            <BrandIcon name="share" decorative :size="18" />
+          </RouterLink>
+          <RouterLink
+            v-if="auth.profile?.role === 'admin'"
+            class="zone-pill admin"
+            :to="{ name: 'admin' }"
+            aria-label="管理界面"
+            v-tip="'管理界面'"
+            data-testid="nav-admin"
+          >
+            <BrandIcon name="settings" decorative :size="18" />
+          </RouterLink>
+        </nav>
+
         <div v-if="!isBare" class="row">
           <!-- 恢复登录中：只在"没有 token 但有档案缓存"的首屏出现（等一次 refresh），
                避免先把已登录的用户显示成"未登录"再变回来。 -->
@@ -200,41 +292,6 @@ const avatarLabel = computed(() => `我的主页（${auth.displayName}）`)
         </div>
       </div>
     </div>
-
-    <!-- 分区（只在首页已登录态出现）：房间室（公开/好友/官方）、番剧论坛、帖子、消息。
-         管理员多一个管理界面入口 —— 同样遵循"显示不是授权"（服务端判定）。 -->
-    <nav v-if="isShell" class="zones" aria-label="站点分区" data-testid="shell-zones">
-      <div class="zone-group" data-testid="zone-rooms">
-        <span class="zone-title">
-          <BrandIcon name="video" decorative :size="15" />
-          房间室
-        </span>
-        <RouterLink class="zone-link" :to="{ name: 'public-rooms' }" data-testid="zone-rooms-public">公开</RouterLink>
-        <RouterLink class="zone-link" :to="{ name: 'friends' }" data-testid="zone-rooms-friends">好友</RouterLink>
-        <RouterLink class="zone-link" :to="{ name: 'official' }" data-testid="zone-rooms-official">官方</RouterLink>
-      </div>
-      <RouterLink class="zone-link" :to="{ name: 'forum' }" data-testid="zone-forum">
-        <BrandIcon name="chat" decorative :size="15" />
-        番剧论坛
-      </RouterLink>
-      <RouterLink class="zone-link" :to="{ name: 'posts' }" data-testid="zone-posts">
-        <BrandIcon name="tips" decorative :size="15" />
-        帖子
-      </RouterLink>
-      <RouterLink class="zone-link" :to="{ name: 'messages' }" data-testid="zone-messages">
-        <BrandIcon name="share" decorative :size="15" />
-        消息
-      </RouterLink>
-      <RouterLink
-        v-if="auth.profile?.role === 'admin'"
-        class="zone-link admin"
-        :to="{ name: 'admin' }"
-        data-testid="nav-admin"
-      >
-        <BrandIcon name="settings" decorative :size="15" />
-        管理界面
-      </RouterLink>
-    </nav>
 
     <p v-if="auth.notice" class="notice" data-testid="auth-notice">{{ auth.notice }}</p>
   </header>
@@ -367,59 +424,143 @@ const avatarLabel = computed(() => `我的主页（${auth.displayName}）`)
   box-shadow: 0 0 0 2px var(--border);
 }
 
-/* ----- 分区行（首页已登录态）----- */
+/* ----- shell：标题栏月喵居中放大 + 分区 icon-first 分列两侧 ----- */
+.app-bar.shell .top-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-bar.shell .brand-group {
+  justify-content: flex-start;
+}
+
+/* 月喵放大 1.5 倍（15px → 22px），居中。 */
+.app-bar.shell .brand.brand-center {
+  justify-self: center;
+  font-size: 22px;
+}
+
+.app-bar.shell .brand.brand-center .logo {
+  width: 28px;
+  height: 28px;
+}
+
+.app-bar.shell .app-nav {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 外壳标题栏入场：登录成功后从上方滑入（与 HomeView 的整屏淡入叠加）。 */
+.app-bar.shell {
+  animation: shell-bar-in 0.4s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@keyframes shell-bar-in {
+  from {
+    opacity: 0;
+    transform: translateY(-14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ----- 分区（icon-first）：只有图标 + aria-label + v-tip ----- */
 .zones {
   display: flex;
   align-items: center;
-  gap: 6px 10px;
+  gap: 6px;
   flex-wrap: wrap;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-  font-size: 13px;
 }
 
-.zone-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 3px 10px 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-}
-
-.zone-title {
+.zone-pill {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: var(--text);
-  font-weight: 600;
-}
-
-.zone-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 999px;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid transparent;
   color: var(--text-dim);
+  background: transparent;
   text-decoration: none;
+  line-height: 0;
+  transition:
+    color 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease,
+    transform 0.18s ease;
 }
 
-.zone-link:hover {
+.zone-pill:hover {
   color: var(--text);
-  background: var(--panel-2);
+  border-color: var(--border);
+  transform: translateY(-1px);
   text-decoration: none;
 }
 
-/* 分区里的"公开/好友/官方"是房间室内部的三个页签，样式更轻一档。 */
-.zone-group .zone-link {
-  padding: 1px 6px;
+.zone-pill.admin {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
-.zone-link.admin {
-  border: 1px solid var(--accent);
-  color: var(--accent);
+/* 房间室下拉：公开/好友/官方 收进 hover/focus 弹出菜单。 */
+.zone-dropdown {
+  position: relative;
+  display: inline-flex;
+}
+
+.zone-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) translateY(-4px);
+  min-width: 124px;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 30;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease,
+    visibility 0.16s ease;
+}
+
+.zone-menu.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.zone-menu-link {
+  display: block;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px;
+  white-space: nowrap;
+  transition: background 0.14s ease;
+}
+
+.zone-menu-link:hover {
+  background: var(--panel);
+  text-decoration: none;
 }
 
 button.chip {
@@ -457,6 +598,19 @@ button.chip {
   }
 }
 
+/* 降级：系统要求减少动效 → 入场动画与过渡全部瞬时。 */
+@media (prefers-reduced-motion: reduce) {
+  .app-bar.shell {
+    animation: none;
+  }
+
+  .zone-pill,
+  .zone-menu,
+  .zone-menu-link {
+    transition: none;
+  }
+}
+
 /* 375px 档：品牌文字收起为品牌标（链接另有 aria-label），保证顶栏不横向溢出。 */
 @media (max-width: 460px) {
   .brand-text {
@@ -465,10 +619,6 @@ button.chip {
 
   .app-bar .app-nav {
     align-items: flex-start;
-  }
-
-  .zones {
-    gap: 6px 8px;
   }
 }
 </style>

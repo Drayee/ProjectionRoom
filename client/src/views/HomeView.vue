@@ -204,13 +204,16 @@ const booting = computed(() => auth.restoring)
 </script>
 
 <template>
+  <!-- landing ↔ shell 的过渡：登录成功/登出时整屏淡入淡出（mode="out-in" 先出后进）。
+       key 区分三个分支，否则 Vue 会复用同一个 div 只改 class，过渡不触发。 -->
+  <Transition name="home" mode="out-in">
   <!-- 恢复登录中：只在"有凭证、等一次 refresh"的首屏出现（一个请求的时长）。 -->
-  <div class="home boot" v-if="booting" data-testid="home-restoring">
+  <div class="home boot" v-if="booting" key="boot" data-testid="home-restoring">
     <p class="muted">恢复登录中…</p>
   </div>
 
   <!-- ============ 已登录：标题栏 + 分区 + FAB + 核心卡片 ============ -->
-  <div class="home shell" v-else-if="auth.isLoggedIn" data-testid="home-shell">
+  <div class="home shell" v-else-if="auth.isLoggedIn" key="shell" data-testid="home-shell">
     <AppHeader variant="shell" />
 
     <HomeFab @create="onCreateRoom" @post="onCapability('post')" @anime="onCapability('anime')" />
@@ -242,6 +245,7 @@ const booting = computed(() => auth.restoring)
   <div
     class="home landing"
     v-else
+    key="landing"
     data-testid="home-landing"
     :data-stage="stage"
     :data-transitioning="transitioning ? 'true' : 'false'"
@@ -367,6 +371,7 @@ const booting = computed(() => auth.restoring)
       <span>· 看片不需要账号，有房间码就能进</span>
     </p>
   </div>
+  </Transition>
 </template>
 
 <style scoped>
@@ -726,6 +731,24 @@ button.icon-btn {
 
   .chev {
     animation: none;
+  }
+}
+
+/* landing ↔ shell 整屏淡入淡出（登录成功/登出；外壳标题栏另有滑入动画，见 AppHeader）。 */
+.home-enter-active,
+.home-leave-active {
+  transition: opacity 0.28s ease;
+}
+
+.home-enter-from,
+.home-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-enter-active,
+  .home-leave-active {
+    transition: none;
   }
 }
 </style>
