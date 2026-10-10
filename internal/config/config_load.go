@@ -112,6 +112,25 @@ const (
 	// —— 房主回读房间元数据的每 IP 限速（GET /api/rooms/:id/meta）。
 	envRoomMetaPerMinute = "PR_ROOM_META_PER_MINUTE"
 	envRoomMetaBurst     = "PR_ROOM_META_BURST"
+
+	// —— 邮件通道（SMTP）与找回密码 / 验证邮箱。
+	//
+	// 这一组是账号能力的出口：PR_SMTP_HOST 与账号密码任缺其一 = 邮件能力关闭
+	//（/api/auth/forgot 一律 503，账号本身照常可用）。
+	envSMTPHost       = "PR_SMTP_HOST"
+	envSMTPPort       = "PR_SMTP_PORT"
+	envSMTPUser       = "PR_SMTP_USER"
+	envSMTPPass       = "PR_SMTP_PASS"
+	envSMTPFrom       = "PR_SMTP_FROM"
+	envSMTPFromName   = "PR_SMTP_FROM_NAME"
+	envSMTPTLS        = "PR_SMTP_TLS"
+	envSMTPTimeout    = "PR_SMTP_TIMEOUT"
+	envPublicBaseURL  = "PR_PUBLIC_BASE_URL"
+	envResetTTL       = "PR_RESET_TTL"
+	envEmailVerifyTTL = "PR_EMAIL_VERIFY_TTL"
+	envMailPerEmail   = "PR_MAIL_PER_EMAIL_PER_HOUR"
+	envMailPerIP      = "PR_MAIL_PER_IP_PER_HOUR"
+	envMailResetPerIP = "PR_MAIL_RESET_PER_IP_PER_HOUR"
 )
 
 // —— 账号层（ACCOUNTS §5）的默认值与允许范围。
@@ -156,6 +175,50 @@ const (
 	// 房主回读元数据的每 IP 令牌桶默认值（依据见 IPCConfig.RoomMetaPerMinute）。
 	DefaultRoomMetaPerMinute = 60
 	DefaultRoomMetaBurst     = 20
+
+	// —— 邮件通道（SMTP）与找回密码的默认值。
+	//
+	// DefaultSMTPPort = 465：隐式 SSL 是 QQ 邮箱（以及多数国内邮箱）的标准发信端点。
+	// 25 端口在云主机上普遍被封，587 需要 STARTTLS 协商 —— 三个里 465 的失败面最小。
+	DefaultSMTPPort = 465
+	// DefaultSMTPTLS = "ssl"（隐式 TLS，配合 465）。
+	DefaultSMTPTLS = "ssl"
+	// DefaultSMTPTimeout = 10s：一次完整投递（建连 + TLS + AUTH + DATA）在公网上的
+	// 实测耗时是几百毫秒到数秒；10s 给足三次握手的余量，又不会让队列在故障时堵太久。
+	DefaultSMTPTimeout = 10 * time.Second
+	// MinSMTPTimeout / MaxSMTPTimeout：小于 1s 会在正常网络上频繁超时，
+	// 大于 1m 会让队列的排空时间失去意义（排队中的令牌其实已经快过期了）。
+	MinSMTPTimeout = time.Second
+	MaxSMTPTimeout = time.Minute
+	// DefaultSMTPFromName = "月喵"（站点名，见 README 的品牌名）。
+	DefaultSMTPFromName = "月喵"
+	// DefaultPublicBaseURL = 生产入口（见 CLAUDE §8 的部署事实）。
+	//
+	// 之所以给一个**具体**的默认值而不是留空：留空时链接无法拼装，而"忘了配"
+	// 的表现是用户收到一封点了没用的信 —— 比启动失败更晚、更难发现。
+	// 默认指到当前生产入口，至少让"没配也对"。
+	DefaultPublicBaseURL = "http://60.205.212.25"
+	// DefaultResetTTL = 30m（需求口径）：一封邮件里的链接，暴露面比 access token 大。
+	DefaultResetTTL = 30 * time.Minute
+	// MinResetTTL / MaxResetTTL：太短（<1m）会让"收到信 → 点开"来不及；
+	// 太长（>24h）等于把一封长期有效的凭据留在邮箱里。
+	MinResetTTL = time.Minute
+	MaxResetTTL = 24 * time.Hour
+	// DefaultEmailVerifyTTL = 24h：验证不是紧急动作，用户可能第二天才点开那封信；
+	// 而它的危害面更小（通过验证只打开找回能力，不直接改凭据）。
+	DefaultEmailVerifyTTL = 24 * time.Hour
+	// MaxEmailVerifyTTL = 30 天：再长就等于"永久有效的验证链接"。
+	MaxEmailVerifyTTL = 30 * 24 * time.Hour
+
+	// 邮件入口的三条闸门（单位：每小时次数，见 IPCConfig 的说明）。
+	DefaultMailPerEmailPerHour   = 5
+	DefaultMailPerIPPerHour      = 20
+	DefaultMailResetPerIPPerHour = 10
+	// MinHourlyEmailLimit / MaxHourlyEmailLimit 是允许范围：
+	// 0 会被 limiter.NewKeyed 解释成"闸门关闭"，那是**不允许**的配置
+	//（一个免登录的发信端点不能无限速），所以下限是 1。
+	MinHourlyEmailLimit = 1
+	MaxHourlyEmailLimit = 100_000
 )
 
 // DefaultPackSize 是分片打包的默认粒度（每个 .bin 容纳多少片）。
@@ -401,6 +464,10 @@ func Default() *Config {
 
 			RoomMetaPerMinute: DefaultRoomMetaPerMinute,
 			RoomMetaBurst:     DefaultRoomMetaBurst,
+
+			MailPerEmailPerHour: DefaultMailPerEmailPerHour,
+			MailPerIPPerHour:    DefaultMailPerIPPerHour,
+			ResetPerIPPerHour:   DefaultMailResetPerIPPerHour,
 		},
 		Security: SecurityConfig{
 			Headers: true,
@@ -417,6 +484,16 @@ func Default() *Config {
 			BcryptCost:         DefaultBcryptCost,
 			WSTicketTTL:        DefaultWSTicketTTL,
 			HashingConcurrency: DefaultHashingConcurrency,
+
+			// 邮件能力**默认关闭**（SMTPHost 为空），与"账号能力默认关闭"同一套
+			// 渐进上线路径：先部署代码，再逐步开启。
+			SMTPPort:       DefaultSMTPPort,
+			SMTPFromName:   DefaultSMTPFromName,
+			SMTPTLS:        DefaultSMTPTLS,
+			SMTPTimeout:    DefaultSMTPTimeout,
+			PublicBaseURL:  DefaultPublicBaseURL,
+			ResetTTL:       DefaultResetTTL,
+			EmailVerifyTTL: DefaultEmailVerifyTTL,
 		},
 		MemoryLimitBytes: DefaultMemoryLimitBytes,
 		Signal: SignalConfig{
@@ -941,6 +1018,34 @@ func applyIPCEnv(ic *IPCConfig) error {
 		}
 		*tc.value = n
 	}
+
+	// —— 邮件入口的三条闸门。
+	//
+	// ⚠ 单位是**每小时次数**，与上面两组（每分钟）不同，所以这里单独一段、
+	// 单独的取值范围（下限 1，不允许 0 —— 0 会被 limiter.NewKeyed 解释成
+	// "闸门关闭"，而一个免登录的发信端点不能无限速）。
+	// 换算成"每分钟补充速率"的动作在装配处（handler.newHourlyEmailLimiter）：
+	// 在这里预先除以 60 会让字段名（PerHour）与字段值（per-minute）自相矛盾。
+	hourly := []struct {
+		name  string
+		value *int
+	}{
+		{envMailPerEmail, &ic.MailPerEmailPerHour},
+		{envMailPerIP, &ic.MailPerIPPerHour},
+		{envMailResetPerIP, &ic.ResetPerIPPerHour},
+	}
+	for _, tc := range hourly {
+		v := os.Getenv(tc.name)
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < MinHourlyEmailLimit || n > MaxHourlyEmailLimit {
+			return fmt.Errorf("config: %s 必须是 [%d, %d] 区间内的整数（每小时次数，0 会关掉这条闸门，因此不允许）, got %q",
+				tc.name, MinHourlyEmailLimit, MaxHourlyEmailLimit, v)
+		}
+		*tc.value = n
+	}
 	return nil
 }
 
@@ -1046,6 +1151,89 @@ func applyAuthEnv(ac *AuthConfig) error {
 			return fmt.Errorf("config: %s 不得超过 10m（票据只是「取票到建连」的窗口）, got %q", envWSTicketTTL, v)
 		}
 		ac.WSTicketTTL = d
+	}
+
+	// —— 邮件通道（SMTP）与找回密码。
+	if v := strings.TrimSpace(os.Getenv(envSMTPHost)); v != "" {
+		ac.SMTPHost = v
+	}
+	if v := os.Getenv(envSMTPPort); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("config: %s 必须是 [1, 65535] 区间内的端口号, got %q", envSMTPPort, v)
+		}
+		ac.SMTPPort = n
+	}
+	if v := strings.TrimSpace(os.Getenv(envSMTPUser)); v != "" {
+		ac.SMTPUser = v
+	}
+	if v := os.Getenv(envSMTPPass); v != "" {
+		// 刻意**不 TrimSpace**：授权码里不该有空白，但"把用户粘贴来的空白悄悄去掉"
+		// 会让一个真实的认证失败变成"看起来密码是对的"。原样使用，只判空。
+		ac.SMTPPass = v
+	}
+	if v := strings.TrimSpace(os.Getenv(envSMTPFrom)); v != "" {
+		ac.SMTPFrom = v
+	} else if ac.SMTPFrom == "" {
+		// 默认取认证账号：QQ 要求发件人等于认证账号（否则 550）。
+		ac.SMTPFrom = ac.SMTPUser
+	}
+	if v := strings.TrimSpace(os.Getenv(envSMTPFromName)); v != "" {
+		ac.SMTPFromName = v
+	}
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv(envSMTPTLS))); v != "" {
+		// 三个合法字面量与 mail.TLSMode 的取值一一对应（config 不 import 业务包，
+		// 因此这里只有字符串；装配层做类型映射时若对不上会被 mail 包再拦一次）。
+		switch v {
+		case "ssl", "starttls", "none":
+			ac.SMTPTLS = v
+		default:
+			return fmt.Errorf("config: %s 只能是 ssl / starttls / none, got %q", envSMTPTLS, v)
+		}
+	}
+	if v := os.Getenv(envSMTPTimeout); v != "" {
+		d, err := positiveDuration(envSMTPTimeout, v)
+		if err != nil {
+			return err
+		}
+		if d < MinSMTPTimeout || d > MaxSMTPTimeout {
+			return fmt.Errorf("config: %s 必须落在 [%s, %s] 区间, got %q",
+				envSMTPTimeout, MinSMTPTimeout, MaxSMTPTimeout, v)
+		}
+		ac.SMTPTimeout = d
+	}
+	if v := strings.TrimSpace(os.Getenv(envPublicBaseURL)); v != "" {
+		if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+			// 只接绝对 URL：相对路径拼出来的链接在邮件里没有意义，
+			// 而"忘了写 scheme"是最常见的一种写错（邮件客户端会把它当相对路径）。
+			return fmt.Errorf("config: %s 必须是带 scheme 的绝对地址（http:// 或 https://）, got %q", envPublicBaseURL, v)
+		}
+		ac.PublicBaseURL = strings.TrimRight(v, "/")
+	}
+	if v := strings.TrimSpace(ac.PublicBaseURL); v != "" {
+		ac.PublicBaseURL = strings.TrimRight(v, "/")
+	}
+	if v := os.Getenv(envResetTTL); v != "" {
+		d, err := positiveDuration(envResetTTL, v)
+		if err != nil {
+			return err
+		}
+		if d < MinResetTTL || d > MaxResetTTL {
+			return fmt.Errorf("config: %s 必须落在 [%s, %s] 区间, got %q",
+				envResetTTL, MinResetTTL, MaxResetTTL, v)
+		}
+		ac.ResetTTL = d
+	}
+	if v := os.Getenv(envEmailVerifyTTL); v != "" {
+		d, err := positiveDuration(envEmailVerifyTTL, v)
+		if err != nil {
+			return err
+		}
+		if d > MaxEmailVerifyTTL {
+			return fmt.Errorf("config: %s 不得超过 %s（更长的「验证链接」等于永久有效）, got %q",
+				envEmailVerifyTTL, MaxEmailVerifyTTL, v)
+		}
+		ac.EmailVerifyTTL = d
 	}
 	return nil
 }

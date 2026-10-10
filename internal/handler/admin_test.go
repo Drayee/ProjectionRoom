@@ -40,7 +40,11 @@ type fakeAdminStore struct {
 	users    map[int64]*store.User
 	sessions map[string]*store.Session
 	audits   []*store.AdminAudit
-	nextID   int64
+	// resets 是一次性邮件令牌表（内存版）。
+	resets []*store.PasswordReset
+	nextID int64
+	// nextSessionID 给会话分配主键（撤销单个会话要靠 id 找行）。
+	nextSessionID int64
 }
 
 func newFakeAdminStore() *fakeAdminStore {
@@ -101,6 +105,37 @@ func (s *fakeAdminStore) CreateUser(ctx context.Context, u *store.User) error {
 	defer s.mu.Unlock()
 	s.nextID++
 	u.ID = s.nextID
+	// 补齐与 store.applyUserDefaults **逐条对齐**的默认值。
+	//
+	// 为什么假实现必须补：真 store 要靠它们去签发 access token（Role 为空会让
+	// signer 直接报错，症状是一个与本次改动毫无关系的 500）。审计要能跑在真实
+	// 语义上，这份假实现就不能比真实现"少写几列"。
+	if u.Role == "" {
+		u.Role = store.RoleUser
+	}
+	if u.Status == "" {
+		u.Status = store.StatusActive
+	}
+	if u.TokenVersion <= 0 {
+		u.TokenVersion = 1
+	}
+	if u.CreatedAt.IsZero() {
+		u.CreatedAt = time.Now()
+	}
+	if u.LastSeenAt.IsZero() {
+		u.LastSeenAt = time.Now()
+	}
+	// 邮箱唯一（真库侧由 users_email_lower_key 兜住）：不照做，"注册时邮箱撞车"
+	// 这条判据在单测里就永远验不到（会静默变成 201）。
+	if u.Email != nil {
+		addr := strings.ToLower(strings.TrimSpace(*u.Email))
+		for _, other := range s.users {
+			if other.Email != nil && *other.Email == addr {
+				return store.ErrEmailTaken
+			}
+		}
+		u.Email = &addr
+	}
 	cp := *u
 	s.users[u.ID] = &cp
 	return nil
@@ -127,6 +162,113 @@ func (s *fakeAdminStore) UserByID(ctx context.Context, id int64) (*store.User, e
 	}
 	cp := *u
 	return &cp, nil
+}
+
+// —— service.AccountStore：一次性邮件令牌（内存版，语义对齐真 store）。
+
+func (s *fakeAdminStore) UserByEmail(ctx context.Context, email string) (*store.User, error) {
+	addr := strings.ToLower(strings.TrimSpace(email))
+	if addr == "" {
+		return nil, store.ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.users {
+		if u.Email != nil && *u.Email == addr {
+			cp := *u
+			return &cp, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *fakeAdminStore) SetUserEmail(ctx context.Context, id int64, email string, verifiedAt *time.Time) error {
+	addr := strings.ToLower(strings.TrimSpace(email))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if addr == "" {
+		u.Email = nil
+		u.EmailVerifiedAt = nil
+		return nil
+	}
+	for _, other := range s.users {
+		if other.ID != id && other.Email != nil && *other.Email == addr {
+			return store.ErrEmailTaken
+		}
+	}
+	u.Email = &addr
+	u.EmailVerifiedAt = verifiedAt
+	return nil
+}
+
+func (s *fakeAdminStore) InsertPasswordReset(ctx context.Context, t *store.PasswordReset) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	t.ID = s.nextID
+	cp := *t
+	s.resets = append(s.resets, &cp)
+	return nil
+}
+
+// consume 与 service 包那个内存假实现同构：校验与标记已用在同一个临界区里。
+func (s *fakeAdminStore) consumeLocked(tokenHash, purpose string) *store.PasswordReset {
+	for _, r := range s.resets {
+		if r.TokenHash != tokenHash || r.Purpose != purpose || r.UsedAt != nil {
+			continue
+		}
+		if !time.Now().Before(r.ExpiresAt) {
+			continue
+		}
+		now := time.Now()
+		r.UsedAt = &now
+		return r
+	}
+	return nil
+}
+
+func (s *fakeAdminStore) ConsumePasswordReset(ctx context.Context, tokenHash, newPasswordHash string) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.consumeLocked(tokenHash, store.PurposePasswordReset)
+	if r == nil {
+		return 0, false, nil
+	}
+	u, ok := s.users[r.UserID]
+	if !ok {
+		return 0, false, nil
+	}
+	u.PasswordHash = newPasswordHash
+	// 真 store 在**同一个事务**里做四件事：标记令牌已用、改密、撤销全部会话、
+	// 版本号自增。假实现少做任何一件，都会让"改密后旧凭据必须失效"变成假绿。
+	for _, sess := range s.sessions {
+		if sess.UserID == r.UserID && sess.RevokedAt == nil {
+			now := time.Now()
+			sess.RevokedAt = &now
+		}
+	}
+	u.TokenVersion++
+	return r.UserID, true, nil
+}
+
+func (s *fakeAdminStore) ConsumeEmailVerify(ctx context.Context, tokenHash string) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.consumeLocked(tokenHash, store.PurposeEmailVerify)
+	if r == nil || r.Email == nil {
+		return 0, false, nil
+	}
+	u, ok := s.users[r.UserID]
+	if !ok || u.Email == nil || *u.Email != *r.Email {
+		return 0, false, nil
+	}
+	now := time.Now()
+	u.EmailVerifiedAt = &now
+	return r.UserID, true, nil
 }
 
 func (s *fakeAdminStore) SetUserStatus(ctx context.Context, id int64, status, reason string) error {
@@ -182,7 +324,10 @@ func (s *fakeAdminStore) TouchLastSeen(ctx context.Context, id int64, at time.Ti
 func (s *fakeAdminStore) CreateSession(ctx context.Context, sess *store.Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sessions[sess.TokenHash] = sess
+	s.nextSessionID++
+	sess.ID = s.nextSessionID
+	cp := *sess
+	s.sessions[sess.TokenHash] = &cp
 	return nil
 }
 
@@ -193,13 +338,37 @@ func (s *fakeAdminStore) SessionByTokenHash(ctx context.Context, hash string) (*
 	if !ok {
 		return nil, store.ErrNotFound
 	}
-	return sess, nil
+	cp := *sess
+	return &cp, nil
 }
 
-func (s *fakeAdminStore) RevokeSession(ctx context.Context, id int64) error { return nil }
+func (s *fakeAdminStore) RevokeSession(ctx context.Context, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		if sess.ID == id && sess.RevokedAt == nil {
+			now := time.Now()
+			sess.RevokedAt = &now
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
 
+// RevokeAllSessions 真的撤销（不是空操作）：改密/封禁/登出全部设备的语义
+// 全靠它，"改密后旧 refresh 必须失效"这条判据也只有它真的动手才验得出来。
 func (s *fakeAdminStore) RevokeAllSessions(ctx context.Context, userID int64) (int64, error) {
-	return 0, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for _, sess := range s.sessions {
+		if sess.UserID == userID && sess.RevokedAt == nil {
+			now := time.Now()
+			sess.RevokedAt = &now
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *fakeAdminStore) InsertAudit(ctx context.Context, a *store.AdminAudit) error {
@@ -573,6 +742,10 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 	tickets := auth.NewTicketStore(cfg.Auth.WSTicketTTL)
 	svc, err := service.NewAccountService(st, signer, tickets, service.AccountOptions{
 		RefreshTTL: cfg.Auth.RefreshTTL,
+		// 邮件链路的三项（config.Default() 已经给好了生产默认值，这里直接沿用）。
+		ResetTTL:       cfg.Auth.ResetTTL,
+		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
+		PublicBaseURL:  cfg.Auth.PublicBaseURL,
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败: %v", err)

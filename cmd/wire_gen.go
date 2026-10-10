@@ -56,8 +56,16 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		return nil, nil, err
 	}
 	ticketStore := bootstrap.NewTicketStore(cfg)
-	accountService, err := bootstrap.NewAccountService(cfg, accountStoreAdapter, signer, ticketStore)
+	mailer, cleanup4, err := bootstrap.NewMailer(cfg)
 	if err != nil {
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	accountService, err := bootstrap.NewAccountService(cfg, accountStoreAdapter, signer, ticketStore, mailer)
+	if err != nil {
+		cleanup4()
 		cleanup3()
 		cleanup2()
 		cleanup()
@@ -65,13 +73,15 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	}
 	authDeps, err := bootstrap.NewEngineDeps(cfg, dbResources, accountService, ticketStore)
 	if err != nil {
+		cleanup4()
 		cleanup3()
 		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
-	logRingResources, cleanup4, err := bootstrap.NewLogRingResources(cfg)
+	logRingResources, cleanup5, err := bootstrap.NewLogRingResources(cfg)
 	if err != nil {
+		cleanup4()
 		cleanup3()
 		cleanup2()
 		cleanup()
@@ -79,6 +89,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	}
 	adminDeps, err := bootstrap.NewAdminDeps(cfg, dbResources, accountService, hub, manager, logRingResources)
 	if err != nil {
+		cleanup5()
 		cleanup4()
 		cleanup3()
 		cleanup2()
@@ -87,6 +98,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	}
 	engine, err := bootstrap.NewEngine(cfg, hub, manager, queue, authDeps, adminDeps)
 	if err != nil {
+		cleanup5()
 		cleanup4()
 		cleanup3()
 		cleanup2()
@@ -95,6 +107,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	}
 	server, err := service.NewServer(cfg, engine)
 	if err != nil {
+		cleanup5()
 		cleanup4()
 		cleanup3()
 		cleanup2()
@@ -102,6 +115,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		return nil, nil, err
 	}
 	return server, func() {
+		cleanup5()
 		cleanup4()
 		cleanup3()
 		cleanup2()

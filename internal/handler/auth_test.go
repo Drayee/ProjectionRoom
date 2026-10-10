@@ -42,6 +42,18 @@ type fakeAccountService struct {
 	audits    int
 	refreshOK bool // 为 false 时 Refresh 返回固定错误（用例注入）
 	refreshEr error
+
+	// —— 一次性邮件链路（用例注入 + 调用记录）。
+	//
+	// forbidCalls / resetCalls / verifyCalls 记录**明文令牌被传了什么** ——
+	// 这是"响应体里不出现令牌"与"令牌确实被送到了 service"这两条判据的连接点：
+	// 只有把送进去的东西记下来，才能反过来断言它没有出现在响应里。
+	forgotCalls []string
+	resetCalls  []string
+	verifyCalls []string
+	forgotErr   error
+	resetErr    error
+	verifyErr   error
 }
 
 func newFakeAccountService(t *testing.T) *fakeAccountService {
@@ -115,7 +127,7 @@ func (f *fakeAccountService) newSession(u *store.User, inheritToken string) (*se
 	}, nil
 }
 
-func (f *fakeAccountService) Register(ctx context.Context, username, displayName, password, ip, ua string) (*service.Session, error) {
+func (f *fakeAccountService) Register(ctx context.Context, username, displayName, password, email, ip, ua string) (*service.Session, error) {
 	if err := auth.ValidatePasswordPolicy(password); err != nil {
 		return nil, err
 	}
@@ -127,17 +139,28 @@ func (f *fakeAccountService) Register(ctx context.Context, username, displayName
 	if err != nil {
 		return nil, err
 	}
+	// 与真 service 同一条顺序：邮箱格式在哈希之前校验（弱口令/坏邮箱都不该花 CPU）。
+	addr, err := service.CanonicalEmail(email)
+	if err != nil {
+		return nil, err
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.byName[name]; ok {
 		return nil, service.ErrUsernameTaken
 	}
+	for _, u := range f.users {
+		if u.Email != nil && *u.Email == addr {
+			return nil, service.ErrEmailTaken
+		}
+	}
 	f.nextID++
 	u := &store.User{
 		ID: f.nextID, Username: name, DisplayName: display,
 		// PasswordHash 故意放进内存：它绝不能出现在任何响应体里。
 		PasswordHash: password,
+		Email:        &addr,
 		Role:         store.RoleUser, Status: store.StatusActive, TokenVersion: 1,
 		CreatedAt: time.Now(),
 	}
@@ -259,6 +282,44 @@ func (f *fakeAccountService) VerifyAccessToken(ctx context.Context, token string
 	return &cp, nil
 }
 
+// —— 一次性邮件链路（找回密码 / 验证邮箱）。
+//
+// 假实现只记录"被调用了什么、返回什么"，不实现任何真实语义：handler 侧的判据是
+// **协议面**（状态码、响应体字节、有没有把令牌写出去），不是密码学。
+// 真正的端到端语义（令牌生命周期、单次使用、改密撤销会话）在 service 与 store
+// 两层的用例里验，那里有真实的 store 语义。
+
+func (f *fakeAccountService) Forgot(_ context.Context, email, ip, ua string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forgotCalls = append(f.forgotCalls, email)
+	return f.forgotErr
+}
+
+func (f *fakeAccountService) ResetPassword(_ context.Context, token, password string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetCalls = append(f.resetCalls, token)
+	if f.resetErr != nil {
+		return f.resetErr
+	}
+	return nil
+}
+
+func (f *fakeAccountService) VerifyEmail(_ context.Context, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verifyCalls = append(f.verifyCalls, token)
+	return f.verifyErr
+}
+
+// forgotCallCount 返回 Forgot 被调用了几次（"未验证邮箱不发信"这类判据用它）。
+func (f *fakeAccountService) forgotCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.forgotCalls)
+}
+
 // —— 组装。
 
 // accountTestRouter 起一个只挂认证路由的引擎（走真实的注册路径）。
@@ -279,6 +340,11 @@ func accountTestRouter(t *testing.T, svc AccountService, mutate func(*config.Con
 	cfg.IPC.LoginPerMinute, cfg.IPC.LoginBurst = 1e6, 1e6
 	cfg.IPC.RegisterPerMinute, cfg.IPC.RegisterBurst = 1e6, 1e6
 	cfg.IPC.RefreshPerMinute, cfg.IPC.RefreshBurst = 1e6, 1e6
+	// 邮件链路的三条闸门同理（单位是每小时次数）：只有专门的限速用例
+	// 才把它们调低，其余用例不该因为"同一个邮箱请求了几次"而随机拿到 429。
+	cfg.IPC.MailPerEmailPerHour = 1_000_000
+	cfg.IPC.MailPerIPPerHour = 1_000_000
+	cfg.IPC.ResetPerIPPerHour = 1_000_000
 	if mutate != nil {
 		mutate(cfg)
 	}
@@ -350,7 +416,7 @@ func TestAuthRegisterSucceedsWithoutLeakingHash(t *testing.T) {
 	r, _ := accountTestRouter(t, svc, nil)
 
 	w := doJSON(t, r, http.MethodPost, "/api/auth/register",
-		`{"username":"Alice","displayName":"爱丽丝","password":"abcd1234"}`, "")
+		`{"username":"Alice","displayName":"爱丽丝","password":"abcd1234","email":"alice@example.com"}`, "")
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("注册应当 201，实际 %d（body=%s）", w.Code, w.Body.String())

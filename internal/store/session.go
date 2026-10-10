@@ -98,7 +98,15 @@ func (s *Store) RevokeSession(ctx context.Context, id int64) error {
 // "踢掉了几台设备"上报；重复调用会返回 0 而不是重复计数。
 // 撤销时间用数据库的 now()，避免应用与 DB 时钟漂移让"撤销早于签发"这类判断错乱。
 func (s *Store) RevokeAllSessions(ctx context.Context, userID int64) (int64, error) {
-	res := s.db.WithContext(ctx).
+	return revokeAllSessionsIn(ctx, s.db, userID)
+}
+
+// revokeAllSessionsIn 是 RevokeAllSessions 的**语句级唯一 owner**，接受任意 *gorm.DB，
+// 因此可以（并且只被）跨表事务复用 —— 例如改密时必须与"标记令牌已用"落在同一个事务里
+// （见 ConsumePasswordReset）。分成"导出方法"与"内部实现"两层是刻意的：语句只有一份，
+// 而调用方既能走连接池、也能走事务。
+func revokeAllSessionsIn(ctx context.Context, db *gorm.DB, userID int64) (int64, error) {
+	res := db.WithContext(ctx).
 		Model(&Session{}).
 		Where("user_id = ? AND revoked_at IS NULL", userID).
 		Update("revoked_at", gorm.Expr("now()"))

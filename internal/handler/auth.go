@@ -19,6 +19,7 @@ import (
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/limiter"
 	"ProjectionRoom/internal/store"
 )
 
@@ -31,7 +32,7 @@ import (
 //   - 接口面本身就是一份"HTTP 层能对账号做的事"的清单，
 //     比读一遍 service 的方法表更快看清边界。
 type AccountService interface {
-	Register(ctx context.Context, username, displayName, password, ip, ua string) (*service.Session, error)
+	Register(ctx context.Context, username, displayName, password, email, ip, ua string) (*service.Session, error)
 	Login(ctx context.Context, username, password, ip, ua string) (*service.Session, error)
 	Refresh(ctx context.Context, refreshToken, ip, ua string) (*service.Session, error)
 	Logout(ctx context.Context, refreshToken string) error
@@ -40,6 +41,15 @@ type AccountService interface {
 	Me(ctx context.Context, userID int64) (service.Profile, error)
 	IssueWSTicket(ctx context.Context, userID int64) (string, error)
 	VerifyAccessToken(ctx context.Context, token string) (*store.User, error)
+
+	// —— 一次性邮件链路（找回密码 / 验证邮箱）。
+	//
+	// 三个方法都**不返回任何令牌**（这是刻意的）：明文令牌只在 service 内部
+	// 进入发信队列，HTTP 层从头到尾摸不到它。这样"响应体/日志里不出现 token"
+	// 就不需要靠人记得 —— 类型上就没有那个值可以写出去。
+	Forgot(ctx context.Context, email, ip, ua string) error
+	ResetPassword(ctx context.Context, token, password string) error
+	VerifyEmail(ctx context.Context, token string) error
 }
 
 // TicketConsumer 是 /ws 一次性票据的消费能力（ACCOUNTS §5）。
@@ -123,7 +133,22 @@ func registerAccountRoutes(api *gin.RouterGroup, deps AuthDeps, cfg *config.Conf
 	registerLimiter := newKeyedLimiter(cfg.IPC.RegisterPerMinute, cfg.IPC.RegisterBurst, "注册")
 	refreshLimiter := newKeyedLimiter(cfg.IPC.RefreshPerMinute, cfg.IPC.RefreshBurst, "刷新")
 
-	h := &authHandler{deps: deps}
+	// —— 一次性邮件链路的三条闸门。
+	//
+	// 换算（小时 → 每分钟）在 newHourlyEmailLimiter / hourlyToPerMinute 里，
+	// 理由见那两处的说明：少除一次 60 会让闸门宽 60 倍且没有任何报错。
+	forgotIPLimiter := newHourlyEmailLimiter(cfg.IPC.MailPerIPPerHour, forgotRateLimitWhat)
+	// reset 与 verify **共用同一个桶实例**：两者都是"拿一串 256 bit 随机串来猜"，
+	// 威胁模型逐字相同。共用一个桶意味着攻击者不能靠"拆成两个端点"把预算翻倍。
+	tokenIPLimiter := newHourlyEmailLimiter(cfg.IPC.ResetPerIPPerHour, tokenRateLimitWhat)
+
+	h := &authHandler{
+		deps: deps,
+		// 每邮箱闸门不是中间件（键来自请求体，中间件阶段还读不到），
+		// 因此在这里构造一个实例交给 handler 自己用。
+		forgotEmailLimiter: limiter.NewKeyed(
+			hourlyToPerMinute(cfg.IPC.MailPerEmailPerHour), cfg.IPC.MailPerEmailPerHour),
+	}
 
 	api.POST("/auth/register", registerLimiter, h.register)
 	api.POST("/auth/login", loginLimiter, h.login)
@@ -132,6 +157,14 @@ func registerAccountRoutes(api *gin.RouterGroup, deps AuthDeps, cfg *config.Conf
 	api.POST("/auth/logout-all", RequireAuth(deps.Service), h.logoutAll)
 	api.GET("/auth/me", RequireAuth(deps.Service), h.me)
 	api.POST("/auth/ws-ticket", RequireAuth(deps.Service), h.wsTicket)
+
+	// 邮件链路：全部免登录（它们要解决的正是"进不去账号"这件事）。
+	api.POST("/auth/forgot", forgotIPLimiter, h.forgot)
+	api.POST("/auth/reset", tokenIPLimiter, h.resetPassword)
+	// ⚠ 路径名是 `verify-email`（**不是** `verify`）：它是冻结的前端契约
+	//（client/src/api/auth.ts 的 verifyEmail），邮件里的验证链接会把用户带到
+	// `/verify#token=…` 页，那个页再 POST 到这里。改名就等于让每一封验证邮件失效。
+	api.POST("/auth/verify-email", tokenIPLimiter, h.verifyEmail)
 }
 
 // registerAuthUnavailable 注册一组"账号能力暂时不可用"的处理器（全部 503）。
@@ -149,20 +182,58 @@ func registerAuthUnavailable(api *gin.RouterGroup) {
 	api.POST("/auth/logout-all", unavailable)
 	api.GET("/auth/me", unavailable)
 	api.POST("/auth/ws-ticket", unavailable)
+	api.POST("/auth/forgot", unavailable)
+	api.POST("/auth/reset", unavailable)
+	api.POST("/auth/verify-email", unavailable)
 }
 
 // authHandler 持有依赖，把每个端点的实现做成方法（避免闭包里重复传参）。
 type authHandler struct {
 	deps AuthDeps
+	// forgotEmailLimiter 是**每邮箱**的令牌桶（键是归一化后的邮箱）。
+	//
+	// 它为什么不是中间件：键来自请求体，而 gin 的中间件跑在处理器之前、
+	// 读不到（也不该去读）业务字段。nil = 该闸门关闭（配置为 0 时不会发生 —— config 层不允许 0）。
+	forgotEmailLimiter *limiter.Keyed
 }
 
 // —— 请求体。
 
 // credentialsRequest 是注册/登录的请求体（字段名与前端约定）。
+//
+// Email 只有注册用（登录只需要用户名 + 口令），但两者共用同一个请求体类型：
+// 拆成两个类型会让"注册比登录多一个字段"这件事在两个地方各说一遍，
+// 而它们的解析、限长与错误文案其实完全一样。
 type credentialsRequest struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
 	Password    string `json:"password"`
+	// Email 是注册时**必填**的邮箱（用于日后找回密码）。登录时忽略。
+	Email string `json:"email"`
+}
+
+// —— 一次性邮件链路的请求体。
+//
+// 三个都用独立的类型而不是复用 credentialsRequest：它们的字段完全不同，
+// 复用只会让"这个端点到底读哪些字段"变得要靠读实现才知道。
+
+type forgotRequest struct {
+	Email string `json:"email"`
+}
+
+// resetRequest 是重置密码的请求体。
+//
+// token 走**请求体**而不是查询串或 URL 路径：它会出现在反代 access log、
+// 浏览器历史与 Referer 里 —— 而这是一串"拿到就能改密码"的凭据。
+// 邮件里的链接把 token 放在 fragment（#）里，前端读出来后再 POST 到这里，
+// 于是它在整个链路上一次都没有进过服务端的访问日志。
+type resetRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
+type verifyRequest struct {
+	Token string `json:"token"`
 }
 
 // —— 响应体。
@@ -264,7 +335,7 @@ func (h *authHandler) register(c *gin.Context) {
 	}
 
 	sess, err := h.deps.Service.Register(c.Request.Context(),
-		req.Username, req.DisplayName, req.Password, c.ClientIP(), c.Request.UserAgent())
+		req.Username, req.DisplayName, req.Password, req.Email, c.ClientIP(), c.Request.UserAgent())
 	if err != nil {
 		writeAccountError(c, err)
 		return
@@ -391,24 +462,119 @@ func (h *authHandler) wsTicket(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// —— 请求解析与错误写出。
+// —— 一次性邮件链路（找回密码 / 验证邮箱）。 ——
 
-// maxCredentialsBodyBytes 是注册/登录请求体的上限。
+// forgotResponseBody 是 POST /api/auth/forgot 的**唯一**成功响应体。
 //
-// 64 KiB 的依据：合法的请求体是"用户名 + 昵称 + 口令"，几十字节到几百字节；
+// 它是本文件里最重要的一个常量。需求是"无论邮箱是否注册、无论发信成功与否，
+// 都返回同样的 200 与同一句文案"，而"同样的字节"这件事只有一种可靠的实现方式：
+// **只有一个字面量**。三条路径（命中 / 未命中 / 发信失败）全部走到同一个
+// writeForgotSent，于是"逐字相同"不再依赖任何人记得别改文案。
+const forgotResponseBody = `{"status":"sent"}`
+
+// forgotResponseContentType 与 c.JSON 的产出保持一致（charset 一并写上，
+// 否则同一个端点在两条路径上的 Content-Type 会不同 —— 那也是一种可观测差异）。
+const forgotResponseContentType = "application/json; charset=utf-8"
+
+// writeForgotSent 是"提交成功"在 HTTP 层的唯一产出点（见 forgotResponseBody）。
+func writeForgotSent(c *gin.Context) {
+	// 用 c.Data 而不是 c.JSON：响应体是常量字节，不经过任何序列化，
+	// 因此不存在"某个字段在某些路径上被省略/顺序不同"的可能。
+	c.Data(http.StatusOK, forgotResponseContentType, []byte(forgotResponseBody))
+}
+
+// forgot 接受"忘记密码"请求（成功 200，**恒定**）。
+//
+// 门控顺序（顺序即安全性质）：
+//
+//  1. 请求体解析（非 JSON → 400）；
+//  2. **每邮箱**闸门 → 429。键取归一化后的地址，且**先于任何查库**，
+//     因此它对"这个邮箱存不存在"一无所知 —— 与恒定 200 是同一件事的两面；
+//  3. service.Forgot：格式（400）/ 邮件能力（503）/ 其余一律 200。
+//
+// 为什么这里**不**先做邮箱格式校验再限速：格式错的请求根本没有"邮箱"可以当键，
+// 而它们也不消耗任何配额（走不到发信链路），所以顺序反过来的唯一后果是
+// 让攻击者能用垃圾格式绕开限速去打 format 正则 —— 而那是极廉价的纯 CPU 工作。
+func (h *authHandler) forgot(c *gin.Context) {
+	var req forgotRequest
+	if !bindJSON(c, &req, "请求体不是合法 JSON") {
+		return
+	}
+
+	// 键必须归一化：否则 A@x.com 与 a@x.com 是两个桶，"5 封/小时"会变成 10 封/小时。
+	// 归一化失败（格式非法）则跳过这条闸门 —— 那种请求走不到发信，且下游会给 400。
+	if key, err := service.CanonicalEmail(req.Email); err == nil {
+		if h.forgotEmailLimiter != nil && !h.forgotEmailLimiter.Allow(key) {
+			writeRateLimited(c, forgotRateLimitWhat)
+			return
+		}
+	}
+
+	if err := h.deps.Service.Forgot(c.Request.Context(),
+		req.Email, c.ClientIP(), c.Request.UserAgent()); err != nil {
+		writeAccountError(c, err)
+		return
+	}
+	writeForgotSent(c)
+}
+
+// resetPassword 用一次性令牌设置新口令（成功 204）。
+//
+// 204 而不是 200：没有响应体可给（改密成功后前端要做的是"跳去登录"），
+// 与既有的 logout / logout-all 同一种形态。
+func (h *authHandler) resetPassword(c *gin.Context) {
+	var req resetRequest
+	if !bindJSON(c, &req, "请求体不是合法 JSON") {
+		return
+	}
+	if err := h.deps.Service.ResetPassword(c.Request.Context(), req.Token, req.Password); err != nil {
+		writeAccountError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// verifyEmail 用一次性令牌完成邮箱验证（成功 204）。
+//
+// 与 resetPassword 共用同一条每 IP 闸门（见 router 注册处的说明）：
+// 两者都是"拿一串 256 bit 随机串来猜"，共用一条桶意味着不能靠拆端点翻倍预算。
+func (h *authHandler) verifyEmail(c *gin.Context) {
+	var req verifyRequest
+	if !bindJSON(c, &req, "请求体不是合法 JSON") {
+		return
+	}
+	if err := h.deps.Service.VerifyEmail(c.Request.Context(), req.Token); err != nil {
+		writeAccountError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// bindJSON 解析请求体并压住大小；返回 false 表示已经写出了错误响应。
+//
+// 不回显底层解析错误：它可能包含请求体片段，而请求体里有口令与一次性 token。
+func bindJSON(c *gin.Context, dst any, badRequestMessage string) bool {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCredentialsBodyBytes)
+	if err := c.ShouldBindJSON(dst); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+			"error": badRequestMessage,
+			"code":  model.CodeBadRequest,
+		})
+		return false
+	}
+	return true
+}
+
+// maxCredentialsBodyBytes 是注册/登录（以及邮件链路）请求体的上限。
+//
+// 64 KiB 的依据：合法的请求体是"用户名 + 昵称 + 口令 + 邮箱"，几十字节到几百字节；
 // 上限存在的意义是让"超大 body"在读到内存之前就被拒。
 const maxCredentialsBodyBytes = 64 << 10
 
 // bindCredentials 解析并规范化用户名/口令，同时压住请求体大小。
 // 返回 false 表示已经写出了错误响应（调用方直接 return）。
 func bindCredentials(c *gin.Context, req *credentialsRequest) bool {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCredentialsBodyBytes)
-	if err := c.ShouldBindJSON(req); err != nil {
-		// 不回显底层解析错误：它可能包含请求体片段（而请求体里有口令）。
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "请求体不是合法 JSON",
-			"code":  model.CodeBadRequest,
-		})
+	if !bindJSON(c, req, "请求体不是合法 JSON") {
 		return false
 	}
 	req.Username = strings.TrimSpace(req.Username)

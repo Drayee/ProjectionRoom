@@ -31,18 +31,23 @@ import (
 //	  NewEngine → service.NewServer      （服务先停，资源后关）
 //	    service.NewManager → service.NewHub / NewBroadcaster
 //	      segment.NewQueue
-//	        NewAccountService → NewAccountStore / NewSigner / NewTicketStore
+//	        NewAccountService → NewAccountStore / NewSigner / NewTicketStore / NewMailer
 //	          NewDBResources（连接 + 迁移 + 事件写入器；最先创建、最后清理）
 //
 // 账号层（T1–T9）的装配边：
 //
 //	config → DBResources（连接 + 迁移 + 事件写入器）→ AccountStoreAdapter → AccountService
 //	config → auth.Signer / auth.TicketStore ─┤
+//	config → NewMailer（SMTP 投递器 + 有界队列；未配置时为 nil）──┤
 //	                        │                └→ handler.AuthDeps（含票据表与 rooms_meta 出口）
 //	                        └→ /ws 的票据消费（同一个 TicketStore 实例）
 //	config → NewLogRingResources（日志环形缓冲；退出时恢复标准输出）
 //	AccountService + DBResources + Hub + Manager + LogRing → handler.AdminDeps
 //	AuthDeps + AdminDeps → NewEngine → NewRouter（两条依赖都是**参数**，不是包级变量）
+//
+// 邮件队列的位置是有意的：它由 NewAccountService 消费，因此一定在 NewEngine 之前
+// 创建 → 它的 cleanup 一定在引擎与服务器之后执行。这正是"服务停了才关队列"：
+// 退出瞬间正在投递的那封邮件不会被从中途掐断（mail.Mailer.Close 还会给 5s flush）。
 //
 // 顺序不是风格问题：它决定了生成的 cleanup 链是
 //
@@ -59,6 +64,7 @@ var ProviderSet = wire.NewSet(
 	service.NewHub,         // 信令连接池（自带清理函数）
 	service.NewBroadcaster, // Hub → service.Broadcaster
 	segment.NewQueue,       // 一次性的视频切片作业队列（自带清理函数）
+	NewMailer,              // 邮件投递器 + 有界队列（未配置时为 nil；自带清理函数）
 	NewAccountService,      // 账号用例
 	NewAccountStore,        // 账号存储适配器（唯一碰 gorm 的一层）
 	NewSigner,              // access token 签发器

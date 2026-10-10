@@ -8,6 +8,7 @@ const (
 	tableSessions         = "sessions"
 	tableRoomsMeta        = "rooms_meta"
 	tableAdminAudit       = "admin_audit"
+	tablePasswordResets   = "password_resets"
 	tableSchemaMigrations = "schema_migrations"
 )
 
@@ -21,6 +22,17 @@ const (
 	StatusBanned = "banned"
 )
 
+// 一次性邮件令牌的用途（password_resets.purpose，DDL 里的 CHECK 与这里一一对应）。
+//
+// 用途必须进 WHERE 条件：否则一封"验证邮箱"的信可以被拿去当"重置密码"的凭据用
+// （两串 token 的生成方式、存储形态、消费路径全都一样，唯一的区分就是它）。
+const (
+	// PurposeEmailVerify 证明"这个邮箱属于这个账号"。
+	PurposeEmailVerify = "email_verify"
+	// PurposePasswordReset 授权"改这个账号的口令"。
+	PurposePasswordReset = "password_reset"
+)
+
 // 列长度上限（与 DDL 的 varchar 长度一致）。用于写入前的快速失败：
 // 超过长度时 PostgreSQL 会直接报错（varchar 不做静默截断），
 // 提前给出可读错误比让约束报错更好定位。
@@ -28,7 +40,9 @@ const (
 	maxUsernameLen    = 20
 	maxDisplayNameLen = 32
 	maxTitleLen       = 60
-	tokenHashHexLen   = 64 // sha256 的十六进制长度 = sessions.token_hash char(64)
+	// maxEmailLen 与 DDL 的 varchar(254) 一致（RFC 5321 对邮件地址长度上限的规定值）。
+	maxEmailLen     = 254
+	tokenHashHexLen = 64 // sha256 的十六进制长度 = sessions.token_hash char(64)
 )
 
 // User 对应 users 表（ACCOUNTS §4）。
@@ -38,18 +52,24 @@ const (
 // 这样无论哪个调用方漏了归一化，唯一约束与登录查询都落在同一个规范形上；
 // DDL 里还有 CHECK (username = lower(username)) 作为最后一道兜底。
 type User struct {
-	ID           int64     `gorm:"column:id;primaryKey"`
-	Username     string    `gorm:"column:username"`
-	DisplayName  string    `gorm:"column:display_name"`
-	PasswordHash string    `gorm:"column:password_hash"`
-	Email        *string   `gorm:"column:email"`
-	Role         string    `gorm:"column:role"`
-	Status       string    `gorm:"column:status"`
-	TokenVersion int       `gorm:"column:token_version"`
-	BannedReason *string   `gorm:"column:banned_reason"`
-	CreatedAt    time.Time `gorm:"column:created_at"`
-	UpdatedAt    time.Time `gorm:"column:updated_at"`
-	LastSeenAt   time.Time `gorm:"column:last_seen_at"`
+	ID           int64   `gorm:"column:id;primaryKey"`
+	Username     string  `gorm:"column:username"`
+	DisplayName  string  `gorm:"column:display_name"`
+	PasswordHash string  `gorm:"column:password_hash"`
+	Email        *string `gorm:"column:email"`
+	// EmailVerifiedAt 是邮箱归属被证实的时刻；nil = 未验证。
+	//
+	// 授权事实：**只有非 nil 的邮箱能用于找回**（见 service.Forgot 的门控）。
+	// 它与 Email 分成两列而不是"Email 非空即已验证"，是因为"填了邮箱"与
+	// "证明了这个邮箱是他的"是两件事 —— 前者是用户的自述，后者才有授权含义。
+	EmailVerifiedAt *time.Time `gorm:"column:email_verified_at"`
+	Role            string     `gorm:"column:role"`
+	Status          string     `gorm:"column:status"`
+	TokenVersion    int        `gorm:"column:token_version"`
+	BannedReason    *string    `gorm:"column:banned_reason"`
+	CreatedAt       time.Time  `gorm:"column:created_at"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+	LastSeenAt      time.Time  `gorm:"column:last_seen_at"`
 }
 
 // TableName 固定表名：GORM 默认会把 RoomMeta 复数化成 room_metas，
@@ -119,6 +139,30 @@ type AdminAudit struct {
 
 // TableName 见 User.TableName 的说明。
 func (AdminAudit) TableName() string { return tableAdminAudit }
+
+// PasswordReset 对应 password_resets：一次性邮件令牌（验证邮箱 / 重置密码两种用途）。
+//
+// **库里只有 TokenHash**（sha256 十六进制）：原文只在下发那一封邮件里存在，
+// 与本项目 refresh token 的做法一致（§4）。
+//
+// 单次使用靠 UsedAt：消费是一条带条件的 UPDATE ... RETURNING（见
+// Store.ConsumePasswordReset / ConsumeEmailVerify），"校验"与"标记已用"
+// 在同一条语句里完成，因此两个并发请求不可能都通过。
+type PasswordReset struct {
+	ID        int64      `gorm:"column:id;primaryKey"`
+	UserID    int64      `gorm:"column:user_id"`
+	Purpose   string     `gorm:"column:purpose"`
+	TokenHash string     `gorm:"column:token_hash"`
+	Email     *string    `gorm:"column:email"`
+	IP        *string    `gorm:"column:ip"`
+	UserAgent *string    `gorm:"column:user_agent"`
+	CreatedAt time.Time  `gorm:"column:created_at"`
+	ExpiresAt time.Time  `gorm:"column:expires_at"`
+	UsedAt    *time.Time `gorm:"column:used_at"`
+}
+
+// TableName 见 User.TableName 的说明。
+func (PasswordReset) TableName() string { return tablePasswordResets }
 
 // UserQuery 是用户列表的查询条件（管理端：分页 + 搜索，§8）。
 type UserQuery struct {

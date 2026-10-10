@@ -37,10 +37,36 @@ func (s *Store) CreateUser(ctx context.Context, u *User) error {
 	if u.PasswordHash == "" {
 		return errors.New("store: password_hash 不能为空")
 	}
+	// 邮箱可空：nil 与空串都表示"没有邮箱"。这里只做**落库前的形状**校验
+	//（去控制字符、全小写、长度）；"它长得像不像邮箱"是产品规则，属于
+	// service.CanonicalEmail（那一层拒绝非法格式，本层不做正则）。
+	if u.Email != nil {
+		addr := canonicalEmail(*u.Email)
+		if addr == "" {
+			u.Email = nil
+		} else {
+			if len(addr) > maxEmailLen {
+				return fmt.Errorf("store: email 超过 %d 个字符", maxEmailLen)
+			}
+			u.Email = &addr
+		}
+	}
+	if u.Email != nil && u.EmailVerifiedAt != nil {
+		// 注册是唯一的建号路径，而注册时邮箱必然未验证（要收一封验证信）。
+		// 允许"建号即已验证"等于绕开整条归属证明链，所以这里直接拒。
+		return errors.New("store: 新建账号不能带 email_verified_at（归属证明要走一次验证邮件）")
+	}
 	applyUserDefaults(u)
 
 	if err := s.db.WithContext(ctx).Create(u).Error; err != nil {
 		if isUniqueViolation(err) {
+			// users 上有**两个**唯一约束（username 与 lower(email)），提示文案完全不同
+			// （换名字 vs 换邮箱），所以必须分辨。分辨依据是约束名，不是错误文案。
+			if uniqueViolationConstraint(err) == emailUniqueIndex {
+				return ErrEmailTaken
+			}
+			// 拿不到约束名时落到 username 分支：两者都是 409、都不泄露额外信息，
+			// 且这个默认与"加 email 之前"的行为逐字一致（向后兼容的一侧）。
 			return ErrUsernameTaken
 		}
 		return fmt.Errorf("store: 创建用户失败: %w", err)
@@ -72,6 +98,89 @@ func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
 		return nil, wrapDBErr("按 ID 查用户", err)
 	}
 	return &u, nil
+}
+
+// UserByEmail 按邮箱查用户（找回密码与"邮箱已被占用"判定的读入口）；
+// 不存在返回 ErrNotFound。
+//
+// 查询写的是 `lower(email) = ?` 而不是 `email = ?`，三个理由：
+//  1. 它是 users_email_lower_key 这个**函数索引**能命中的唯一形态（写错就是全表扫）；
+//  2. 即使库里被旁路写入大小写混杂的值，也仍然匹配得上；
+//  3. "唯一性按 lower(email) 判"与"查询按 lower(email) 找"必须同口径 ——
+//     否则会出现"查得到两行"或"唯一约束挡住了却查不到"这类矛盾。
+//
+// 空邮箱直接当"没找到"，不去查库（也避免把空串交给数据库：
+// `lower(email) = ”` 只会白白扫一遍，而且"没有邮箱"本来就不该匹配任何账号）。
+func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
+	addr := canonicalEmail(email)
+	if addr == "" {
+		return nil, ErrNotFound
+	}
+	var u User
+	if err := s.db.WithContext(ctx).Where("lower(email) = ?", addr).Take(&u).Error; err != nil {
+		return nil, wrapDBErr("按邮箱查用户", err)
+	}
+	return &u, nil
+}
+
+// SetUserEmail 改账号的邮箱，并**同时**决定它的验证状态。
+//
+// verifiedAt 非 nil = 这次改动本身就是归属证明（管理员绑定走这条：管理员是可信主体，
+// 因此不需要走验证邮件 —— 这正是"给既有账号补邮箱"绕开鸡生蛋的那条路）；
+// nil = 改完之后是未验证状态（将来用户自助换绑走这条，必须先收一封验证信）。
+//
+// email 传空串 = 解绑：email 与 email_verified_at **一起**置 NULL。
+// 两列必须同时动 —— 留下"已验证"却没有邮箱是自相矛盾的状态，而留下"邮箱"却没有
+// 验证时间会让一个从未证明过的邮箱进入找回链路。
+//
+// 唯一冲突（同一个邮箱属于另一个账号）返回 ErrEmailTaken。
+func (s *Store) SetUserEmail(ctx context.Context, id int64, email string, verifiedAt *time.Time) error {
+	if id <= 0 {
+		return errors.New("store: SetUserEmail 需要有效的 user_id")
+	}
+	addr := canonicalEmail(email)
+	updates := map[string]any{
+		"email":             nil,
+		"email_verified_at": nil,
+	}
+	if addr != "" {
+		if len(addr) > maxEmailLen {
+			return fmt.Errorf("store: email 超过 %d 个字符", maxEmailLen)
+		}
+		updates["email"] = addr
+		updates["email_verified_at"] = verifiedAt
+	}
+
+	res := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", id).Updates(updates)
+	if res.Error != nil {
+		if isUniqueViolation(res.Error) {
+			return ErrEmailTaken
+		}
+		return fmt.Errorf("store: 改用户邮箱失败: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// canonicalEmail 把邮箱归一到存储与查询共用的规范形。
+//
+// 两步，都不是装饰：
+//  1. **去掉所有控制字符与空白**（不只是首尾）：邮箱会被拼进 SMTP 的
+//     `RCPT TO` / `To:` 头，里面出现 CR/LF 就是邮件头注入（攻击者在后面追加
+//     `Bcc:` 之类）。服务层的正则已经拦住了它，这里是第二道 —— store 也可能
+//     被别的调用方直接用；而且"库里存着一个带换行的邮箱"本身就是一颗定时炸弹。
+//  2. **全小写**：与 username 全小写存储同口径，也让 users_email_lower_key
+//     这个函数索引的语义（大小写不敏感的唯一性）在存储侧就成立。
+func canonicalEmail(email string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, email)
+	return strings.ToLower(strings.TrimSpace(cleaned))
 }
 
 // SetUserStatus 改账号状态（active / banned）并维护 banned_reason。
@@ -130,8 +239,15 @@ func (s *Store) SetUserRole(ctx context.Context, id int64, role string) error {
 // 必须是**单条语句** + RETURNING：分"先读后写"两步会在并发封禁/登录时交错，
 // 返回值就不再是"本次自增后的版本号"，而 access token 的有效性判断依赖它是准的。
 func (s *Store) BumpTokenVersion(ctx context.Context, id int64) (int, error) {
+	return bumpTokenVersionIn(ctx, s.db, id)
+}
+
+// bumpTokenVersionIn 是 BumpTokenVersion 的**语句级唯一 owner**（理由同
+// revokeAllSessionsIn）：改密事务必须能让"新口令"与"旧 token 全失效"同时成立，
+// 因此这条语句要能在事务句柄上执行，而不是只认连接池。
+func bumpTokenVersionIn(ctx context.Context, db *gorm.DB, id int64) (int, error) {
 	var bumped User
-	res := s.db.WithContext(ctx).
+	res := db.WithContext(ctx).
 		Model(&bumped).
 		Clauses(clause.Returning{Columns: []clause.Column{{Name: "token_version"}}}).
 		Where("id = ?", id).

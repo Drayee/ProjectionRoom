@@ -45,7 +45,20 @@ var (
 	// 只有一个能成功（§5 的轮换 + 重放检测）。调用方请用 errors.Is 判断，
 	// 不要去匹配错误文案 —— 文案会变，哨兵不会。
 	ErrTokenHashTaken = errors.New("store: token_hash 已被占用")
+
+	// ErrEmailTaken 表示 users.email 唯一冲突（同一个邮箱已被另一个账号绑定）。
+	//
+	// 与 ErrUsernameTaken 分开是必要的：注册时两列唯一约束都可能被撞上，而
+	// "用户名被占用"与"邮箱被占用"要给用户完全不同的提示（前者换名字、后者换邮箱）。
+	ErrEmailTaken = errors.New("store: 邮箱已被占用")
 )
+
+// emailUniqueIndex 是 users.email 部分唯一索引的名字。
+//
+// 它出现在这里的原因：PostgreSQL 把唯一索引冲突报成"约束名 = 索引名"，
+// 而区分"用户名撞了"与"邮箱撞了"只能靠这个名字（见 uniqueViolationConstraint）。
+// 名字在 migrations.go 的 0006 步里定义 —— 两处必须一致。
+const emailUniqueIndex = "users_email_lower_key"
 
 // —— 连接池与分页的约定值。
 const (
@@ -213,4 +226,23 @@ func isUniqueViolation(err error) bool {
 	}
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// uniqueViolationConstraint 返回唯一约束冲突的**约束名**（拿不到时返回空串）。
+//
+// 为什么拿得到：gorm 的 postgres 方言把 23505 翻译成
+// `fmt.Errorf("%w: %w", gorm.ErrDuplicatedKey, pgErr)` —— 原始 *pgconn.PgError
+// 被**包在错误链里**，所以 errors.As 仍能取到 ConstraintName。
+// （这一条是读 gorm.io/driver/postgres v1.6.3 的 error_translator.go 确认的，
+// 不是猜的；若哪天驱动改成只返回翻译后的哨兵，这里会退化成空串，
+// 调用方的默认分支必须仍然给出一个**安全**的答案 —— 见 CreateUser。）
+//
+// 对 PostgreSQL 来说，`CREATE UNIQUE INDEX` 建出来的索引没有同名约束，
+// 因此报出来的 ConstraintName 就是**索引名**。
+func uniqueViolationConstraint(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.ConstraintName
+	}
+	return ""
 }

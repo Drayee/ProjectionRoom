@@ -45,6 +45,35 @@ const (
 	// 它只出现在 **握手之前** 的拒绝上（HTTP 401）。客户端唯一正确的反应是重新取票，
 	// 而不是拿同一张票重连 —— 票据是单次的，重连只会连续拿到 401。
 	CodeWSTicketInvalid = "WS_TICKET_INVALID"
+
+	// CodeResetTokenInvalid 表示重置链接不可用：**不存在 / 已过期 / 已被使用 / 用途不符
+	// 四种情况共用一个码**。
+	//
+	// 四合一不是偷懒，是安全性质：区分"过期"与"从来不存在"等于给攻击者一条
+	// 探测通道（前者说明这串 token 曾经是真的）。前端对它的正确反应是同一种：
+	// 回"忘记密码"重新申请一封。
+	CodeResetTokenInvalid = "RESET_TOKEN_INVALID"
+
+	// CodeVerifyTokenInvalid 表示验证链接不可用（同上四合一）。
+	//
+	// 它与 CodeResetTokenInvalid 分开：两者对用户是**不同**的可操作动作
+	//（"重新申请重置" vs "重新发一封验证信"），而它们都不构成枚举面 ——
+	// 能拿到这个码的前提是对方已经持有一串 256 bit 的随机串。
+	CodeVerifyTokenInvalid = "VERIFY_TOKEN_INVALID"
+
+	// CodeMailUnavailable 表示**邮件能力未配置**（PR_SMTP_HOST 或账号密码为空）。
+	//
+	// 与 CodeAuthUnavailable 同风格：显式的 503 降级，而不是"路由凭空消失"。
+	// 它描述的是**服务端能力状态**，与请求内容无关 —— 所以它不区分邮箱是否存在。
+	CodeMailUnavailable = "MAIL_UNAVAILABLE"
+
+	// CodeEmailTaken 表示邮箱已被另一个账号绑定。
+	//
+	// ⚠ 这是一个**被接受的有界枚举面**（见 service.Register 的说明）：
+	// 注册时用户必须知道该换邮箱还是换用户名，所以这里给出可区分的码。
+	// 与 /api/auth/forgot 的"恒定 200"形成对照 —— 那个入口免登录且不限"写"，
+	// 因此它必须逐字相同。改这里的文案/码之前请先读 service.Register 的那一段。
+	CodeEmailTaken = "EMAIL_TAKEN"
 )
 
 // accountErrorResponse 把账号层的领域错误映射为 HTTP 状态码、错误码与用户可读消息。
@@ -79,8 +108,27 @@ func accountErrorResponse(err error) (status int, code string, message string) {
 
 	case errors.Is(err, service.ErrUsernameTaken):
 		return http.StatusConflict, CodeUsernameTaken, "该用户名已被占用"
+	case errors.Is(err, service.ErrEmailTaken):
+		return http.StatusConflict, CodeEmailTaken, "该邮箱已被其他账号绑定"
 	case errors.Is(err, service.ErrBadUsername), errors.Is(err, service.ErrBadDisplayName):
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+	// 邮箱格式不合法：与"邮箱已被占用"分开，因为用户要采取的动作完全不同
+	//（一个是改格式，一个是换邮箱）。
+	case errors.Is(err, service.ErrBadEmail):
+		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+
+	// —— 一次性邮件链路（找回密码 / 验证邮箱）。
+	//
+	// 两条都是 400 而不是 404：链接不可用是"你手里这串东西不对"，
+	// 而不是"这个资源不存在"（后者会让人以为要换个 URL）。
+	case errors.Is(err, service.ErrResetTokenInvalid):
+		return http.StatusBadRequest, CodeResetTokenInvalid, err.Error()
+	case errors.Is(err, service.ErrVerifyTokenInvalid):
+		return http.StatusBadRequest, CodeVerifyTokenInvalid, err.Error()
+	// 邮件能力未配置：503 + 显式错误码，与"AUTH_UNAVAILABLE"同一套降级风格。
+	// 注意它**不区分邮箱是否存在**（判据在查库之前就成立）。
+	case errors.Is(err, service.ErrMailUnavailable):
+		return http.StatusServiceUnavailable, CodeMailUnavailable, "邮件能力暂时不可用（服务端未配置发信通道）"
 
 	// 口令策略的每一条都给出具体原因：注册不是枚举面（§5 的统一文案只针对登录），
 	// 而"缺哪一条"是用户改一次就能过的关键信息。

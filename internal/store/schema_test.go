@@ -29,13 +29,16 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			"display_name":  {"character varying", 32, false},
 			"password_hash": {"character varying", 72, false},
 			"email":         {"character varying", 254, true},
-			"role":          {"character varying", 8, false},
-			"status":        {"character varying", 8, false},
-			"token_version": {"integer", 0, false},
-			"banned_reason": {"text", 0, true},
-			"created_at":    {"timestamp with time zone", 0, false},
-			"updated_at":    {"timestamp with time zone", 0, false},
-			"last_seen_at":  {"timestamp with time zone", 0, false},
+			// 0006 新增：邮箱归属被证实的时刻（NULL = 未验证）。它可空是语义的一部分
+			// ——"填了邮箱"与"证明了这个邮箱是他的"是两件事。
+			"email_verified_at": {"timestamp with time zone", 0, true},
+			"role":              {"character varying", 8, false},
+			"status":            {"character varying", 8, false},
+			"token_version":     {"integer", 0, false},
+			"banned_reason":     {"text", 0, true},
+			"created_at":        {"timestamp with time zone", 0, false},
+			"updated_at":        {"timestamp with time zone", 0, false},
+			"last_seen_at":      {"timestamp with time zone", 0, false},
 		},
 		"sessions": {
 			"id":         {"bigint", 0, false},
@@ -70,6 +73,18 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 		"schema_migrations": {
 			"version":    {"character varying", 32, false},
 			"applied_at": {"timestamp with time zone", 0, false},
+		},
+		"password_resets": {
+			"id":         {"bigint", 0, false},
+			"user_id":    {"bigint", 0, false},
+			"purpose":    {"character varying", 16, false},
+			"token_hash": {"character", 64, false}, // 与 sessions.token_hash 同规格：char(64) 的 sha256
+			"email":      {"character varying", 254, true},
+			"ip":         {"character varying", 45, true},
+			"user_agent": {"character varying", 255, true},
+			"created_at": {"timestamp with time zone", 0, false},
+			"expires_at": {"timestamp with time zone", 0, false},
+			"used_at":    {"timestamp with time zone", 0, true},
 		},
 	}
 
@@ -110,6 +125,11 @@ func TestSchemaConstraintsMatchSpec(t *testing.T) {
 		},
 		"admin_audit":       {{"PRIMARY KEY", "id"}},
 		"schema_migrations": {{"PRIMARY KEY", "version"}},
+		"password_resets": {
+			{"PRIMARY KEY", "id"},
+			{"UNIQUE", "token_hash"},
+			{"FOREIGN KEY", "user_id"},
+		},
 	}
 
 	for table, want := range cases {
@@ -141,6 +161,10 @@ func TestSchemaIndexesExist(t *testing.T) {
 		"sessions_user_id_idx",
 		"sessions_expires_at_idx",
 		"rooms_meta_public_idx",
+		// 0006/0007：邮箱的唯一性（部分唯一索引 + 函数索引）与令牌表的两个索引。
+		"users_email_lower_key",
+		"password_resets_user_id_idx",
+		"password_resets_expires_at_idx",
 	} {
 		var exists bool
 		const q = `SELECT EXISTS (

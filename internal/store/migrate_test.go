@@ -71,7 +71,7 @@ func TestMigrateFirstRunAppliesAllThenSecondRunIsNoop(t *testing.T) {
 func TestMigrateCreatesPhaseOneTablesOnly(t *testing.T) {
 	s := requireTestDB(t)
 
-	for _, name := range []string{"schema_migrations", "users", "sessions", "rooms_meta", "admin_audit"} {
+	for _, name := range []string{"schema_migrations", "users", "sessions", "rooms_meta", "admin_audit", "password_resets"} {
 		if !tableExists(t, s, name) {
 			t.Fatalf("表 %s 应该存在", name)
 		}
@@ -91,7 +91,7 @@ func TestMigrationPlanIsOrderedAndAdditiveOnly(t *testing.T) {
 		t.Fatalf("迁移清单本身不合法：%v", err)
 	}
 	if len(plan) < 5 {
-		t.Fatalf("本期应有 5 步（账本 + 4 张表），实际 %d", len(plan))
+		t.Fatalf("本期应有至少 5 步（账本 + 4 张表），实际 %d", len(plan))
 	}
 	prev := ""
 	for _, m := range plan {
@@ -108,8 +108,25 @@ func TestMigrationPlanIsOrderedAndAdditiveOnly(t *testing.T) {
 			// 是合法且必须的（§4 的外键），不能一刀切地禁用关键字子串。
 			first := strings.ToLower(strings.Fields(stmt)[0])
 			switch first {
-			case "drop", "truncate", "delete", "alter", "update":
+			case "drop", "truncate", "delete", "update":
 				t.Fatalf("迁移 %s 里出现了破坏性语句（首词 %q）：违反「只做加法」", m.version, first)
+			case "alter":
+				// ALTER 本身不是破坏性的做法，**破坏性的形态**才是。
+				//
+				// 这里只放行唯一一种"纯加列"形态：`ALTER TABLE <t> ADD COLUMN [IF NOT EXISTS] …`。
+				// 它是幂等的（IF NOT EXISTS）且只增不减；其余一切 ALTER
+				//（DROP COLUMN / ALTER COLUMN … TYPE / DROP CONSTRAINT / RENAME / SET NOT NULL …）
+				// 都会改动既有结构或既有数据，继续拒绝。
+				//
+				// 为什么必须放行它（这条规则在 0006 之前是"一律禁止 alter"）：
+				// 给一张**已经存在**的表补列没有别的幂等写法 —— 不能写进 CREATE TABLE
+				//（表已存在，IF NOT EXISTS 会让整条 CREATE 变成空操作），
+				// 而 `ADD CONSTRAINT` 恰恰不能重复执行（见 migrations.go 的第 2 条规则）。
+				// 也就是说"一律禁止 alter"这条规则与"给既有表加列"这件事**不可能同时成立**，
+				// 而我们显然要允许后者。收窄成"只允许加列"才是这条规则的意图。
+				if !isAddColumnOnly(stmt) {
+					t.Fatalf("迁移 %s 里的 ALTER 不是允许的「纯加列」形态：%s", m.version, stmt)
+				}
 			}
 			all.WriteString(strings.ToLower(stmt))
 			all.WriteString("\n")
@@ -125,6 +142,20 @@ func TestMigrationPlanIsOrderedAndAdditiveOnly(t *testing.T) {
 	if strings.Contains(sql, "?") {
 		t.Fatalf("迁移 DDL 里不能出现 '?'（会被当作绑定参数）")
 	}
+}
+
+// isAddColumnOnly 判断一条 ALTER 语句是否属于唯一被允许的"纯加列"形态。
+//
+// 期望形态：`ALTER TABLE <name> ADD COLUMN [IF NOT EXISTS] <col> <type> …`
+// （按空白分词后：alter / table / <name> / add / column / …）。
+// 它只做形状判断，不看列定义 —— 列定义本身由 schema_test.go 的真库断言钉住。
+func isAddColumnOnly(stmt string) bool {
+	words := strings.Fields(strings.ToLower(stmt))
+	if len(words) < 5 {
+		return false
+	}
+	return words[0] == "alter" && words[1] == "table" &&
+		words[3] == "add" && words[4] == "column"
 }
 
 // TestPlanMigrationsRejectsInvalidPlan 覆盖清单校验的三条失败路径。

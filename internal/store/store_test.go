@@ -198,7 +198,7 @@ func requireTestDB(t *testing.T) *Store {
 // 迁移用例的断言也就失去意义。
 func truncateAll(t *testing.T, s *Store) {
 	t.Helper()
-	const stmt = `TRUNCATE TABLE admin_audit, rooms_meta, sessions, users RESTART IDENTITY CASCADE`
+	const stmt = `TRUNCATE TABLE admin_audit, rooms_meta, password_resets, sessions, users RESTART IDENTITY CASCADE`
 	if err := s.DB().Exec(stmt).Error; err != nil {
 		t.Fatalf("清空测试库失败：%v", err)
 	}
@@ -208,7 +208,7 @@ func truncateAll(t *testing.T, s *Store) {
 // 只会跑在 _test 库上：requireTestDB 已经拦住了库名不以 _test 结尾的情况。
 func dropPhaseOneTables(t *testing.T, s *Store) {
 	t.Helper()
-	const stmt = `DROP TABLE IF EXISTS admin_audit, rooms_meta, sessions, users, schema_migrations CASCADE`
+	const stmt = `DROP TABLE IF EXISTS password_resets, admin_audit, rooms_meta, sessions, users, schema_migrations CASCADE`
 	if err := s.DB().Exec(stmt).Error; err != nil {
 		t.Fatalf("清空测试库结构失败：%v", err)
 	}

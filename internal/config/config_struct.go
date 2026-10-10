@@ -205,6 +205,42 @@ type IPCConfig struct {
 	// 默认 60/分钟对正常使用（进面板读一次 + 改完再读一次）是零约束。
 	RoomMetaPerMinute float64
 	RoomMetaBurst     int
+
+	// —— 邮件入口的三条闸门（找回密码 / 验证邮箱）。
+	//
+	// ⚠ **单位是"每小时次数"，与上面那组的 `XxxPerMinute` 不同**。
+	// 这是产品口径要求的（"每邮箱 5 封/小时、每 IP 20 封/小时"），
+	// 而 internal/service/limiter.NewKeyed 的补充速率单位是**每分钟**，
+	// 所以装配处必须写 `NewKeyed(float64(n)/60, n)`（见 handler.newHourlyEmailLimiters）。
+	// 直接把 n 填进去会变成 n/分钟 —— 比预期宽 60 倍，且不会有任何报错。
+	//
+	// burst 不单列一个配置项：它等于每小时次数本身。语义正是"每小时最多 N 次"——
+	// 桶初始是满的（正常用户第一次请求永远不该被限速），之后按 N/60 每分钟回填。
+	// 单列 burst 只会多一个"两个值互相矛盾"的配置错误面。
+
+	// MailPerEmailPerHour 是**每个邮箱**每小时最多触发的发信次数（PR_MAIL_PER_EMAIL_PER_HOUR，默认 5）。
+	//
+	// 为什么按邮箱限速是必要的（而 IP 限速不够）：攻击者用少量 IP 就能对
+	// 同一个受害者反复触发重置邮件 —— 那是骚扰（"邮件轰炸"）而不是撞库，
+	// 但对收件人是实打实的伤害，而且会把发信配额烧在垃圾流量上。
+	MailPerEmailPerHour int
+	// MailPerIPPerHour 是**每个来源 IP** 每小时最多触发的发信次数（PR_MAIL_PER_IP_PER_HOUR，默认 20）。
+	//
+	// 它同时是"探测未注册邮箱"这条路的成本上限：`forgot` 对存在与不存在返回
+	// 完全相同的响应，因此唯一的滥用面就是拿它当"发信机"用。
+	MailPerIPPerHour int
+	// ResetPerIPPerHour 是 `reset` 与 `verify` **共用**的每 IP 每小时次数
+	//（PR_MAIL_RESET_PER_IP_PER_HOUR，默认 10）。
+	//
+	// 为什么 reset 与 verify 共用一条闸门而不是各一条：两者都是"拿一串 32 字节
+	// 随机 token 来猜"的入口，威胁模型逐字相同（穷举碰撞），而共用一条桶意味着
+	// 攻击者**不能**通过拆成两个端点来把总预算翻倍。给 verify 单独一条更宽的
+	// 闸门只会让"猜"变得更便宜。
+	//
+	// 10 的依据：token 是 256 bit 随机，任何有限的尝试次数都不可能碰撞；
+	// 这一条挡的是"拿它当免费的哈希查询/日志放大器"，10 次/小时对正常人
+	//（点一次链接 + 手滑重试）是零约束。
+	ResetPerIPPerHour int
 }
 
 // AuthConfig 是账号层的数据库与凭据配置（ACCOUNTS §5）。
@@ -239,6 +275,85 @@ type AuthConfig struct {
 	HashingConcurrency int
 	// WSTicketTTL 是 WebSocket 一次性票据的有效期（PR_WS_TICKET_TTL，默认 30s）。
 	WSTicketTTL time.Duration
+
+	// —— 邮件通道（SMTP）与"找回密码 / 验证邮箱"的业务参数。
+	//
+	// 为什么放在 AuthConfig 而不是另立一块：这一整组是**账号能力的凭据与出口**
+	// （与 DBDSN/JWTSecret 同类），而且它们的开关语义与 AuthConfig 一致 ——
+	// SMTP 配不全时邮件能力关闭，账号能力照常（与"PR_DB_DSN 为空 = 账号整体关闭"
+	// 是同一种显式降级）。整个 Config 结构体树不新增任何节点。
+
+	// SMTPHost 是发信服务器（PR_SMTP_HOST，例如 smtp.qq.com）。**为空即邮件能力关闭**。
+	SMTPHost string
+	// SMTPPort 是发信端口（PR_SMTP_PORT，默认 465）。
+	// 465 = 隐式 SSL，587 = STARTTLS；25 在多数云主机上被封。
+	SMTPPort int
+	// SMTPUser 是认证账号（PR_SMTP_USER）。
+	SMTPUser string
+	// SMTPPass 是认证凭据（PR_SMTP_PASS）。QQ 邮箱用的是**授权码**而不是登录密码。
+	//
+	// 与 JWTSecret 同一个纪律：只从环境变量读，不进日志、不进响应、不落库。
+	SMTPPass string
+	// SMTPFrom 是发件人地址（PR_SMTP_FROM）。为空时取 SMTPUser ——
+	// QQ 要求发件人必须等于认证账号，否则 550。
+	SMTPFrom string
+	// SMTPFromName 是发件人显示名（PR_SMTP_FROM_NAME，默认 `月喵`）。
+	// 非 ASCII 只能在邮件头里做 RFC 2047 编码（由 mail 包负责）。
+	SMTPFromName string
+	// SMTPTLS 是加密形态（PR_SMTP_TLS）：ssl（隐式 TLS，465）/ starttls（587）/ none（仅本机排障）。
+	//
+	// 这里存字符串而不是 mail.TLSMode：config 是依赖树的叶子，不能反向 import 业务包
+	//（否则 config → service/mail → service 会形成一条没必要的边）。合法取值在
+	// applyAuthEnv 里按字面量校验，装配层再做一次类型映射。
+	SMTPTLS string
+	// SMTPTimeout 是**单封邮件**的投递预算（PR_SMTP_TIMEOUT，默认 10s）。
+	// 它同时是建连超时与整条连接的死线（net/smtp 自己不带任何超时）。
+	SMTPTimeout time.Duration
+
+	// PublicBaseURL 是拼接**对外链接**的基地址（PR_PUBLIC_BASE_URL，默认 http://60.205.212.25）。
+	//
+	// 为什么必须是配置而不是从请求头推导：Host / X-Forwarded-Host 完全由请求方控制。
+	// 攻击者用 `Host: evil.com` 打一次 forgot，受害者收到的就是指向 evil.com 的
+	// 重置链接 —— 点一下 token 就进了攻击者的服务器，账号直接接管。
+	// 这是"密码重置链接投毒"的现成攻击路径，所以域名只能来自服务端自己持有的配置。
+	PublicBaseURL string
+	// ResetTTL 是**重置密码**令牌的有效期（PR_RESET_TTL，默认 30m）。
+	// 短是刻意的：它是一封邮件里的链接，暴露面（邮箱、转发、备份）比 access token 大。
+	ResetTTL time.Duration
+	// EmailVerifyTTL 是**验证邮箱**令牌的有效期（PR_EMAIL_VERIFY_TTL，默认 24h）。
+	// 比重置长得多：验证不是紧急动作，用户可能第二天才点开那封信；
+	// 而它的危害面更小（通过验证只会"打开找回能力"，不会直接改凭据）。
+	EmailVerifyTTL time.Duration
+}
+
+// MailEnabled 判断邮件能力是否已配置齐全。
+//
+// 三个条件缺一不可（PR_SMTP_HOST / 账号 / 密码），与需求里
+// "PR_SMTP_HOST 或账号密码为空 → 503" 逐字对应。
+// 它是**唯一**判据：handler 的 503、装配层是否构造投递器、以及"是否启动后台队列"
+// 都必须问这一个方法，不允许各自写一份"三个字段都不为空"的表达式。
+func (ac *AuthConfig) MailEnabled() bool {
+	if ac == nil {
+		return false
+	}
+	return ac.SMTPHost != "" && ac.SMTPUser != "" && ac.SMTPPass != ""
+}
+
+// MailPartiallyConfigured 判断"配了邮件但没配全"。
+//
+// 它的唯一用途是装配期打一条 WARN：这种状态不会报错（按未配置处理 → 503），
+// 但"配了一半"通常意味着有人以为它生效了 —— 静默降级正是最难发现的那类事故。
+func (ac *AuthConfig) MailPartiallyConfigured() bool {
+	if ac == nil {
+		return false
+	}
+	set := 0
+	for _, v := range []string{ac.SMTPHost, ac.SMTPUser, ac.SMTPPass} {
+		if v != "" {
+			set++
+		}
+	}
+	return set > 0 && !ac.MailEnabled()
 }
 
 // SignalConfig 控制 WebSocket 信令层的超时与限额。

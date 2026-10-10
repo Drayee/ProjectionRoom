@@ -58,11 +58,18 @@ type AdminUserStore interface {
 
 // AdminAccountWriter 是管理端的写操作（*service.AccountService 的方法集满足它）。
 //
-// 三个方法都**自带审计投递**（T6）：本层调它们就等于"改状态 + 写审计"两件事都做了。
+// 四个方法都**自带审计投递**（T6）：本层调它们就等于"改状态 + 写审计"两件事都做了。
 type AdminAccountWriter interface {
 	BanUser(ctx context.Context, actorID, targetID int64, reason, ip string) error
 	UnbanUser(ctx context.Context, actorID, targetID int64, ip string) error
 	SetRole(ctx context.Context, actorID, targetID int64, role, ip string) error
+	// BindUserEmail 把邮箱绑到某个账号上（**绑定即已验证**）。
+	//
+	// 它是"给既有账号补齐邮箱"的唯一通路：老账号在注册时不收邮箱，而邮箱归属
+	// 必须先被证明才能用于找回密码 —— 让管理员来录入就是那条绕开鸡生蛋的正当路径
+	//（管理员本来就是可信主体，见 service.BindUserEmail 的说明）。
+	// email 传空串 = 解绑。
+	BindUserEmail(ctx context.Context, actorID, targetID int64, email, ip string) error
 }
 
 // AdminHub 是连接池里管理端要用的能力（*service.Hub 满足它）。
@@ -265,6 +272,11 @@ type adminHandler struct {
 type adminUserPatch struct {
 	Role   *string `json:"role"`
 	Status *string `json:"status"`
+	// Email 是邮箱绑定（本轮新增）。**空串表示解绑**（把 email 与 email_verified_at
+	// 一起清空），而不是"把邮箱设成空字符串" —— 后者在库里是不存在的状态。
+	//
+	// JSON 的 `null` 与字段缺失都解析成 nil = 这次不改邮箱，与 Role/Status 同一套语义。
+	Email  *string `json:"email"`
 	Reason string  `json:"reason"`
 }
 
@@ -336,8 +348,8 @@ func (h *adminHandler) patchUser(c *gin.Context) {
 		adminBadRequest(c, "请求体不是合法 JSON")
 		return
 	}
-	if req.Role == nil && req.Status == nil {
-		adminBadRequest(c, "至少要指定 role 或 status 之一")
+	if req.Role == nil && req.Status == nil && req.Email == nil {
+		adminBadRequest(c, "至少要指定 role、status 或 email 之一")
 		return
 	}
 
@@ -359,6 +371,16 @@ func (h *adminHandler) patchUser(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	ip := c.ClientIP()
+
+	// 邮箱绑定**排在角色/状态之前**：它的失败原因（格式不对、邮箱被别的账号占了）
+	// 是唯一需要用户去改参数的，先失败能省掉"改了角色、然后邮箱报错"这种半成功。
+	// 三步各自写自己的审计行（user.role / user.ban / user.unban / user.email_bind）。
+	if req.Email != nil {
+		if err := h.deps.Accounts.BindUserEmail(ctx, actor.ID, targetID, *req.Email, ip); err != nil {
+			h.writeWriteError(c, err)
+			return
+		}
+	}
 
 	if req.Role != nil {
 		if err := h.deps.Accounts.SetRole(ctx, actor.ID, targetID, role, ip); err != nil {

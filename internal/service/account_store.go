@@ -68,6 +68,14 @@ func (a *AccountStoreAdapter) UserByID(ctx context.Context, id int64) (*store.Us
 	return a.store.UserByID(ctx, id)
 }
 
+func (a *AccountStoreAdapter) UserByEmail(ctx context.Context, email string) (*store.User, error) {
+	return a.store.UserByEmail(ctx, email)
+}
+
+func (a *AccountStoreAdapter) SetUserEmail(ctx context.Context, id int64, email string, verifiedAt *time.Time) error {
+	return a.store.SetUserEmail(ctx, id, email, verifiedAt)
+}
+
 func (a *AccountStoreAdapter) SetUserStatus(ctx context.Context, id int64, status, reason string) error {
 	return a.store.SetUserStatus(ctx, id, status, reason)
 }
@@ -100,6 +108,20 @@ func (a *AccountStoreAdapter) RevokeSession(ctx context.Context, id int64) error
 
 func (a *AccountStoreAdapter) RevokeAllSessions(ctx context.Context, userID int64) (int64, error) {
 	return a.store.RevokeAllSessions(ctx, userID)
+}
+
+// —— 一次性邮件令牌（验证邮箱 / 重置密码）——
+
+func (a *AccountStoreAdapter) InsertPasswordReset(ctx context.Context, t *store.PasswordReset) error {
+	return a.store.InsertPasswordReset(ctx, t)
+}
+
+func (a *AccountStoreAdapter) ConsumePasswordReset(ctx context.Context, tokenHash, newPasswordHash string) (int64, bool, error) {
+	return a.store.ConsumePasswordReset(ctx, tokenHash, newPasswordHash)
+}
+
+func (a *AccountStoreAdapter) ConsumeEmailVerify(ctx context.Context, tokenHash string) (int64, bool, error) {
+	return a.store.ConsumeEmailVerify(ctx, tokenHash)
 }
 
 // —— 审计 ——

@@ -1,4 +1,5 @@
-// 账号用例（ACCOUNTS §2/§5/§9）：注册、登录、刷新、登出、封禁与授权前置。
+// 账号用例（ACCOUNTS §2/§5/§9）：注册、登录、刷新、登出、封禁、授权前置，
+// 以及"忘记密码 / 邮箱验证"两条邮件链路。
 //
 // 本文件是"身份与授权事实"的唯一落点。三条边界：
 //
@@ -7,11 +8,40 @@
 //     role/tv 在它那里**只是签发那一刻的快照**；"这个账号现在还能不能用"
 //     必须由本层查库比对 users.token_version + status 才能回答（不变量 I3）。
 //  2. **refresh token 原文永不落库**：库里只有 sha256 十六进制（§4）。原文只在
-//     下发给客户端的那一次响应里存在。
-//  3. **写库分两类**（§9 / 不变量 I4，逐条见 syncWriteReason）：会话的创建与撤销、
-//     封禁/改角色的 token_version 自增必须在请求路径上完成（否则"登录后立刻刷新"
-//     会偶发失败、封禁的生效时间不确定），其余写（last_seen、审计）全部投递给
-//     异步写入器。
+//     下发给客户端的那一次响应里存在。一次性邮件令牌（password_resets）同规格。
+//  3. **写库分两类**（§9 / 不变量 I4）。见下面的同步写清单。
+//
+// # 同步写清单（不变量 I4 的**全部**例外）
+//
+// 除下列五处，所有写（last_seen、审计、投递结果）一律交给异步写入器
+// （AccountService.submit → store.Writer），绝不在请求路径上等数据库。
+// 每一处例外都必须写明 fail-open 的后果 —— 写不出后果的写，就不配当例外：
+//
+//	① 会话 INSERT（issueSession → store.CreateSession）
+//	   fail-open 的后果：登录成功但库里没有可撤销的那一行 → 用户拿到一张
+//	   **无法撤销**的 refresh（封禁、登出全部设备、重放处置全都失效）。
+//	② 会话撤销（Logout / LogoutAll / handleReplay → store.RevokeSession /
+//	   store.RevokeAllSessions）
+//	   fail-open 的后果：重放被检测到却没有真的撤销 → 攻击者可以继续刷新；
+//	   这一条在 handleReplay 里还有额外理由：先回 401 再异步撤销会留下一个
+//	   "撤销尚未落库"的窗口，攻击者可以在窗口内继续刷新。
+//	③ token_version 自增（BanUser / UnbanUser / SetRole / LogoutAll →
+//	   store.BumpTokenVersion）
+//	   fail-open 的后果：封禁/降级"不即时" —— access token 里的 role 与版本号
+//	   是签发快照，不 +1 的话被禁的人还能用旧 access token 继续操作最长 15 分钟。
+//	④ 一次性邮件令牌 INSERT（Forgot / Register → store.InsertPasswordReset）
+//	   fail-open 的后果：信发出去了、库里却没有这一行 → 用户点开链接得到
+//	   "令牌无效"，功能静默失效且没有任何报错可查。
+//	⑤ 一次性邮件令牌消费（ResetPassword / VerifyEmail →
+//	   store.ConsumePasswordReset / store.ConsumeEmailVerify）
+//	   fail-open 的后果：令牌可重放（截获过那封邮件的人能二次改密）。
+//	   注意它与 ④ 是**同一个原子动作的两半**：消费还顺带改密 / 改验证状态，
+//	   四件事在 store 侧的一个事务里完成。
+//
+// 📌 这张清单是一次**补账**：此前本文件有 4 处注释引用 `syncWriteReason`，
+// 而那个标识符在全仓库没有定义（重构 usecase→service 时丢了）—— 也就是
+// "一期的同步写例外清单"从来只存在于引用的名字里。现在清单就是上面这一段，
+// 下面所有引用都指向它。新增第六条例外时必须先在这里写清 fail-open 的后果。
 package service
 
 import (
@@ -30,6 +60,7 @@ import (
 	"unicode"
 
 	"ProjectionRoom/internal/service/auth"
+	"ProjectionRoom/internal/service/mail"
 	"ProjectionRoom/internal/store"
 )
 
@@ -87,6 +118,33 @@ var (
 	// 错误把持久化包拉进 HTTP 层，会让"handler 依赖了什么"变得难以一眼看完。
 	// 别名保持了判断能力，没有扩大依赖面（它是同一个 error 值，errors.Is 依然成立）。
 	StoreNotFound = store.ErrNotFound
+
+	// ErrEmailTaken 表示邮箱已被另一个账号绑定（注册或管理员绑定时的唯一冲突）。
+	//
+	// 它与 ErrBadEmail 是**两件不同的事**：前者是"格式对但这个邮箱有主了"，
+	// 后者的输入压根不像邮箱。混成一个错误会让用户不知道该改什么。
+	ErrEmailTaken = store.ErrEmailTaken
+
+	// ErrResetTokenInvalid 表示重置令牌不可用（不存在 / 已过期 / 已被使用 / 用途不符）。
+	//
+	// **四种情况刻意共用一个错误与一个错误码**：区分它们就等于给攻击者一条
+	// 探测通道（"这个 token 是过期的" 与 "这个 token 从来不存在" 是很不一样的情报）。
+	ErrResetTokenInvalid = errors.New("account: 重置链接无效或已过期，请重新申请")
+
+	// ErrVerifyTokenInvalid 表示验证令牌不可用（同上，四合一）。
+	//
+	// 为什么不与 ErrResetTokenInvalid 共用：两个用途的错误对用户是可操作的
+	//（"重新申请重置" 与 "重新发一封验证信"），而它们**不构成枚举面** ——
+	// 能拿到这个错误的前提是对方已经持有一串 256 bit 的随机串。
+	ErrVerifyTokenInvalid = errors.New("account: 验证链接无效或已过期，请重新获取")
+
+	// ErrMailUnavailable 是 mail.ErrMailUnavailable 的别名，供**上层**（handler）判断
+	// "邮件能力未配置"（503）。
+	//
+	// 与 StoreNotFound 同一条理由：handler 只认识 service 与 service/auth，
+	// 为了一个哨兵错误再 import service/mail 会让"HTTP 层依赖了什么"变得难以一眼看完。
+	// 别名是同一个 error 值，errors.Is 依然成立。
+	ErrMailUnavailable = mail.ErrMailUnavailable
 )
 
 // 用户名与昵称的边界（与 store 的列长度一致，见 ACCOUNTS §4）。
@@ -106,6 +164,15 @@ const (
 	// refreshTokenBytes 是 refresh token 的随机熵。32 字节 = 256 bit：
 	// 它是 30 天有效的长期凭据，必须不可猜测（库里只存哈希，泄漏面只剩下发那一次）。
 	refreshTokenBytes = 32
+
+	// oneTimeTokenBytes 是一次性邮件令牌的随机熵。与 refresh 同规格（32 字节 = 256 bit）：
+	// 它同样是一串"拿到就能改密码"的凭据，只是有效期短得多。
+	oneTimeTokenBytes = 32
+
+	// emailBrandName 是邮件主题里的品牌名（与 SMTP 的显示名 PR_SMTP_FROM_NAME 默认值一致）。
+	// 单独一个常量而不是读配置：主题是**文案**，收件人看到的应该是站点名，
+	// 而不是运维给邮件通道起的名字。
+	emailBrandName = "月喵"
 
 	// DefaultHashingConcurrency 是并发口令哈希闸门的默认容量。
 	//
@@ -131,6 +198,11 @@ type AccountStore interface {
 	CreateUser(ctx context.Context, u *store.User) error
 	UserByUsername(ctx context.Context, username string) (*store.User, error)
 	UserByID(ctx context.Context, id int64) (*store.User, error)
+	// UserByEmail 按邮箱查找（找回密码的入口）。查询侧在一期就归一化到 lower(email)，
+	// 与 users_email_lower_key 这个函数索引同口径。
+	UserByEmail(ctx context.Context, email string) (*store.User, error)
+	// SetUserEmail 改邮箱并同时决定验证状态（verifiedAt 非 nil = 这次改动本身就是证明）。
+	SetUserEmail(ctx context.Context, id int64, email string, verifiedAt *time.Time) error
 	SetUserStatus(ctx context.Context, id int64, status, reason string) error
 	SetUserRole(ctx context.Context, id int64, role string) error
 	BumpTokenVersion(ctx context.Context, id int64) (int, error)
@@ -142,11 +214,33 @@ type AccountStore interface {
 	RevokeSession(ctx context.Context, id int64) error
 	RevokeAllSessions(ctx context.Context, userID int64) (int64, error)
 
+	// —— 一次性邮件令牌（验证邮箱 / 重置密码）
+	//
+	// 两个消费方法都是**原子的**（校验 + 标记已用在同一条语句里，且跨表动作在一个
+	// 事务内）：这是"单次使用"与"改密 + 撤销全部会话 + 版本号自增"能成立的唯一形态。
+	InsertPasswordReset(ctx context.Context, t *store.PasswordReset) error
+	ConsumePasswordReset(ctx context.Context, tokenHash, newPasswordHash string) (int64, bool, error)
+	ConsumeEmailVerify(ctx context.Context, tokenHash string) (int64, bool, error)
+
 	// —— 审计
 	InsertAudit(ctx context.Context, a *store.AdminAudit) error
 
 	// —— 异步写入器（§9）
 	EventWriter() *store.Writer
+}
+
+// MailSink 是发信队列的**窄出口**（*mail.Mailer 满足它）。
+//
+// 为什么是接口：
+//  1. 单测要注入一个**捕获型**假实现 —— 库里只存 sha256，而"点开链接"这条路径
+//     需要明文 token，捕获发信内容是唯一既真实又不破坏安全契约的拿法
+//     （绝不为了测试方便让接口回显 token）；
+//  2. 单测还要注入一个**会阻塞**的假实现，用来断言 handler 不等待发信（不变量 I4）。
+//
+// 返回值的语义见 mail.Mailer.Enqueue：**它只用于日志**。让"入队失败"变成对外
+// 可见的差异，就等于给攻击者一个探测服务端状态的反馈通道。
+type MailSink interface {
+	Enqueue(msg mail.Outbound) bool
 }
 
 // AccountService 是账号用例服务。
@@ -158,10 +252,22 @@ type AccountService struct {
 	signer *auth.Signer
 	ticket *auth.TicketStore
 
+	// mail 是发信队列；**nil = 邮件能力未配置**（PR_SMTP_HOST 或账号密码为空）。
+	// 这是与"账号能力关闭"同一套显式降级：相关端点返回 503，账号本身照常可用。
+	mail MailSink
+
 	// bcryptCost 是注册时的哈希代价（登录校验读的是库里的哈希，与它无关）。
 	bcryptCost int
 	// refreshTTL 是新建会话的有效期（与 PR_REFRESH_TTL 同源，由装配层注入）。
 	refreshTTL time.Duration
+
+	// resetTTL / emailVerifyTTL 是两类一次性令牌的有效期
+	//（PR_RESET_TTL / PR_EMAIL_VERIFY_TTL，由装配层注入）。
+	resetTTL       time.Duration
+	emailVerifyTTL time.Duration
+	// publicBaseURL 是拼链接用的对外基地址（PR_PUBLIC_BASE_URL）。
+	// **绝不从请求头推导** —— 理由见 config.AuthConfig.PublicBaseURL 的说明。
+	publicBaseURL string
 
 	// hashing 是并发口令哈希闸门（容量见 DefaultHashingConcurrency）。
 	hashing chan struct{}
@@ -184,6 +290,19 @@ type AccountOptions struct {
 	HashingConcurrency int
 	// Now 是时间源；nil 取 time.Now。
 	Now func() time.Time
+
+	// —— 邮件链路（找回密码 / 验证邮箱）。四个都是必填的：装不出"半条"邮件链路。
+
+	// Mail 是发信队列；**可以为 nil**（= 邮件能力未配置）。nil 时相关用例返回
+	// mail.ErrMailUnavailable（handler 翻译成 503），其余账号功能完全不受影响。
+	Mail MailSink
+	// ResetTTL / EmailVerifyTTL 是两类一次性令牌的有效期；<= 0 报错。
+	// 与 RefreshTTL 同一条理由：TTL 写错的表现是"链接点了没用"，极难归因。
+	ResetTTL       time.Duration
+	EmailVerifyTTL time.Duration
+	// PublicBaseURL 是对外链接的基地址；为空报错（没有它拼不出可用的链接，
+	// 而"用户收到一封点了没用的信"比启动失败晚得多、也难查得多）。
+	PublicBaseURL string
 }
 
 // NewAccountService 组装账号用例。
@@ -202,6 +321,18 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 	}
 	if opts.RefreshTTL <= 0 {
 		return nil, fmt.Errorf("account: refresh TTL 必须为正，当前 %s", opts.RefreshTTL)
+	}
+	// 邮件链路的三项**无论邮件能力是否开启都要校验**：它们描述的是"链接长什么样、
+	// 活多久"，配错了以后即便将来打开邮件能力也仍然是错的，而那种错要等到
+	// 第一封邮件被点开才暴露。
+	if opts.ResetTTL <= 0 {
+		return nil, fmt.Errorf("account: 重置令牌 TTL 必须为正，当前 %s", opts.ResetTTL)
+	}
+	if opts.EmailVerifyTTL <= 0 {
+		return nil, fmt.Errorf("account: 验证令牌 TTL 必须为正，当前 %s", opts.EmailVerifyTTL)
+	}
+	if strings.TrimSpace(opts.PublicBaseURL) == "" {
+		return nil, errors.New("account: 缺少 PR_PUBLIC_BASE_URL（没有它拼不出可用的邮件链接）")
 	}
 
 	cost := opts.BcryptCost
@@ -224,13 +355,17 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 	}
 
 	return &AccountService{
-		store:      st,
-		signer:     signer,
-		ticket:     tickets,
-		bcryptCost: cost,
-		refreshTTL: opts.RefreshTTL,
-		hashing:    make(chan struct{}, conc),
-		now:        now,
+		store:          st,
+		signer:         signer,
+		ticket:         tickets,
+		mail:           opts.Mail,
+		bcryptCost:     cost,
+		refreshTTL:     opts.RefreshTTL,
+		resetTTL:       opts.ResetTTL,
+		emailVerifyTTL: opts.EmailVerifyTTL,
+		publicBaseURL:  strings.TrimRight(strings.TrimSpace(opts.PublicBaseURL), "/"),
+		hashing:        make(chan struct{}, conc),
+		now:            now,
 	}, nil
 }
 
@@ -243,14 +378,20 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 
 // Profile 是账号的对外档案（**不含** PasswordHash）。
 type Profile struct {
-	ID          int64      `json:"id"`
-	Username    string     `json:"username"`
-	DisplayName string     `json:"displayName"`
-	Email       *string    `json:"email,omitempty"`
-	Role        string     `json:"role"`
-	Status      string     `json:"status"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	LastSeenAt  *time.Time `json:"lastSeenAt,omitempty"`
+	ID          int64   `json:"id"`
+	Username    string  `json:"username"`
+	DisplayName string  `json:"displayName"`
+	Email       *string `json:"email,omitempty"`
+	// EmailVerified 说明这个邮箱能不能用于找回密码（见 Forgot 的门控）。
+	//
+	// 为什么必须对外可见：前端要在账号页上提示"邮箱未验证 → 去验证"，
+	// 而"能不能找回"是用户唯一能采取行动的依据。它**不是**授权依据
+	//（授权判定只发生在服务端，见不变量 I3），只是一个显示用的派生值。
+	EmailVerified bool       `json:"emailVerified"`
+	Role          string     `json:"role"`
+	Status        string     `json:"status"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	LastSeenAt    *time.Time `json:"lastSeenAt,omitempty"`
 }
 
 // ProfileOf 把库里的用户转成对外档案（唯一出口，保证 PasswordHash 不外泄）。
@@ -259,13 +400,14 @@ func ProfileOf(u *store.User) Profile {
 		return Profile{}
 	}
 	p := Profile{
-		ID:          u.ID,
-		Username:    u.Username,
-		DisplayName: u.DisplayName,
-		Email:       u.Email,
-		Role:        u.Role,
-		Status:      u.Status,
-		CreatedAt:   u.CreatedAt,
+		ID:            u.ID,
+		Username:      u.Username,
+		DisplayName:   u.DisplayName,
+		Email:         u.Email,
+		EmailVerified: u.Email != nil && u.EmailVerifiedAt != nil,
+		Role:          u.Role,
+		Status:        u.Status,
+		CreatedAt:     u.CreatedAt,
 	}
 	if !u.LastSeenAt.IsZero() {
 		t := u.LastSeenAt
@@ -295,15 +437,30 @@ type Session struct {
 
 // Register 注册账号并直接登录（返回 access + refresh）。
 //
-// 顺序是刻意的：先走口令策略（廉价）→ 再哈希（昂贵）→ 再入库。
-// 把策略检查放在哈希之前，既是"别为一个注定被拒的请求花 200ms CPU"，
-// 也让弱口令的失败文案能说清缺哪一条（§5 的"统一文案"只针对**登录**）。
-func (s *AccountService) Register(ctx context.Context, username, displayName, password, ip, ua string) (*Session, error) {
+// 顺序是刻意的：先走参数校验（廉价）→ 再哈希（昂贵）→ 再入库。
+// 把校验放在哈希之前，既是"别为一个注定被拒的请求花 200ms CPU"，
+// 也让弱口令/坏邮箱的失败文案能说清缺哪一条（§5 的"统一文案"只针对**登录**）。
+//
+// email 是**必填**的（本轮的契约变更）：账号必须有邮箱才可能走"忘记密码"。
+// 既有账号（注册时不收邮箱的那一批）由管理员绑定邮箱补齐 —— 见 BindUserEmail。
+//
+// ⚠ 注册侧的**有界枚举面**（这是刻意的取舍，不是漏了防护）：
+// 邮箱唯一约束被撞上时必须回一个能区分于"用户名被占用"的错误，用户才知道该换邮箱
+// 还是换用户名；这确实让人能拿 /api/auth/register 去问"这个邮箱注册过没有"。
+// 接受它的理由：注册本来就有每 IP 5/分钟（容量 3）的令牌桶，一次探测要占掉一个
+// 注册配额，而注册比登录贵得多（一次 bcrypt）。**与 /api/auth/forgot 的"恒定 200"
+// 形成对照** —— 找回入口免登录、不限"写"，所以它必须逐字相同；注册入口是写操作、
+// 有限速、且必须给用户可操作的反馈。改这里的文案之前请先读这一段。
+func (s *AccountService) Register(ctx context.Context, username, displayName, password, email, ip, ua string) (*Session, error) {
 	name, err := CanonicalUsername(username)
 	if err != nil {
 		return nil, err
 	}
 	display, err := SanitizeDisplayName(displayName, name)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := CanonicalEmail(email)
 	if err != nil {
 		return nil, err
 	}
@@ -316,17 +473,30 @@ func (s *AccountService) Register(ctx context.Context, username, displayName, pa
 		return nil, err
 	}
 
-	// 同步写（见 syncWriteReason 第 2 条）：userID 是后面一切的前提。
+	// 同步写（见文件头部的同步写清单 ①）：userID 是后面一切的前提。
 	u := &store.User{
 		Username:     name,
 		DisplayName:  display,
 		PasswordHash: hash,
+		Email:        &addr,
 	}
 	if err := s.store.CreateUser(ctx, u); err != nil {
-		return nil, err // ErrUsernameTaken 由 store 映射，本文件用别名直接透传
+		return nil, err // ErrUsernameTaken / ErrEmailTaken 由 store 映射，本文件用别名透传
 	}
 
-	return s.issueSession(ctx, u, ip, ua)
+	sess, err := s.issueSession(ctx, u, ip, ua)
+	if err != nil {
+		return nil, err
+	}
+
+	// 注册后立刻发一封验证信（**best-effort**）：它既不是注册成功的前提，
+	// 失败也不该改变注册的响应 —— 所以放在 issueSession 之后，且忽略返回值。
+	// 能力关闭时 dispatchEmailToken 只记一条日志（账号仍然可用，只是暂时不能找回）。
+	if _, err := s.dispatchEmailToken(ctx, u, addr, store.PurposeEmailVerify, ip, ua); err != nil &&
+		!errors.Is(err, mail.ErrMailUnavailable) {
+		log.Printf("[WARN] 注册后发送验证邮件失败：user=%d %v", u.ID, err)
+	}
+	return sess, nil
 }
 
 // Login 校验口令并建立会话。
@@ -476,8 +646,8 @@ func (s *AccountService) Logout(ctx context.Context, refreshToken string) error 
 
 // LogoutAll 登出该用户的全部设备：撤销全部会话 + token_version +1。
 //
-// 两步都要做，且都不能异步：撤销会话只让 refresh 失效，而**已经签发的 access token**
-// 要到 token_version 变化才失效（§5 的即时性要求）。
+// 两步都要做，且都不能异步（见文件头部的同步写清单 ② 与 ③）：撤销会话只让 refresh
+// 失效，而**已经签发的 access token** 要到 token_version 变化才失效（§5 的即时性要求）。
 func (s *AccountService) LogoutAll(ctx context.Context, userID int64) error {
 	if _, err := s.store.BumpTokenVersion(ctx, userID); err != nil {
 		return err
@@ -582,8 +752,8 @@ func (s *AccountService) setStatus(ctx context.Context, actorID, targetID int64,
 	if err := s.store.SetUserStatus(ctx, targetID, status, reason); err != nil {
 		return err
 	}
-	// 版本号自增必须与状态变更同一条请求路径：否则"已封禁但旧 access token 还能用"
-	// 会留下一个长度不确定的窗口（§5 的"封禁即时生效"）。
+	// 版本号自增必须与状态变更同一条请求路径（同步写清单 ③）：否则"已封禁但旧 access token
+	// 还能用"会留下一个长度不确定的窗口（§5 的"封禁即时生效"）。
 	if _, err := s.store.BumpTokenVersion(ctx, targetID); err != nil {
 		return err
 	}
@@ -641,11 +811,76 @@ func (s *AccountService) SetRole(ctx context.Context, actorID, targetID int64, r
 	return nil
 }
 
+// BindUserEmail 是管理员的**邮箱绑定**（口径 ②：给既有账号补齐邮箱）。
+//
+// 为什么管理员绑定即视为已验证（verifiedAt = now()）：管理员是可信主体 ——
+// 他本来就能改任意账号的角色与状态，而要求他去收一封验证信只会让"给老账号补邮箱"
+// 这条通路在实践中不可用。代价与边界：这确实让管理员能替用户声明一个归属；
+// 而新增的**写入面**只有 users.email 一列（审计留痕：user.email_bind）。
+//
+// email 传空串 = 解绑（同时清掉 email_verified_at，见 store.SetUserEmail）。
+//
+// 审计**只在实际变更时**写：把一次 no-op 的 PATCH 记成一条 user.email_bind
+// 会让审计表里出现"看似绑定过、其实什么都没改"的行，那是审计噪声而不是证据。
+// 判"有没有变"必须同时看两列：邮箱相同但**从"未验证"变成"已验证"**同样是变更。
+func (s *AccountService) BindUserEmail(ctx context.Context, actorID, targetID int64, email, ip string) error {
+	if targetID <= 0 {
+		return errors.New("account: 目标账号不合法")
+	}
+	// 空串是"解绑"，此时跳过格式校验（空不是"格式错的邮箱"）。
+	addr := ""
+	if strings.TrimSpace(email) != "" {
+		canonical, err := CanonicalEmail(email)
+		if err != nil {
+			return err
+		}
+		addr = canonical
+	}
+
+	u, err := s.store.UserByID(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	unchanged := (u.Email == nil && addr == "") ||
+		(u.Email != nil && addr != "" && *u.Email == addr && u.EmailVerifiedAt != nil)
+	if unchanged {
+		return nil
+	}
+
+	now := s.now()
+	var verifiedAt *time.Time
+	action := "user.email_unbind"
+	if addr != "" {
+		verifiedAt = &now
+		action = "user.email_bind"
+	}
+	if err := s.store.SetUserEmail(ctx, targetID, addr, verifiedAt); err != nil {
+		return err
+	}
+
+	s.submit("写绑定邮箱审计", func(ctx context.Context) error {
+		return s.store.InsertAudit(ctx, &store.AdminAudit{
+			ActorID:    actorID,
+			Action:     action,
+			TargetType: "user",
+			TargetID:   fmt.Sprintf("%d", targetID),
+			// detail 里放**变更后的事实**（不是"请求改成的样子"）：审计要回答
+			// "当时这个账号的邮箱是什么"，所以解绑也记一行 email="" 而不是省略字段。
+			Detail: auditDetail(map[string]any{
+				"email":          addr,
+				"email_verified": addr != "",
+			}),
+			IP: optString(ip),
+		})
+	})
+	return nil
+}
+
 // —— 内部：会话签发。
 
 // issueSession 建立一条新会话并签发 access token。
 //
-// refresh 会话的 INSERT 是**同步**的（见 syncWriteReason 第 1 条）。
+// refresh 会话的 INSERT 是**同步**的（见文件头部的同步写清单 ①）。
 func (s *AccountService) issueSession(ctx context.Context, u *store.User, ip, ua string) (*Session, error) {
 	now := s.now()
 	token, hash, err := newRefreshToken()
@@ -671,7 +906,7 @@ func (s *AccountService) issueSession(ctx context.Context, u *store.User, ip, ua
 	}, nil
 }
 
-// createSession 写入一行会话（同步，见 syncWriteReason 第 1 条）。
+// createSession 写入一行会话（同步，见文件头部的同步写清单 ①）。
 func (s *AccountService) createSession(ctx context.Context, userID int64, hash, ip, ua string, now time.Time) error {
 	return s.store.CreateSession(ctx, &store.Session{
 		UserID:    userID,
@@ -869,14 +1104,34 @@ func HashRefreshToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// newRefreshToken 生成一个不透明的 refresh token 及其哈希。
+// HashOpaqueToken 计算**一次性邮件令牌**的落库形态。
 //
-// 用 base64.RawURLEncoding：token 要进 Cookie，标准 base64 的 +/= 在 Cookie/头部
-// 里需要额外转义，多一层编码就多一处"某一端忘了转义"的坑。
+// 它逐字就是 HashRefreshToken（同一套算法、同一套理由），单独给一个名字只是为了让
+// password_resets 的调用点读起来不像"在哈希一个 refresh token"。
+// 为什么不直接改名：HashRefreshToken 是既有的公开函数，改名会波及 handler 与既有测试；
+// 而"两个名字指向同一个实现"在这里是零风险的 —— 它们**必须**是同一个函数，
+// 否则两处令牌的落库形态会分叉，而那种分叉不会有任何报错。
+func HashOpaqueToken(token string) string { return HashRefreshToken(token) }
+
+// newRefreshToken 生成一个不透明的 refresh token 及其哈希。
 func newRefreshToken() (token string, hash string, err error) {
-	buf := make([]byte, refreshTokenBytes)
+	return newRandomToken(refreshTokenBytes)
+}
+
+// newOpaqueToken 生成一个一次性邮件令牌及其哈希（与 refresh 同规格的随机熵）。
+func newOpaqueToken() (token string, hash string, err error) {
+	return newRandomToken(oneTimeTokenBytes)
+}
+
+// newRandomToken 是两类不透明令牌**唯一**的生成实现。
+//
+// 用 base64.RawURLEncoding：token 要进 Cookie 或 URL 的 fragment，
+// 标准 base64 的 +/= 在这两处都需要额外转义，多一层编码就多一处"某一端忘了转义"的坑。
+// 这也是重置链接能直接写成 `#token=<原样串>` 而不用再 escape 一遍的原因。
+func newRandomToken(n int) (token string, hash string, err error) {
+	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {
-		return "", "", fmt.Errorf("account: 生成 refresh token 失败: %w", err)
+		return "", "", fmt.Errorf("account: 生成不透明令牌失败: %w", err)
 	}
 	token = base64.RawURLEncoding.EncodeToString(buf)
 	return token, HashRefreshToken(token), nil

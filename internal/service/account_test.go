@@ -25,9 +25,12 @@ type fakeStore struct {
 	byName   map[string]int64
 	sessions map[int64]*store.Session
 	audits   []store.AdminAudit
+	// resets 是一次性邮件令牌表（password_resets）的内存版。
+	resets map[int64]*store.PasswordReset
 
 	nextUserID    int64
 	nextSessionID int64
+	nextResetID   int64
 
 	// createUserErr / createSessionErr 是注入的失败（便于构造唯一约束冲突）。
 	createUserErr    error
@@ -44,6 +47,7 @@ func newFakeStore() *fakeStore {
 		users:    map[int64]*store.User{},
 		byName:   map[string]int64{},
 		sessions: map[int64]*store.Session{},
+		resets:   map[int64]*store.PasswordReset{},
 	}
 }
 
@@ -61,6 +65,17 @@ func (f *fakeStore) CreateUser(_ context.Context, u *store.User) error {
 	name := strings.ToLower(strings.TrimSpace(u.Username))
 	if _, ok := f.byName[name]; ok {
 		return store.ErrUsernameTaken
+	}
+	// 邮箱唯一（真库侧由 users_email_lower_key 这个函数索引兜住）。
+	// 假实现必须**照样**拒绝重复，否则"注册时邮箱撞车"这条判据在单测里永远验不到。
+	if u.Email != nil {
+		addr := strings.ToLower(strings.TrimSpace(*u.Email))
+		for _, other := range f.users {
+			if other.Email != nil && *other.Email == addr {
+				return store.ErrEmailTaken
+			}
+		}
+		u.Email = &addr
 	}
 	f.nextUserID++
 	u.ID = f.nextUserID
@@ -89,6 +104,49 @@ func (f *fakeStore) UserByUsername(_ context.Context, username string) (*store.U
 	}
 	cp := *f.users[id]
 	return &cp, nil
+}
+
+// UserByEmail 按邮箱查（与真 store 一样：查询侧归一化，且空邮箱直接当"没找到"）。
+func (f *fakeStore) UserByEmail(_ context.Context, email string) (*store.User, error) {
+	addr := strings.ToLower(strings.TrimSpace(email))
+	if addr == "" {
+		return nil, store.ErrNotFound
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, u := range f.users {
+		if u.Email != nil && *u.Email == addr {
+			cp := *u
+			return &cp, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+// SetUserEmail 改邮箱并同时决定验证状态（两列一起动，与真 store 同语义）。
+func (f *fakeStore) SetUserEmail(_ context.Context, id int64, email string, verifiedAt *time.Time) error {
+	addr := strings.ToLower(strings.TrimSpace(email))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if addr != "" {
+		for _, other := range f.users {
+			if other.ID != id && other.Email != nil && *other.Email == addr {
+				return store.ErrEmailTaken
+			}
+		}
+	}
+	if addr == "" {
+		u.Email = nil
+		u.EmailVerifiedAt = nil
+		return nil
+	}
+	u.Email = &addr
+	u.EmailVerifiedAt = verifiedAt
+	return nil
 }
 
 func (f *fakeStore) UserByID(_ context.Context, id int64) (*store.User, error) {
@@ -220,6 +278,93 @@ func (f *fakeStore) InsertAudit(_ context.Context, a *store.AdminAudit) error {
 	return nil
 }
 
+// —— 一次性邮件令牌（内存版，**逐条对齐真 store 的语义**）。
+
+func (f *fakeStore) InsertPasswordReset(_ context.Context, t *store.PasswordReset) error {
+	if t == nil || t.UserID <= 0 {
+		return errors.New("fakeStore: 令牌缺少 user_id")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextResetID++
+	t.ID = f.nextResetID
+	cp := *t
+	f.resets[t.ID] = &cp
+	return nil
+}
+
+// consume 是"校验 + 标记已用"的内存版：**同一个临界区**内完成，因此与真 store 的
+// 单条 UPDATE ... RETURNING 一样，两个并发请求不可能都成功。
+func (f *fakeStore) consume(tokenHash, purpose string) *store.PasswordReset {
+	var found *store.PasswordReset
+	for _, r := range f.resets {
+		if r.TokenHash != tokenHash || r.Purpose != purpose {
+			continue
+		}
+		if r.UsedAt != nil || !time.Now().Before(r.ExpiresAt) {
+			continue
+		}
+		now := time.Now()
+		r.UsedAt = &now
+		found = r
+		break
+	}
+	return found
+}
+
+func (f *fakeStore) ConsumePasswordReset(_ context.Context, tokenHash, newPasswordHash string) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.consume(tokenHash, store.PurposePasswordReset)
+	if r == nil {
+		return 0, false, nil
+	}
+	u, ok := f.users[r.UserID]
+	if !ok {
+		return 0, false, nil
+	}
+	u.PasswordHash = newPasswordHash
+	// 改密必须让全部会话立刻失效 + 版本号自增（真 store 在一个事务里做这四件事）。
+	for _, s := range f.sessions {
+		if s.UserID == r.UserID && s.RevokedAt == nil {
+			now := time.Now()
+			s.RevokedAt = &now
+		}
+	}
+	u.TokenVersion++
+	return r.UserID, true, nil
+}
+
+func (f *fakeStore) ConsumeEmailVerify(_ context.Context, tokenHash string) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.consume(tokenHash, store.PurposeEmailVerify)
+	if r == nil || r.Email == nil {
+		return 0, false, nil
+	}
+	u, ok := f.users[r.UserID]
+	if !ok || u.Email == nil || *u.Email != *r.Email {
+		// 地址在这一轮里变过：令牌烧掉，但不落验证（与真 store 的防错配条件一致）。
+		return 0, false, nil
+	}
+	now := time.Now()
+	u.EmailVerifiedAt = &now
+	return r.UserID, true, nil
+}
+
+// resetRowCount 返回某个用途的令牌行数（验收"未验证邮箱不落行"用）。
+func (f *fakeStore) resetRowCount(purpose string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.resets {
+		if r.Purpose == purpose {
+			n++
+		}
+	}
+	return n
+}
+
 // —— 计数/读取辅助（都有锁）。
 
 func (f *fakeStore) sessionCount() int {
@@ -295,6 +440,18 @@ func newTestService(t *testing.T, f *fakeStore, opts AccountOptions) *AccountSer
 	if opts.RefreshTTL == 0 {
 		opts.RefreshTTL = 30 * 24 * time.Hour
 	}
+	// 邮件链路的三项在生产里由 config 提供（见 bootstrap.NewAccountService）。
+	// 这里给测试默认值：不填的话 NewAccountService 会拒绝构造（TTL 必须为正、
+	// baseURL 不能为空），那样每一个既有用例都会因为"少填一个测试参数"而变红。
+	if opts.ResetTTL == 0 {
+		opts.ResetTTL = 30 * time.Minute
+	}
+	if opts.EmailVerifyTTL == 0 {
+		opts.EmailVerifyTTL = 24 * time.Hour
+	}
+	if opts.PublicBaseURL == "" {
+		opts.PublicBaseURL = "https://example.test"
+	}
 	signer, err := auth.NewSigner(accountTestJWTSecret, 15*time.Minute)
 	if err != nil {
 		t.Fatalf("构造 Signer 失败：%v", err)
@@ -326,11 +483,11 @@ func TestRegisterDuplicateUsernameReturnsTaken(t *testing.T) {
 	f := newFakeStore()
 	svc := newTestService(t, f, AccountOptions{})
 
-	if _, err := svc.Register(context.Background(), "Alice", "爱丽丝", "abcd1234", "1.1.1.1", "ua"); err != nil {
+	if _, err := svc.Register(context.Background(), "Alice", "爱丽丝", "abcd1234", "alice@example.com", "1.1.1.1", "ua"); err != nil {
 		t.Fatalf("首次注册应当成功：%v", err)
 	}
 	// 大小写不同、语义同一个用户名：store 侧归一化成小写，因此必须命中唯一冲突。
-	_, err := svc.Register(context.Background(), "ALICE", "另一个", "abcd1234", "1.1.1.1", "ua")
+	_, err := svc.Register(context.Background(), "ALICE", "另一个", "abcd1234", "other@example.com", "1.1.1.1", "ua")
 	if !errors.Is(err, ErrUsernameTaken) {
 		t.Fatalf("重名注册应当返回 ErrUsernameTaken，实际：%v", err)
 	}
@@ -344,7 +501,7 @@ func TestRegisterRejectsBadUsernameWithoutHashing(t *testing.T) {
 	svc := newTestService(t, f, AccountOptions{})
 
 	for _, name := range []string{"ab", "中文名", "with space", strings.Repeat("x", 21), "a-b"} {
-		if _, err := svc.Register(context.Background(), name, "昵称", "abcd1234", "", ""); !errors.Is(err, ErrBadUsername) {
+		if _, err := svc.Register(context.Background(), name, "昵称", "abcd1234", "alice@example.com", "", ""); !errors.Is(err, ErrBadUsername) {
 			t.Fatalf("用户名 %q 应当被拒（ErrBadUsername），实际：%v", name, err)
 		}
 	}
@@ -369,7 +526,7 @@ func TestRegisterRejectsWeakPassword(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := svc.Register(context.Background(), "alice", "昵称", tc.pass, "", "")
+			_, err := svc.Register(context.Background(), "alice", "昵称", tc.pass, "alice@example.com", "", "")
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("期望 %v，实际 %v", tc.want, err)
 			}
@@ -386,7 +543,7 @@ func TestRegisterSanitizesDisplayName(t *testing.T) {
 
 	// 含零宽空格与 Bidi 覆盖符的昵称：清洗后应当只剩可见字符。
 	dirty := "  a\u200bb\u202ec  "
-	sess, err := svc.Register(context.Background(), "alice", dirty, "abcd1234", "", "")
+	sess, err := svc.Register(context.Background(), "alice", dirty, "abcd1234", "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -395,7 +552,7 @@ func TestRegisterSanitizesDisplayName(t *testing.T) {
 	}
 
 	// 空昵称（清洗后为空）回落到用户名。
-	sess2, err := svc.Register(context.Background(), "bob", "\u200b\u200c", "abcd1234", "", "")
+	sess2, err := svc.Register(context.Background(), "bob", "\u200b\u200c", "abcd1234", "bob@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -466,7 +623,7 @@ func TestRefreshRotatesAndDetectsReplay(t *testing.T) {
 	svc := newTestService(t, f, AccountOptions{})
 	ctx := context.Background()
 
-	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "", "")
+	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -550,7 +707,7 @@ func TestRefreshRejectsExpiredSession(t *testing.T) {
 	svc := newTestService(t, f, AccountOptions{RefreshTTL: time.Hour})
 	ctx := context.Background()
 
-	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "", "")
+	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -576,7 +733,7 @@ func TestLogoutIsIdempotent(t *testing.T) {
 	svc := newTestService(t, f, AccountOptions{})
 	ctx := context.Background()
 
-	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "", "")
+	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -600,7 +757,7 @@ func TestLogoutAllBumpsTokenVersion(t *testing.T) {
 	svc := newTestService(t, f, AccountOptions{})
 	ctx := context.Background()
 
-	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "", "")
+	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -630,7 +787,7 @@ func TestVerifyAccessTokenChecksTokenVersion(t *testing.T) {
 	svc := newTestService(t, f, AccountOptions{})
 	ctx := context.Background()
 
-	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "", "")
+	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -657,7 +814,7 @@ func TestVerifyAccessTokenRejectsBannedAndGarbage(t *testing.T) {
 	svc := newTestService(t, f, AccountOptions{})
 	ctx := context.Background()
 
-	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "", "")
+	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -797,7 +954,7 @@ func TestMeAndTicket(t *testing.T) {
 	svc := newTestService(t, f, AccountOptions{})
 	ctx := context.Background()
 
-	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "", "")
+	login, err := svc.Register(ctx, "alice", "爱丽丝", "abcd1234", "alice@example.com", "", "")
 	if err != nil {
 		t.Fatalf("注册失败：%v", err)
 	}
@@ -849,7 +1006,7 @@ func TestHashingGateRejectsWhenSaturated(t *testing.T) {
 	}()
 
 	// 注册路径：闸门满 → 立刻 ErrHashingBusy，且**没有**走到入库。
-	if _, err := svc.Register(context.Background(), "alice", "爱丽丝", "abcd1234", "", ""); !errors.Is(err, ErrHashingBusy) {
+	if _, err := svc.Register(context.Background(), "alice", "爱丽丝", "abcd1234", "alice@example.com", "", ""); !errors.Is(err, ErrHashingBusy) {
 		t.Fatalf("闸门满时注册应当返回 ErrHashingBusy，实际：%v", err)
 	}
 	if f.createUserCalls != 0 {

@@ -109,4 +109,62 @@ var migrations = []migration{
 		// 不额外建 created_at 索引：ListAudit 按 id DESC 分页，
 		// 主键索引已经能直接服务这个 ORDER BY，多余的索引只是写放大。
 	}},
+
+	{version: "0006_users_email_unique", statements: []string{
+		// email_verified_at 是"这个邮箱的归属已被证明"的唯一判据（NULL = 未验证）。
+		//
+		// 为什么必须有它：找回密码只会把信发到**已验证**的邮箱上。没有这一列时，
+		// 任何人在注册时填上别人的邮箱，就能把那个人的找回入口变成自己的
+		//（信发到对方邮箱、token 却属于攻击者的账号）。见 service.Forgot 的门控。
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at timestamptz NULL`,
+		// 一个邮箱只能属于一个账号 —— 否则"按邮箱找回"会命中两行，"给谁改密"没有唯一答案。
+		//
+		// 三个设计点：
+		//  1. **部分**唯一索引（WHERE email IS NOT NULL）：email 可空（老账号全是 NULL），
+		//     多个 NULL 语义上是"都没有邮箱"，不该互相冲突；
+		//  2. **lower(email)**：大小写不同的同一邮箱视为同一个（与 username 全小写存储同口径）；
+		//  3. 用 CREATE UNIQUE INDEX 而不是 ALTER TABLE ADD CONSTRAINT：迁移规则第 2 条 ——
+		//     后者不能重复执行。
+		// 代价：DDL 层因此没有 CHECK (email = lower(email)) 兜底，归一化由
+		// service.CanonicalEmail 与 store.SetUserEmail 承担；查询侧一律写
+		// lower(email) = ?，所以即便库里出现脏值也不会漏匹配（也不会重复命中：索引在 lower 上）。
+		//
+		// ⚠ 若既有的非 NULL email 里有重复值，这一步会**失败并让启动失败** —— 这是刻意的
+		// （要吵，不要静默跳过）。上线前可先跑：
+		//   SELECT lower(email), count(*) FROM users WHERE email IS NOT NULL GROUP BY 1 HAVING count(*) > 1;
+		`CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_key ON users (lower(email)) WHERE email IS NOT NULL`,
+	}},
+
+	{version: "0007_password_resets", statements: []string{
+		// 一次性邮件令牌（purpose 区分两种用途）。
+		//
+		// 表名沿用批准时的 password_resets，但它同时承载 email_verify ——
+		// 两者的**生命周期语义逐字相同**（32 字节随机、库里只存 sha256、单次使用、
+		// 到期即废），差别只有 TTL 与消费后的动作。合成一张表让"单次使用"只有一份实现，
+		// 也避免了第二张表迟早出现的"某一张忘了加 used_at"。
+		//
+		// purpose 的 CHECK 写在 CREATE TABLE 里（迁移规则第 2 条：约束必须能重复执行）。
+		`CREATE TABLE IF NOT EXISTS password_resets (
+	id         bigserial PRIMARY KEY,
+	user_id    bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	purpose    varchar(16) NOT NULL
+		CHECK (purpose IN ('email_verify', 'password_reset')),
+	token_hash char(64) NOT NULL UNIQUE,
+	email      varchar(254) NULL,
+	ip         varchar(45) NULL,
+	user_agent varchar(255) NULL,
+	created_at timestamptz NOT NULL DEFAULT now(),
+	expires_at timestamptz NOT NULL,
+	used_at    timestamptz NULL
+)`,
+		// 说明：token_hash 只存 sha256 十六进制（照一期 sessions 的做法），
+		// 原文只在下发那一次存在（响应里永不出现、日志里永不打印）。
+		// user_id NOT NULL：这一行永远属于某个账号 —— 未注册或未验证的邮箱
+		// **不会**产生行（对外仍是恒定 200，见 service.Forgot）。
+
+		// 按用户撤销/自查（将来"重发验证邮件"与排障都要按 user 查）。
+		`CREATE INDEX IF NOT EXISTS password_resets_user_id_idx ON password_resets (user_id)`,
+		// 过期清理协程按 expires_at 扫，走这个索引（照 sessions_expires_at_idx 的先例）。
+		`CREATE INDEX IF NOT EXISTS password_resets_expires_at_idx ON password_resets (expires_at)`,
+	}},
 }

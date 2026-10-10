@@ -163,12 +163,62 @@ func newKeyedLimiter(perMinute float64, burst int, what string) gin.HandlerFunc 
 	}
 	return func(c *gin.Context) {
 		if l != nil && !l.Allow(c.ClientIP()) {
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": what + "请求过于频繁，请稍后再试",
-				"code":  model.CodeRateLimited,
-			})
+			writeRateLimited(c, what)
 			return
 		}
 		c.Next()
 	}
+}
+
+// writeRateLimited 写出 429 并终止链路。
+//
+// 它是**唯一**的 429 产出点（中间件与处理器内联的每邮箱闸门都走它），
+// 所以"不同闸门撞限速时的响应字节相同"是结构性成立的，而不是靠两边抄同一段代码。
+// 这一点对找回密码尤其重要：如果"撞了每邮箱闸门"与"撞了每 IP 闸门"的文案不同，
+// 就等于告诉对方"这个地址被单独计数过"。
+func writeRateLimited(c *gin.Context, what string) {
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+		"error": what + "请求过于频繁，请稍后再试",
+		"code":  model.CodeRateLimited,
+	})
+}
+
+// 邮件链路的限速文案（429 的 message 由它们拼出来，两条闸门刻意用不同的词，
+// 但同一类闸门（IP / 邮箱）在所有路径上完全一致）。
+const (
+	// forgotRateLimitWhat 用于 /api/auth/forgot 的两条闸门（每 IP、每邮箱）。
+	//
+	// 两条用**同一个词**是刻意的：这样攻击者无法从文案上区分自己撞的是哪一条 ——
+	// 而"撞了每邮箱闸门"意味着"这个地址最近被请求过"，那是一条不需要存在性
+	// 也能被观测到的状态。两条合一说不出任何多余的信息。
+	forgotRateLimitWhat = "找回密码"
+	// tokenRateLimitWhat 用于 /api/auth/reset 与 /api/auth/verify-email（两者共用一条桶）。
+	tokenRateLimitWhat = "链接处理"
+)
+
+// newHourlyEmailLimiter 构造"每小时 N 次"的**每 IP** 限速中间件。
+//
+// 它与 newKeyedLimiter 的唯一差别是单位换算 —— 而那个换算正是最容易写错的地方，
+// 所以它被抽成一个有名字的函数（见 hourlyToPerMinute）。
+func newHourlyEmailLimiter(perHour int, what string) gin.HandlerFunc {
+	return newKeyedLimiter(hourlyToPerMinute(perHour), perHour, what)
+}
+
+// hourlyToPerMinute 把"每小时次数"换算成令牌桶的"每分钟补充速率"。
+//
+// ⚠ 这个 /60 是硬约束，不是可选的风格问题：
+// limiter.NewKeyed 的第一个参数单位是**每分钟令牌数**，而 PR_MAIL_*_PER_HOUR
+// 这一族配置的语义是**每小时次数**。少除这一次，闸门就宽了 60 倍，
+// 而且**不会有任何报错** —— 唯一的现象是"限速好像没生效"，那是一种
+// 只有在对账时才会被发现的静默失效。
+//
+// burst 取 perHour 本身（不是除以 60）：桶满表示"这一小时一次都还没用过"，
+// 所以正常用户的第一批请求永远畅通，而持续滥用会被回填速率压死。
+func hourlyToPerMinute(perHour int) float64 {
+	if perHour <= 0 {
+		// 0 表示"闸门关闭"（limiter.NewKeyed 的约定），config 层不允许配成 0。
+		// 这里保持与 config 一致的语义，避免出现"除以 0 得到 +Inf"这种荒唐的补充速率。
+		return 0
+	}
+	return float64(perHour) / 60
 }
