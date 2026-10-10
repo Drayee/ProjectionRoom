@@ -1,5 +1,13 @@
-// Package service 实现 WebSocket 信令层：连接注册、定向转发与房间广播。
-// 它只转发元数据，不传输任何视频字节（SPEC §1.1 目标 7）。
+// Package service 是投影室的运行时核心：房间与拓扑用例、账号用例、
+// WebSocket 信令连接池、环形日志缓冲与 HTTP 服务的生命周期都在这里。
+//
+// 三条既有的职责边界（合并 usecase → service 之后逐字仍然成立）：
+//
+//   - 信令层只转发元数据，不传输任何视频字节（SPEC §1.1 目标 7）；
+//   - 房间用例（manager.go / room.go）不接触 WebSocket 连接，只通过 Broadcaster
+//     接口投递消息，因此可以脱离网络单独测试（接口的实现方是同包的 Hub，见 hub.go）；
+//   - 房间与拓扑用例是"谁是成员、谁是主播、当前播放状态与容量"的唯一权威
+//     （SPEC §3 职责边界），账号用例是"身份与授权事实"的唯一落点（见 account.go）。
 package service
 
 import (
@@ -13,7 +21,6 @@ import (
 	"github.com/coder/websocket"
 
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/usecase"
 )
 
 var (
@@ -142,7 +149,7 @@ func (c *Client) writePump(ctx context.Context) {
 }
 
 // Hub 维护 clientId → Client 与 roomID → 连接集合两张索引。
-// 它实现 room.Broadcaster（方法集由 wire 在编译期绑定检查）。
+// 它实现 Broadcaster（方法集由 wire 在编译期绑定检查）。
 type Hub struct {
 	cfg config.SignalConfig
 
@@ -167,11 +174,11 @@ func NewHub(cfg *config.Config) (*Hub, func(), error) {
 	return h, h.Close, nil
 }
 
-// NewBroadcaster 把 Hub 投影成用例层声明的能力接口。
+// NewBroadcaster 把 Hub 投影成房间用例声明的能力接口（定义见 manager.go）。
 //
 // 用普通构造函数而不是 wire.Bind：依赖链在 cmd/wire.go 里是一列可读的 NewXxx，
-// 装配关系不依赖 wire 的接口绑定语义。Hub 是适配器，接口由 usecase 定义。
-func NewBroadcaster(h *Hub) usecase.Broadcaster { return h }
+// 装配关系不依赖 wire 的接口绑定语义。Hub 是适配器，接口由用例层声明。
+func NewBroadcaster(h *Hub) Broadcaster { return h }
 
 // Close 关闭所有写协程与连接。
 func (h *Hub) Close() {

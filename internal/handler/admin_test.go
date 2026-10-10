@@ -14,24 +14,23 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"ProjectionRoom/internal/auth"
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/auth"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // 本文件是 T9（管理端最小骨架）的验收面：权限边界、字段白名单、封禁的两件事、审计投递。
 //
-// 装配策略：**真实**的 usecase.AccountService + **真实**的 auth.Signer，
+// 装配策略：**真实**的 service.AccountService + **真实**的 auth.Signer，
 // 只把持久化换成一张内存用户表（*store.Store 需要 PostgreSQL，而这里要验的是
 // HTTP 面的判据）。这样"封禁"这条链路上除 SQL 以外的每一层都是生产代码：
 // 状态变更、token_version 自增、审计投递（异步）全都会真的走到。
 
 // fakeAdminStore 是**一张内存用户表**，同时满足两个端口：
 //
-//   - usecase.AccountStore：真实 AccountService 用它做封禁/改角色/写审计；
+//   - service.AccountStore：真实 AccountService 用它做封禁/改角色/写审计；
 //   - handler.AdminUserStore：管理端列表与回读。
 //
 // 两者共用同一份数据是刻意的：若各用一份，"封禁成功但回读还是旧状态"这类假象
@@ -95,7 +94,7 @@ func (s *fakeAdminStore) auditsOf(action string) []store.AdminAudit {
 	return out
 }
 
-// —— usecase.AccountStore ——
+// —— service.AccountStore ——
 
 func (s *fakeAdminStore) CreateUser(ctx context.Context, u *store.User) error {
 	s.mu.Lock()
@@ -537,11 +536,11 @@ func (s *fakeAdminRoomStore) InsertAudit(ctx context.Context, a *store.AdminAudi
 // 与 auth_test.go 的 accountTestRouter 同一形态，而且更快。
 type adminEnv struct {
 	engine     *gin.Engine
-	rooms      *usecase.Manager
+	rooms      *service.Manager
 	hub        *fakeAdminHub
 	st         *fakeAdminStore
 	roomStore  *fakeAdminRoomStore
-	svc        *usecase.AccountService
+	svc        *service.AccountService
 	logs       *service.LogRing
 	writer     *fakeAdminWriter
 	admin      store.User
@@ -572,7 +571,7 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 	user := st.seed("alice", store.RoleUser, store.StatusActive)
 
 	tickets := auth.NewTicketStore(cfg.Auth.WSTicketTTL)
-	svc, err := usecase.NewAccountService(st, signer, tickets, usecase.AccountOptions{
+	svc, err := service.NewAccountService(st, signer, tickets, service.AccountOptions{
 		RefreshTTL: cfg.Auth.RefreshTTL,
 	})
 	if err != nil {
@@ -583,7 +582,7 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	logs := service.NewLogRing(8)
 	writer := &fakeAdminWriter{
 		queueLen: 3,
@@ -701,7 +700,7 @@ func TestAdminUsersListPaginatesAndNeverLeaksHash(t *testing.T) {
 	}
 
 	var page struct {
-		Items  []usecase.Profile `json:"items"`
+		Items  []service.Profile `json:"items"`
 		Total  int64             `json:"total"`
 		Limit  int               `json:"limit"`
 		Offset int               `json:"offset"`
@@ -755,7 +754,7 @@ func TestAdminUsersListPaginatesAndNeverLeaksHash(t *testing.T) {
 // —— 用例：写操作（封禁 / 改角色） ——
 
 // TestAdminPatchBanClosesConnectionsAndAudits 覆盖 T9-②的核心：
-// 封禁必须**同时**做两件事（改状态 + token_version 自增，见 usecase；
+// 封禁必须**同时**做两件事（改状态 + token_version 自增，见 service；
 // 以及断开在跑的长连接，见 handler），并且审计必须被投递。
 func TestAdminPatchBanClosesConnectionsAndAudits(t *testing.T) {
 	env := newAdminEnv(t, nil)
@@ -766,7 +765,7 @@ func TestAdminPatchBanClosesConnectionsAndAudits(t *testing.T) {
 		t.Fatalf("封禁应当 200，实际 %d（%s）", w.Code, w.Body.String())
 	}
 	var resp struct {
-		User usecase.Profile `json:"user"`
+		User service.Profile `json:"user"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("解析封禁响应失败: %v", err)
@@ -814,7 +813,7 @@ func TestAdminPatchBanClosesConnectionsAndAudits(t *testing.T) {
 	}
 }
 
-// TestAdminPatchRoleAudits 覆盖改角色：走 usecase.SetRole（含审计），并回读新角色。
+// TestAdminPatchRoleAudits 覆盖改角色：走 service.SetRole（含审计），并回读新角色。
 func TestAdminPatchRoleAudits(t *testing.T) {
 	env := newAdminEnv(t, nil)
 	path := "/api/admin/users/" + strconv.FormatInt(env.user.ID, 10)
@@ -824,7 +823,7 @@ func TestAdminPatchRoleAudits(t *testing.T) {
 		t.Fatalf("改角色应当 200，实际 %d（%s）", w.Code, w.Body.String())
 	}
 	var resp struct {
-		User usecase.Profile `json:"user"`
+		User service.Profile `json:"user"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("解析响应失败: %v", err)
@@ -1428,7 +1427,7 @@ func TestAdminRoutesNotRegisteredWithoutDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	t.Cleanup(func() { rooms.Stop(); cleanup() })
 
 	// 依赖故意给全：只要 DSN 为空，它们就不该被用上。

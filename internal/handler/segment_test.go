@@ -27,7 +27,6 @@ import (
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/service/segment"
-	"ProjectionRoom/internal/usecase"
 )
 
 // segmentServer 起一个带切片端点的真实 HTTP 服务。
@@ -46,7 +45,7 @@ func segmentServer(t *testing.T, mutate func(*config.Config)) (*httptest.Server,
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 
 	queue, queueCleanup, err := segment.NewQueue(cfg)
 	if err != nil {

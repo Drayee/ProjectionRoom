@@ -1,8 +1,8 @@
 // 认证 REST 端点（ACCOUNTS §10）。
 //
-// 本文件只做四件事：解析请求 → 限速闸门（在 router.go 挂）→ 调 usecase →
+// 本文件只做四件事：解析请求 → 限速闸门（在 router.go 挂）→ 调 service →
 // 把结果/错误翻译成 HTTP 与 Cookie。**任何授权判断都不在这里**：
-// 身份事实由 usecase.VerifyAccessToken 给出（token_version 比对），
+// 身份事实由 service.VerifyAccessToken 给出（token_version 比对），
 // 本层只负责把它的结论映射成状态码（见 errors.go）。
 package handler
 
@@ -18,26 +18,26 @@ import (
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // AccountService 是认证端点需要的**窄接口**。
 //
-// 为什么要接口而不是直接用 *usecase.AccountService：
+// 为什么要接口而不是直接用 *service.AccountService：
 //   - handler 的单测可以注入假 service，覆盖"响应体里绝不能出现 PasswordHash"、
 //     "Cookie 属性"、"封禁/重放各返回什么状态码"这些**协议面**判据，
 //     而不需要一台 PostgreSQL；
 //   - 接口面本身就是一份"HTTP 层能对账号做的事"的清单，
-//     比读一遍 usecase 的方法表更快看清边界。
+//     比读一遍 service 的方法表更快看清边界。
 type AccountService interface {
-	Register(ctx context.Context, username, displayName, password, ip, ua string) (*usecase.Session, error)
-	Login(ctx context.Context, username, password, ip, ua string) (*usecase.Session, error)
-	Refresh(ctx context.Context, refreshToken, ip, ua string) (*usecase.Session, error)
+	Register(ctx context.Context, username, displayName, password, ip, ua string) (*service.Session, error)
+	Login(ctx context.Context, username, password, ip, ua string) (*service.Session, error)
+	Refresh(ctx context.Context, refreshToken, ip, ua string) (*service.Session, error)
 	Logout(ctx context.Context, refreshToken string) error
 	LogoutAll(ctx context.Context, userID int64) error
 
-	Me(ctx context.Context, userID int64) (usecase.Profile, error)
+	Me(ctx context.Context, userID int64) (service.Profile, error)
 	IssueWSTicket(ctx context.Context, userID int64) (string, error)
 	VerifyAccessToken(ctx context.Context, token string) (*store.User, error)
 }
@@ -72,7 +72,7 @@ type AuthDeps struct {
 	//
 	// 为什么它挂在 AuthDeps 而不是新开一个参数：硬约束是"不改 NewRouter 的参数个数与语义"，
 	// 而这份依赖的来源（账号存储）与 Store 完全一致 —— 它只是同一个数据源上
-	// 一个**只回答昵称**的更窄的出口（实现见 usecase.ProfileNameLookup）。
+	// 一个**只回答昵称**的更窄的出口（实现见 service.ProfileNameLookup）。
 	// 它不放在 AdminDeps 里，是因为它服务的端点是免登录的公开列表，不是管理端。
 	ProfileNames PublicRoomProfileStore
 }
@@ -172,16 +172,16 @@ type credentialsRequest struct {
 // **绝不包含 refresh token 与 PasswordHash**：
 //   - refresh 只走 HttpOnly Cookie（进了响应体就等于给了 JS 一份可长期使用的凭据，
 //     那正是 §5 要避免的形态）；
-//   - PasswordHash 由 usecase.ProfileOf 在类型层面排除（它不是 Profile 的字段）。
+//   - PasswordHash 由 service.ProfileOf 在类型层面排除（它不是 Profile 的字段）。
 type sessionResponse struct {
-	User        usecase.Profile `json:"user"`
+	User        service.Profile `json:"user"`
 	AccessToken string          `json:"accessToken"`
 	TokenType   string          `json:"tokenType"`
 	ExpiresIn   int             `json:"expiresIn"`
 }
 
 // newSessionResponse 组装响应（access token 只在此处出现一次）。
-func newSessionResponse(s *usecase.Session, accessTTL time.Duration) sessionResponse {
+func newSessionResponse(s *service.Session, accessTTL time.Duration) sessionResponse {
 	// expiresIn 以 access token 的实际到期时刻为准（比 TTL 配置更准：
 	// signer 会把时间戳截到秒，两者可能差一秒）。
 	expiresIn := int(accessTTL.Seconds())
@@ -312,7 +312,7 @@ func (h *authHandler) refresh(c *gin.Context) {
 	if err != nil {
 		// 重放与无效凭据都把浏览器上的那一个 Cookie 清掉：
 		// 它与服务端的状态已经不可能再对上了，留着只会让客户端反复重试同一个死凭据。
-		if errors.Is(err, usecase.ErrRefreshReplay) || errors.Is(err, usecase.ErrSessionInvalid) {
+		if errors.Is(err, service.ErrRefreshReplay) || errors.Is(err, service.ErrSessionInvalid) {
 			clearRefreshCookie(c)
 		}
 		writeAccountError(c, err)

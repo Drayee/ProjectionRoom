@@ -43,7 +43,7 @@ var (
 
 // Claims 是 access token 的载荷。
 //
-// 它只是签发那一刻的快照：UserID 送进 usecase 查库，Role/TokenVersion 与库里的
+// 它只是签发那一刻的快照：UserID 送进 service 查库，Role/TokenVersion 与库里的
 // 当前值比对后才算授权事实。任何一处直接拿 Role 放行、或跳过 TokenVersion 比对，
 // 都会让封禁/改密/登出全部设备失去即时性（ACCOUNTS §5）。
 type Claims struct {

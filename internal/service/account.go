@@ -2,7 +2,7 @@
 //
 // 本文件是"身份与授权事实"的唯一落点。三条边界：
 //
-//  1. **token 版本比对**只在这里（VerifyAccessToken）。internal/auth 只回答
+//  1. **token 版本比对**只在这里（VerifyAccessToken）。internal/service/auth 只回答
 //     "这串 token 是本服务签发的、结构完整且未过期"，它不碰数据库，因此
 //     role/tv 在它那里**只是签发那一刻的快照**；"这个账号现在还能不能用"
 //     必须由本层查库比对 users.token_version + status 才能回答（不变量 I3）。
@@ -12,7 +12,7 @@
 //     封禁/改角色的 token_version 自增必须在请求路径上完成（否则"登录后立刻刷新"
 //     会偶发失败、封禁的生效时间不确定），其余写（last_seen、审计）全部投递给
 //     异步写入器。
-package usecase
+package service
 
 import (
 	"context"
@@ -29,7 +29,7 @@ import (
 	"time"
 	"unicode"
 
-	"ProjectionRoom/internal/auth"
+	"ProjectionRoom/internal/service/auth"
 	"ProjectionRoom/internal/store"
 )
 
@@ -83,7 +83,7 @@ var (
 
 	// StoreNotFound 是 store.ErrNotFound 的别名，供**上层**（handler）判断"账号不存在"。
 	//
-	// 为什么要给一个别名：handler 现在只认识 usecase 与 auth 两个下层，为了一个哨兵
+	// 为什么要给一个别名：handler 现在只认识 service 与 service/auth 两个下层，为了一个哨兵
 	// 错误把持久化包拉进 HTTP 层，会让"handler 依赖了什么"变得难以一眼看完。
 	// 别名保持了判断能力，没有扩大依赖面（它是同一个 error 值，errors.Is 依然成立）。
 	StoreNotFound = store.ErrNotFound

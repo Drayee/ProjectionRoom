@@ -1,4 +1,4 @@
-package usecase
+package service
 
 import (
 	"fmt"
@@ -775,7 +775,7 @@ func TestDefaultMaxDepthMatchesConfigDefault(t *testing.T) {
 		t.Fatalf("默认深度上限应为 3（延迟优先，4 跳最坏多 ~300ms），实际 %d", DefaultMaxDepth)
 	}
 	if DefaultMaxDepth != config.DefaultRoomMaxDepth {
-		t.Fatalf("usecase.DefaultMaxDepth=%d 与 config.DefaultRoomMaxDepth=%d 必须一致",
+		t.Fatalf("service.DefaultMaxDepth=%d 与 config.DefaultRoomMaxDepth=%d 必须一致",
 			DefaultMaxDepth, config.DefaultRoomMaxDepth)
 	}
 	if got := (Options{}).withDefaults().MaxDepth; got != DefaultMaxDepth {

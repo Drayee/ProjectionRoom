@@ -1,4 +1,4 @@
-package usecase
+package service
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"ProjectionRoom/internal/auth"
+	"ProjectionRoom/internal/service/auth"
 	"ProjectionRoom/internal/store"
 )
 

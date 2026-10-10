@@ -1,7 +1,7 @@
 // Package utils 收纳与业务无关的小工具：随机码、切片比较等。
 //
 // 判定标准：只有"被多个层用到、且不含任何领域知识"的东西才放这里。
-// 有业务含义的东西留在 usecase，别把 utils 变成杂物间。
+// 有业务含义的东西留在 service，别把 utils 变成杂物间。
 package utils
 
 import (

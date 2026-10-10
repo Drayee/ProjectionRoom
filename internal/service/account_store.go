@@ -9,7 +9,7 @@
 //     只有这里。
 //
 // 本文件不做任何业务判断，只做方法转发与签名翻译。
-package usecase
+package service
 
 import (
 	"context"
@@ -42,7 +42,7 @@ type AccountStoreAdapter struct {
 // 这个事实会体现在 store 的写入器指标上（队列长度/丢弃数永远是 0）。
 func NewAccountStoreAdapter(st *store.Store, w *store.Writer) (*AccountStoreAdapter, error) {
 	if st == nil {
-		return nil, errors.New("usecase: 缺少 *store.Store")
+		return nil, errors.New("service: 缺少 *store.Store")
 	}
 	if w != nil {
 		// 挂到 Store 上：只拿到 *store.Store 的上层（管理端指标接口）也要能看见它。
@@ -140,24 +140,12 @@ func SubmitAccountJob(w *store.Writer, fn func(ctx context.Context) error) bool 
 	})
 }
 
-// SubmitWriterJob 让 *store.Writer **直接**满足 handler 的 AdminAuditSink
-// （SubmitJob(func(ctx) error) bool）。
-//
-// 为什么需要它（而不是让 handler 拿 *store.Writer 自己调 Submit）：
-// handler 从一期起就不 import gorm（见 handler/errors.go 里 storeNotFound 别名的说明），
-// 而 Submit 的参数类型是 func(ctx, *gorm.DB) error。这个一行包装把 GORM 挡在
-// 已经认识它的那一层（本文件是本包唯一 import gorm 的文件），
-// 于是"审计由谁写、写几次"在 handler 里仍然只表现为一次 SubmitJob 调用。
-func SubmitWriterJob(w *store.Writer, fn func(ctx context.Context) error) bool {
-	return SubmitAccountJob(w, fn)
-}
-
 // WriterJobs 是给 handler 用的**写队列出口**：指标 + 无 gorm 参数的投递。
 //
 // 为什么把它做成一个类型而不是让 handler 拿 *store.Writer：
 // handler.AdminWriterStats 需要 QueueLen/Stats，handler.AdminAuditSink 需要 SubmitJob，
 // 两者都是同一个对象的两个面。让本类型的**方法集**同时满足它们，
-// 装配处就只需要写一次 deps.Writer = usecase.NewWriterJobs(res.Writer)。
+// 装配处就只需要写一次 deps.Writer = service.NewWriterJobs(res.Writer)。
 //
 // 它零语义、零状态（只持一个指针），因此按值/按指针传递都安全。
 type WriterJobs struct {
@@ -177,7 +165,7 @@ func (j *WriterJobs) SubmitJob(fn func(ctx context.Context) error) bool {
 	if j == nil {
 		return false
 	}
-	return SubmitWriterJob(j.w, fn)
+	return SubmitAccountJob(j.w, fn)
 }
 
 // QueueLen 转发写入器的队列长度指标（瞬时 gauge）。
@@ -206,7 +194,7 @@ func (j *WriterJobs) Writer() *store.Writer {
 
 // ProfileNameLookup 是"取昵称"的窄出口（二期 T2 的公开房列表用）。
 //
-// 它为什么必须是**独立于 usecase.Profile** 的一个类型：Profile 里带 email /
+// 它为什么必须是**独立于 Profile** 的一个类型：Profile 里带 email /
 // role / status（那是账号档案的面），而公开房列表只需要一个字符串。
 // 让 handler 拿到的唯一形态就是"一个 int64 → 一个 string"，
 // 于是"列表响应里不会出现房主邮箱/角色/状态"这件事在类型层面成立，

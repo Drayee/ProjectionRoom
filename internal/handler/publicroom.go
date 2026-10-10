@@ -2,7 +2,7 @@
 //
 // 本文件负责三条判据，每条都能在没有 PostgreSQL 的机器上判定：
 //
-//  1. **只列显式公开且当前存在的房间**：候选集合是内存实况（usecase.Manager.ListRooms）
+//  1. **只列显式公开且当前存在的房间**：候选集合是内存实况（service.Manager.ListRooms）
 //     与元数据 is_public 的**交集**。内存里没有的房间一律不出现（§6："实况取自内存"）——
 //     否则列表会指向一个个按码进去只有 ROOM_NOT_FOUND 的死房间。
 //  2. **响应字段白名单**：房间码 / 标题 / 房主昵称 / 在座人数 / 主播在线与否 /
@@ -30,8 +30,8 @@ import (
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // 公开房列表的分页口径。
@@ -45,13 +45,13 @@ const (
 	maxPublicRoomPageLimit     = 50
 )
 
-// PublicRoomLister 是房间实时快照的来源（*usecase.Manager 满足它）。
+// PublicRoomLister 是房间实时快照的来源（*service.Manager 满足它）。
 //
 // 只声明 ListRooms 一个方法：本端点**不允许**碰房间内部状态
 // （*Room 上挂着密码、成员表与主播令牌），把依赖面钉在一个返回纯值类型的方法上，
 // 是"响应里不会出现密码"这条判据在编译期的第一道保证。
 type PublicRoomLister interface {
-	ListRooms() []usecase.RoomSnapshot
+	ListRooms() []service.RoomSnapshot
 }
 
 // PublicRoomMetaStore 是本端点需要的元数据能力（*store.Store 满足它）。
@@ -70,11 +70,11 @@ type PublicRoomMetaStore interface {
 
 // PublicRoomProfileStore 是"取房主昵称"的专用出口（T2）。
 //
-// 为什么单独定义一个只回答昵称的接口（而不是 continue 用 usecase.Profile）：
+// 为什么单独定义一个只回答昵称的接口（而不是 continue 用 service.Profile）：
 // 列表页只需要一个字符串，而 Profile 里带 email / role / status。
 // 把出口钉在"一个 int64 → 一个 string"上，就不存在"某天有人顺手把账号档案
-// 塞进列表响应"的路径 —— 与 usecase.Profile 之于 PasswordHash 是同一条理由
-// （类型比"记得别写"可靠）。实现见 usecase.ProfileNameLookup（它的存储侧查询
+// 塞进列表响应"的路径 —— 与 service.Profile 之于 PasswordHash 是同一条理由
+// （类型比"记得别写"可靠）。实现见 service.ProfileNameLookup（它的存储侧查询
 // 只 SELECT display_name，连 password_hash 都不会经过内存）。
 type PublicRoomProfileStore interface {
 	ProfileNameByID(ctx context.Context, id int64) (string, error)
@@ -154,7 +154,7 @@ func (h *publicRoomHandler) list(c *gin.Context) {
 
 	// ① 内存快照。装配缺失（没有 Manager）时按空列表处理：
 	// 这个端点没有"不可用"的语义，只有"现在没有房间"的语义。
-	snapshots := []usecase.RoomSnapshot{}
+	snapshots := []service.RoomSnapshot{}
 	if h.deps.Rooms != nil {
 		snapshots = h.deps.Rooms.ListRooms()
 	}
@@ -177,7 +177,7 @@ func (h *publicRoomHandler) list(c *gin.Context) {
 		}
 	}
 
-	public := make([]usecase.RoomSnapshot, 0, len(snapshots))
+	public := make([]service.RoomSnapshot, 0, len(snapshots))
 	for _, s := range snapshots {
 		m, ok := meta[s.ID]
 		if !ok {
@@ -268,8 +268,8 @@ func (h *publicRoomHandler) ownerName(ctx context.Context, userID int64) string 
 
 // healMissingMeta 在"内存有房、库里缺行"时投递一次 upsert（§2 的自愈）。
 //
-// 为什么放在 handler 而不是 usecase：投递需要 RoomMetaSink（§9 的写队列出口），
-// 而 usecase 的职责边界是"只向接口投递事件、不持有写队列"（I4）。
+// 为什么放在 handler 而不是 service：投递需要 RoomMetaSink（§9 的写队列出口），
+// 而 service 的职责边界是"只向接口投递事件、不持有写队列"（I4）。
 // 这里同时是唯一一个"已经知道记忆与库不一致"的地方 —— 它刚做完两边求交。
 //
 // 为什么用 upsert（而不是 insert）：并发/重试下同一个房间码可能被投递多次，
@@ -278,7 +278,7 @@ func (h *publicRoomHandler) ownerName(ctx context.Context, userID int64) string 
 // 无房主的房间（ownerUserID == 0，例如单测直接建的房间）**不投递**：
 // UpsertRoomMeta 明确拒绝 owner_user_id <= 0（§6：建房必须绑定房主），
 // 硬投只会把注定失败的作业塞进写队列。这类房间在列表里照常降级展示。
-func (h *publicRoomHandler) healMissingMeta(s usecase.RoomSnapshot) {
+func (h *publicRoomHandler) healMissingMeta(s service.RoomSnapshot) {
 	if s.OwnerUserID <= 0 {
 		return
 	}
@@ -317,7 +317,8 @@ func publicRoomBadRequest(c *gin.Context, message string) {
 
 // publicRoomPage 解析 limit/offset，并回显**生效值**。
 //
-// 与 adminPageLimit / adminPageOffset 完全同一套口径（缺省值不同而已）：
+// 与管理端完全同一套口径（由下面的 boundedLimit / boundedOffset 承载，
+// 只有缺省值与上限不同）：
 //   - 非整数一律 400，不静默降级 —— 那会让"翻页翻不到东西"变成查不出来的 bug；
 //   - 非正数取缺省、超上限截断、负 offset 归零 —— 这三种是**合法**的客户端宽松写法，
 //     夹到边界比报错更友好，且响应里回显生效值让客户端不必猜。
@@ -334,6 +335,12 @@ func publicRoomPage(limitRaw, offsetRaw string) (int, int, error) {
 }
 
 // boundedLimit 解析 limit：空/非正数 → 缺省；超上限 → 截断；非整数 → 错误。
+//
+// 非整数**不**降级成缺省值，而是报错（调用方一律回 400）：静默改变分页口径会让
+// "界面翻页翻不到东西"变成一个没人查得出来的 bug。
+//
+// 管理端（admin.go，缺省 50 / 上限 200）与这里的公开房列表共用它，只有这两个
+// 参数不同 —— 口径一致才能保证"响应里回显的生效值"在两个列表上是同一套语义。
 func boundedLimit(raw string, fallback, max int) (int, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -353,7 +360,7 @@ func boundedLimit(raw string, fallback, max int) (int, error) {
 	}
 }
 
-// boundedOffset 解析 offset：空/负数 → 0；非整数 → 错误。
+// boundedOffset 解析 offset：空/负数 → 0；非整数 → 错误（管理端与公开房列表共用）。
 func boundedOffset(raw string) (int, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -385,6 +392,6 @@ func slicePage[T any](in []T, offset, limit int) []T {
 // 断言：生产装配里的具体类型逐字满足本文件的两个窄接口。
 // 放在这里是让"是否真的满足"在**编译期**暴露（与 admin.go 末尾的断言同一目的）。
 var (
-	_ PublicRoomLister    = (*usecase.Manager)(nil)
+	_ PublicRoomLister    = (*service.Manager)(nil)
 	_ PublicRoomMetaStore = (*store.Store)(nil)
 )

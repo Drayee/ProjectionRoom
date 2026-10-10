@@ -1,4 +1,4 @@
-package usecase
+package service
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ func sampleMediaIndex(bitrateBps int64) model.Index {
 }
 
 // fakeBus 记录所有投递，用于断言"谁收到了什么"。
-// room 包只依赖 Broadcaster 接口，因此可以完全脱离网络测试。
+// service 包只依赖 Broadcaster 接口，因此可以完全脱离网络测试。
 type fakeBus struct {
 	mu       sync.Mutex
 	direct   map[string][][]byte

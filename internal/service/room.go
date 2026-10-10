@@ -1,9 +1,4 @@
-// Package usecase 管理房间生命周期、成员表、房主控制与聊天广播，
-// 是"谁是成员、谁是主播、当前播放状态与容量"的唯一权威（SPEC §3 职责边界）。
-//
-// 本包不接触 WebSocket 连接，只通过 Broadcaster 接口投递消息，
-// 因此可以脱离网络单独测试。
-package usecase
+package service
 
 import (
 	"crypto/sha256"

@@ -14,13 +14,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"ProjectionRoom/internal/auth"
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/limiters"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/auth"
+	"ProjectionRoom/internal/service/limiter"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // —— 假 service（handler 只看得见 AccountService 这个窄接口）。
@@ -70,7 +69,7 @@ func (f *fakeAccountService) issueAccess(u *store.User) (token string, hash stri
 	if _, err := rand.Read(raw); err != nil {
 		return "", "", err
 	}
-	h := usecase.HashRefreshToken(base64.RawURLEncoding.EncodeToString(raw))
+	h := service.HashRefreshToken(base64.RawURLEncoding.EncodeToString(raw))
 	f.sessions[h] = &store.Session{
 		ID:        int64(len(f.sessions) + 1),
 		UserID:    u.ID,
@@ -86,7 +85,7 @@ func (f *fakeAccountService) issueAccess(u *store.User) (token string, hash stri
 // inheritToken 为空表示"新建登录会话"（自己生成 refresh 原文）；
 // 非空表示"轮换"——沿用调用方已经写进 sessions 的那一行（旧行由调用方撤销），
 // 这样 Refresh 的语义才是"用旧 Cookie 换新 Cookie"，而不是"凭空多发一条会话"。
-func (f *fakeAccountService) newSession(u *store.User, inheritToken string) (*usecase.Session, error) {
+func (f *fakeAccountService) newSession(u *store.User, inheritToken string) (*service.Session, error) {
 	access, _, err := f.issueAccess(u)
 	if err != nil {
 		return nil, err
@@ -98,16 +97,16 @@ func (f *fakeAccountService) newSession(u *store.User, inheritToken string) (*us
 			return nil, err
 		}
 		token = base64.RawURLEncoding.EncodeToString(raw)
-		f.sessions[usecase.HashRefreshToken(token)] = &store.Session{
+		f.sessions[service.HashRefreshToken(token)] = &store.Session{
 			ID:        int64(len(f.sessions) + 1),
 			UserID:    u.ID,
-			TokenHash: usecase.HashRefreshToken(token),
+			TokenHash: service.HashRefreshToken(token),
 			IssuedAt:  time.Now(),
 			ExpiresAt: time.Now().Add(time.Hour),
 		}
 	}
-	return &usecase.Session{
-		User:             usecase.ProfileOf(u),
+	return &service.Session{
+		User:             service.ProfileOf(u),
 		AccessToken:      access,
 		AccessExpiresAt:  time.Now().Add(15 * time.Minute),
 		TokenVersion:     u.TokenVersion,
@@ -116,15 +115,15 @@ func (f *fakeAccountService) newSession(u *store.User, inheritToken string) (*us
 	}, nil
 }
 
-func (f *fakeAccountService) Register(ctx context.Context, username, displayName, password, ip, ua string) (*usecase.Session, error) {
+func (f *fakeAccountService) Register(ctx context.Context, username, displayName, password, ip, ua string) (*service.Session, error) {
 	if err := auth.ValidatePasswordPolicy(password); err != nil {
 		return nil, err
 	}
-	name, err := usecase.CanonicalUsername(username)
+	name, err := service.CanonicalUsername(username)
 	if err != nil {
 		return nil, err
 	}
-	display, err := usecase.SanitizeDisplayName(displayName, name)
+	display, err := service.SanitizeDisplayName(displayName, name)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +131,7 @@ func (f *fakeAccountService) Register(ctx context.Context, username, displayName
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.byName[name]; ok {
-		return nil, usecase.ErrUsernameTaken
+		return nil, service.ErrUsernameTaken
 	}
 	f.nextID++
 	u := &store.User{
@@ -147,40 +146,40 @@ func (f *fakeAccountService) Register(ctx context.Context, username, displayName
 	return f.newSession(u, "")
 }
 
-func (f *fakeAccountService) Login(ctx context.Context, username, password, ip, ua string) (*usecase.Session, error) {
+func (f *fakeAccountService) Login(ctx context.Context, username, password, ip, ua string) (*service.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id, ok := f.byName[strings.ToLower(strings.TrimSpace(username))]
 	if !ok {
-		return nil, usecase.ErrInvalidCredentials
+		return nil, service.ErrInvalidCredentials
 	}
 	u := f.users[id]
 	if u.PasswordHash != password {
-		return nil, usecase.ErrInvalidCredentials
+		return nil, service.ErrInvalidCredentials
 	}
 	if u.Status != store.StatusActive {
-		return nil, usecase.ErrUserBanned
+		return nil, service.ErrUserBanned
 	}
 	return f.newSession(u, "")
 }
 
-func (f *fakeAccountService) Refresh(ctx context.Context, refreshToken, ip, ua string) (*usecase.Session, error) {
+func (f *fakeAccountService) Refresh(ctx context.Context, refreshToken, ip, ua string) (*service.Session, error) {
 	if f.refreshEr != nil {
 		return nil, f.refreshEr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	sess, ok := f.sessions[usecase.HashRefreshToken(refreshToken)]
+	sess, ok := f.sessions[service.HashRefreshToken(refreshToken)]
 	if !ok || sess.RevokedAt != nil {
-		// 已撤销 → 重放（与 usecase 的语义一致）。
+		// 已撤销 → 重放（与 service 的语义一致）。
 		if ok && sess.RevokedAt != nil {
-			return nil, usecase.ErrRefreshReplay
+			return nil, service.ErrRefreshReplay
 		}
-		return nil, usecase.ErrSessionInvalid
+		return nil, service.ErrSessionInvalid
 	}
 	u, ok := f.users[sess.UserID]
 	if !ok {
-		return nil, usecase.ErrSessionInvalid
+		return nil, service.ErrSessionInvalid
 	}
 
 	// 轮换：旧行置撤销 + 新行（新 token）继承同一个用户。
@@ -191,10 +190,10 @@ func (f *fakeAccountService) Refresh(ctx context.Context, refreshToken, ip, ua s
 		return nil, err
 	}
 	newToken := base64.RawURLEncoding.EncodeToString(raw)
-	f.sessions[usecase.HashRefreshToken(newToken)] = &store.Session{
+	f.sessions[service.HashRefreshToken(newToken)] = &store.Session{
 		ID:        int64(len(f.sessions) + 1),
 		UserID:    u.ID,
-		TokenHash: usecase.HashRefreshToken(newToken),
+		TokenHash: service.HashRefreshToken(newToken),
 		IssuedAt:  now,
 		ExpiresAt: now.Add(time.Hour),
 	}
@@ -204,7 +203,7 @@ func (f *fakeAccountService) Refresh(ctx context.Context, refreshToken, ip, ua s
 func (f *fakeAccountService) Logout(ctx context.Context, refreshToken string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if sess, ok := f.sessions[usecase.HashRefreshToken(refreshToken)]; ok {
+	if sess, ok := f.sessions[service.HashRefreshToken(refreshToken)]; ok {
 		now := time.Now()
 		sess.RevokedAt = &now
 	}
@@ -220,14 +219,14 @@ func (f *fakeAccountService) LogoutAll(ctx context.Context, userID int64) error 
 	return nil
 }
 
-func (f *fakeAccountService) Me(ctx context.Context, userID int64) (usecase.Profile, error) {
+func (f *fakeAccountService) Me(ctx context.Context, userID int64) (service.Profile, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u, ok := f.users[userID]
 	if !ok {
-		return usecase.Profile{}, store.ErrNotFound
+		return service.Profile{}, store.ErrNotFound
 	}
-	return usecase.ProfileOf(u), nil
+	return service.ProfileOf(u), nil
 }
 
 func (f *fakeAccountService) IssueWSTicket(ctx context.Context, userID int64) (string, error) {
@@ -248,13 +247,13 @@ func (f *fakeAccountService) VerifyAccessToken(ctx context.Context, token string
 	defer f.mu.Unlock()
 	u, ok := f.users[claims.UserID]
 	if !ok {
-		return nil, usecase.ErrSessionInvalid
+		return nil, service.ErrSessionInvalid
 	}
 	if claims.TokenVersion != u.TokenVersion {
-		return nil, usecase.ErrSessionInvalid
+		return nil, service.ErrSessionInvalid
 	}
 	if u.Status != store.StatusActive {
-		return nil, usecase.ErrUserBanned
+		return nil, service.ErrUserBanned
 	}
 	cp := *u
 	return &cp, nil
@@ -335,7 +334,7 @@ func (f *fakeAccountService) seeded(username, passwordHash, role, status string)
 // ban 把账号改成 banned（管理端封禁路径的桩：只改状态，version 自增与本文件无关）。
 //
 // 它被 T8 的"已封禁账号的票据"用例使用：那条用例要的是"取票之后账号被封禁"
-// 这个顺序，而不是封禁本身的实现（封禁实现由 usecase 的用例覆盖）。
+// 这个顺序，而不是封禁本身的实现（封禁实现由 service 的用例覆盖）。
 func (f *fakeAccountService) ban(id int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -741,7 +740,7 @@ func TestAuthRoutesNotRegisteredWithoutDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败：%v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	t.Cleanup(func() {
 		rooms.Stop()
 		cleanup()
@@ -869,5 +868,5 @@ func assertRefreshCookieAttrs(t *testing.T, c *http.Cookie) {
 	}
 }
 
-// 断言 limiters 包的 keyed 语义在本包被正确使用（编译期保证，避免 import 漂移）。
-var _ = limiters.NewKeyed
+// 断言 limiter 包的 keyed 语义在本包被正确使用（编译期保证，避免 import 漂移）。
+var _ = limiter.NewKeyed

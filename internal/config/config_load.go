@@ -134,7 +134,7 @@ const (
 	// 单次使用 + 30 秒过期，即便它出现在反代 access log 里也无法复用。
 	DefaultWSTicketTTL = 30 * time.Second
 	// DefaultHashingConcurrency = 4 是并发 bcrypt 的闸门容量（见 AuthConfig 的说明）。
-	// 与 usecase.DefaultHashingConcurrency 同值：两处都要改的耦合由测试钉住。
+	// 与 service.DefaultHashingConcurrency 同值：两处都要改的耦合由测试钉住。
 	DefaultHashingConcurrency = 4
 	MinHashingConcurrency     = 1
 	MaxHashingConcurrency     = 64
@@ -230,7 +230,7 @@ const (
 	DefaultJoinFailPerMinute = 30
 	DefaultJoinFailBurst     = 30
 
-	// DefaultMetricsMinInterval = 1500ms，与 usecase.reassignMinInterval（拓扑重算节流）
+	// DefaultMetricsMinInterval = 1500ms，与 service.reassignMinInterval（拓扑重算节流）
 	// 取同一个量级：客户端本来 5s 上报一次，这个闸门只针对"连发"；
 	// 而"秒级连续两次显著变化"里被丢掉的中间态本身没有观测价值
 	//（下一次显著变化会立刻把容量与拓扑修正到最终值）。

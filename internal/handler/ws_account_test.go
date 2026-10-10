@@ -15,12 +15,11 @@ import (
 
 	"github.com/coder/websocket"
 
-	"ProjectionRoom/internal/auth"
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/auth"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // 本文件是 T8 的验收面：**建房绑定房主 + WS 一次性票据 + 封禁拦截**。
@@ -64,7 +63,7 @@ func (s *recordingRoomMetaSink) recorded() []store.RoomMeta {
 type wsAccountEnv struct {
 	srv     *httptest.Server
 	hub     *service.Hub
-	rooms   *usecase.Manager
+	rooms   *service.Manager
 	svc     *fakeAccountService
 	tickets *auth.TicketStore
 	meta    *recordingRoomMetaSink
@@ -86,7 +85,7 @@ func newWSAccountEnv(t *testing.T, mutate func(*config.Config)) *wsAccountEnv {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	tickets := auth.NewTicketStore(cfg.Auth.WSTicketTTL)
 	svc := newFakeAccountService(t)
 	meta := &recordingRoomMetaSink{}
@@ -265,7 +264,7 @@ func TestCreateRoomWithoutMetaSinkStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	svc := newFakeAccountService(t)
 	owner := svc.seeded("room-owner", "stored-passw0rd", store.RoleUser, store.StatusActive)
 	access, _, err := svc.issueAccess(owner)
@@ -457,7 +456,7 @@ func TestWSTicketRequiresAccountCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	// 空的 AuthDeps：Tickets/Service 都是 nil。
 	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{}))
 	t.Cleanup(func() { srv.Close(); rooms.Stop(); cleanup() })
@@ -521,7 +520,7 @@ func TestWSGuestWorksWhenAccountsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{}))
 	t.Cleanup(func() { srv.Close(); rooms.Stop(); cleanup() })
 

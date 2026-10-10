@@ -9,7 +9,6 @@ import (
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/service"
-	"ProjectionRoom/internal/usecase"
 )
 
 // TestClientIPIgnoresForgedXFFFromUntrustedSource 锁定 S-3/S-11 限速的信任边界。
@@ -137,7 +136,7 @@ func newRouterForTest(t *testing.T, cfg *config.Config) *gin.Engine {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	engine := NewRouter(cfg, hub, rooms, nil, roomTestAccountDeps(t, cfg), AdminDeps{})
 	t.Cleanup(func() {
 		rooms.Stop()

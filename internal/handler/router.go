@@ -12,13 +12,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/limiters"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/service/ice"
+	"ProjectionRoom/internal/service/limiter"
 	"ProjectionRoom/internal/service/segment"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // newICERegistry 是 ICE 探测器在**生产路径**上的构造方式：真实 UDP 探测 + 立即异步启动。
@@ -44,7 +43,7 @@ const createRoomCodeHint = "房间码必须是 4-12 位大写字母或数字（A
 //
 // 为什么要一个接口而不是直接用 *store.Writer：
 //   - 写作业的签名是 func(ctx, *gorm.DB) error —— 本层不 import gorm（同 errors.go
-//     里 storeNotFound 别名的那条理由：让"handler 依赖了什么"一眼可读）；
+//     里 StoreNotFound 别名的那条理由：让"handler 依赖了什么"一眼可读）；
 //   - 建房路径的"元数据投递"因此可以在单测里断言（假 sink 记一次投递），
 //     真库验证留给 store 自己的用例。
 type RoomMetaSink interface {
@@ -72,14 +71,14 @@ func NewRoomMetaSink(st *store.Store, w *store.Writer) RoomMetaSink {
 
 // SubmitRoomMeta 把一次 upsert 投进事件写队列。
 //
-// 借用 usecase.SubmitAccountJob 做签名翻译（它把 func(ctx) error 翻成写入器要的
+// 借用 service.SubmitAccountJob 做签名翻译（它把 func(ctx) error 翻成写入器要的
 // func(ctx, *gorm.DB) error）：房间元数据与账号事件同属 §9 的"事件类"，
 // 投递语义完全一致（不阻塞调用方、队列满即丢弃、失败重试）。
 func (s *roomMetaSink) SubmitRoomMeta(meta *store.RoomMeta) bool {
 	if s == nil || meta == nil {
 		return false
 	}
-	return usecase.SubmitAccountJob(s.writer, func(ctx context.Context) error {
+	return service.SubmitAccountJob(s.writer, func(ctx context.Context) error {
 		return s.store.UpsertRoomMeta(ctx, meta)
 	})
 }
@@ -131,7 +130,7 @@ func submitRoomMeta(sink RoomMetaSink, roomID string, ownerUserID int64, hasPass
 func NewRouter(
 	cfg *config.Config,
 	hub *service.Hub,
-	rooms *usecase.Manager,
+	rooms *service.Manager,
 	seg *segment.Queue,
 	accountDeps AuthDeps,
 	adminDeps AdminDeps,
@@ -194,9 +193,9 @@ func NewRouter(
 	iceReg := newICERegistry(cfg)
 
 	// S-3：建房限速的每 IP 令牌桶（工厂只建一次，所有请求共享同一份状态）。
-	createLimiter := limiters.NewKeyed(cfg.IPC.CreatePerMinute, cfg.IPC.CreateBurst)
+	createLimiter := limiter.NewKeyed(cfg.IPC.CreatePerMinute, cfg.IPC.CreateBurst)
 	// S-11：join 失败的每 IP+房间码令牌桶。
-	joinLimiter := limiters.NewKeyed(cfg.IPC.JoinFailPerMinute, cfg.IPC.JoinFailBurst)
+	joinLimiter := limiter.NewKeyed(cfg.IPC.JoinFailPerMinute, cfg.IPC.JoinFailBurst)
 
 	api := r.Group("/api")
 	// T8 / ACCOUNTS §6：建房必须登录（房主要写进内存房间与 rooms_meta）。
@@ -232,7 +231,7 @@ func NewRouter(
 	// 二期（T2/T3）：公开房列表（免登录）与房主改房间元数据（RequireAuth）。
 	//
 	// 依赖来自两条既有链路，**不新增 NewRouter 的参数位**（硬约束）：
-	//   - rooms（usecase.Manager）提供内存实况（ListRooms / Get / SetRoomMeta / CloseRoomByAdmin）；
+	//   - rooms（service.Manager）提供内存实况（ListRooms / Get / SetRoomMeta / CloseRoomByAdmin）；
 	//   - accountDeps.Store 提供 rooms_meta 的读写与房主昵称查询；
 	//   - accountDeps.RoomMeta 是一期的异步落库出口（§9 的事件类）。
 	//
@@ -277,7 +276,7 @@ func NewRouter(
 // 缺装配时的行为写在这里，而不是留给读者猜：Rooms 为 nil → 端点返回空列表；
 // Meta 为 nil → 全部按"缺元数据行"降级（标题空）；Names 为 nil → ownerName 为空串。
 // 三种情况都不是错误：公开列表是只读派生视图，它只有"现在没有内容"这一种降级形态。
-func publicRoomDeps(rooms *usecase.Manager, accountDeps AuthDeps, adminDeps AdminDeps) PublicRoomDeps {
+func publicRoomDeps(rooms *service.Manager, accountDeps AuthDeps, adminDeps AdminDeps) PublicRoomDeps {
 	deps := PublicRoomDeps{}
 	if rooms != nil {
 		deps.Rooms = rooms
@@ -359,9 +358,9 @@ func isLoopbackAddr(addr string) bool {
 // 全局限速会让一个人被另一个人影响；按 IP 才能精确地把滥用者关掉。
 // 真实 IP 的可信度由 NewRouter 里的 SetTrustedProxies 保证
 // （只信任本机代理的 XFF，否则用 TCP 对端）。
-func roomCreateLimiter(limiter *limiters.Keyed) gin.HandlerFunc {
+func roomCreateLimiter(lim *limiter.Keyed) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if limiter != nil && !limiter.Allow(c.ClientIP()) {
+		if lim != nil && !lim.Allow(c.ClientIP()) {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": "建房请求过于频繁，请稍后再试",
 				"code":  model.CodeRateLimited,
@@ -419,7 +418,7 @@ type createRoomRequest struct {
 	StreamBps int64  `json:"streamBps"`
 }
 
-func createRoomHandler(cfg *config.Config, rooms *usecase.Manager, iceReg *ice.Registry, deps AuthDeps) gin.HandlerFunc {
+func createRoomHandler(cfg *config.Config, rooms *service.Manager, iceReg *ice.Registry, deps AuthDeps) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 房主身份只来自**校验过的 access token**（RequireAuth 已挡掉匿名请求）。
 		// 绝不从请求体/查询串取 ownerUserId：那等于让任何人把房间挂到别人名下。
@@ -442,7 +441,7 @@ func createRoomHandler(cfg *config.Config, rooms *usecase.Manager, iceReg *ice.R
 		// S-3：规范化之后立刻按白名单校验。原先这里只做 ToUpper/Trim，
 		// 实测 60 KB 的 roomId 也能建房成功（而每个这样的房间都会常驻内存）。
 		roomID := strings.ToUpper(strings.TrimSpace(req.RoomID))
-		if roomID != "" && !usecase.ValidRoomCode(roomID) {
+		if roomID != "" && !service.ValidRoomCode(roomID) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": createRoomCodeHint, "code": model.CodeBadRequest})
 			return
 		}
@@ -471,7 +470,7 @@ func createRoomHandler(cfg *config.Config, rooms *usecase.Manager, iceReg *ice.R
 	}
 }
 
-func roomInfoHandler(cfg *config.Config, rooms *usecase.Manager) gin.HandlerFunc {
+func roomInfoHandler(cfg *config.Config, rooms *service.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		r, ok := rooms.Get(strings.ToUpper(strings.TrimSpace(c.Param("roomId"))))
 		if !ok {

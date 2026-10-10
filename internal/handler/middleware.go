@@ -7,7 +7,7 @@
 //
 // 三条刻意的取舍（都在下面的实现里说明）：只从 Authorization 头取 token
 // （URL/查询串一律不认）、userID 只能来自校验通过的 token、
-// 授权判据只来自 usecase 查库的结果（不读 token 里的 role 快照）。
+// 授权判据只来自 service 查库的结果（不读 token 里的 role 快照）。
 package handler
 
 import (
@@ -17,8 +17,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"ProjectionRoom/internal/limiters"
 	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/service/limiter"
 	"ProjectionRoom/internal/store"
 )
 
@@ -152,10 +152,10 @@ func abortUnauthorized(c *gin.Context, code, message string) {
 //     （只信任本机代理的 XFF，否则用 TCP 对端）—— 换 key 口径会让伪造 XFF 生效；
 //   - 超限返回 429 + RATE_LIMITED（与建房共用错误码：客户端对这两者的正确反应
 //     一样，都是退避重试而不是改参数）；
-//   - limiters.NewKeyed 在参数非法时返回 nil（表示该闸门关闭），此时放行 ——
+//   - limiter.NewKeyed 在参数非法时返回 nil（表示该闸门关闭），此时放行 ——
 //     这是仓库既有的约定，配置层已经拦住了非法值。
 func newKeyedLimiter(perMinute float64, burst int, what string) gin.HandlerFunc {
-	l := limiters.NewKeyed(perMinute, burst)
+	l := limiter.NewKeyed(perMinute, burst)
 	if l == nil {
 		// 只在装配期提示一次：这类配置错误的症状是"被撞库但没有任何限速"，
 		// 属于需要人立刻知道的事，而不是每请求都刷一条日志。

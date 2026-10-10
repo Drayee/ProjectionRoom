@@ -15,11 +15,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/limiters"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/limiter"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // joinedOriginTodo 记录一条**部署决策与残余风险**（S-5 的收尾项，与 docs/SPEC.md 的 S1 条目同源）。
@@ -118,7 +117,7 @@ func resolveWSTicket(c *gin.Context, deps AuthDeps) (*wsTicketIdentity, bool) {
 	// 封禁发生在取票之后是常态（管理端刚封禁，而客户端正好在重连）。
 	p, err := deps.Service.Me(c.Request.Context(), userID)
 	if err != nil {
-		if errors.Is(err, usecase.StoreNotFound) || errors.Is(err, usecase.ErrSessionInvalid) {
+		if errors.Is(err, service.StoreNotFound) || errors.Is(err, service.ErrSessionInvalid) {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error": "票据对应的账号已不存在，请重新登录",
 				"code":  CodeWSTicketInvalid,
@@ -147,13 +146,13 @@ func resolveWSTicket(c *gin.Context, deps AuthDeps) (*wsTicketIdentity, bool) {
 // 因此"观众免登录进房"的行为与账号层上线前逐字相同。
 //
 // joinLimiter 是 S-11 的第二半：join **失败**按 IP+房间码限速（成功不消耗令牌）。
-// 它放在 handler 层而不是 usecase：usecase 不认识 HTTP 语义（IP、状态码），
+// 它放在 handler 层而不是 service：service 不认识 HTTP 语义（IP、状态码），
 // 而这条限速是"防在线猜房间密码"的外围闸门。
 func wsHandler(
 	cfg *config.Config,
 	hub *service.Hub,
-	rooms *usecase.Manager,
-	joinLimiter *limiters.Keyed,
+	rooms *service.Manager,
+	joinLimiter *limiter.Keyed,
 	accountDeps AuthDeps,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -167,7 +166,7 @@ func wsHandler(
 		}
 		// 房间码白名单（S-3）：/ws 是另一条进入房间的入口，必须与 REST 用同一把尺子，
 		// 否则"REST 校验、WS 不校验"就等于校验白做了。
-		if !usecase.ValidRoomCode(roomID) {
+		if !service.ValidRoomCode(roomID) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": createRoomCodeHint})
 			return
 		}
@@ -249,7 +248,7 @@ func wsHandler(
 		// 它与后面的"帧预算"分工不同：帧预算卡"一帧会展开成什么"，
 		// 速率配额卡"总体上你发得太多了"。两者都不能少 ——
 		// 一个每秒发 1000 条合规小帧的连接，任何单帧检查都拦不住。
-		quota := limiters.NewBucket(cfg.Signal.MaxRateBytesPerSec, cfg.Signal.RateBucketBytes)
+		quota := limiter.NewBucket(cfg.Signal.MaxRateBytesPerSec, cfg.Signal.RateBucketBytes)
 
 		// 帧预算（配置 → 扫描器）：单帧内 repeated 元素与单字段字节的硬上限。
 		budget := model.WireBudget{
@@ -387,7 +386,7 @@ func writePreAuthError(cfg *config.Config, conn *websocket.Conn, msg []byte) {
 	_ = conn.Write(ctx, websocket.MessageBinary, msg)
 }
 
-func handleMessage(hub *service.Hub, rooms *usecase.Manager, client *service.Client, roomID, clientID, clientIP string, env model.Envelope, joinLimiter *limiters.Keyed) {
+func handleMessage(hub *service.Hub, rooms *service.Manager, client *service.Client, roomID, clientID, clientIP string, env model.Envelope, joinLimiter *limiter.Keyed) {
 	switch env.Type {
 	case model.TypeJoin:
 		// S-11：join 失败按 IP+房间码限速。
@@ -399,7 +398,7 @@ func handleMessage(hub *service.Hub, rooms *usecase.Manager, client *service.Cli
 		// 键用 ClientIP 而不是 c.Request.RemoteAddr：后者带上随机端口，
 		// 会让每次重连都变成"新键"，限速形同虚设。
 		joinKey := clientIP + "|" + roomID
-		err := rooms.Join(usecase.JoinRequest{
+		err := rooms.Join(service.JoinRequest{
 			RoomID:      roomID,
 			ClientID:    clientID,
 			DisplayName: env.DisplayName,
@@ -411,7 +410,7 @@ func handleMessage(hub *service.Hub, rooms *usecase.Manager, client *service.Cli
 			return
 		}
 		if !joinLimiter.Allow(joinKey) {
-			_ = client.Send(model.ErrorEnvelope(model.CodeRateLimited, usecase.ErrJoinRateLimited.Error()))
+			_ = client.Send(model.ErrorEnvelope(model.CodeRateLimited, service.ErrJoinRateLimited.Error()))
 			log.Printf("ws: %s 的 join 失败次数超限（room=%s），已限速", clientID, roomID)
 			return
 		}
@@ -472,7 +471,7 @@ func handleMessage(hub *service.Hub, rooms *usecase.Manager, client *service.Cli
 
 // forwardSignal 把 SDP/ICE 原样转发给同房间的目标连接。
 // 两道校验：发送者必须是房间成员，目标也必须是同一房间成员 —— 防止跨房注入（SPEC §5.1）。
-func forwardSignal(hub *service.Hub, rooms *usecase.Manager, client *service.Client, roomID, clientID string, env model.Envelope) {
+func forwardSignal(hub *service.Hub, rooms *service.Manager, client *service.Client, roomID, clientID string, env model.Envelope) {
 	if env.To == "" || env.To == clientID {
 		_ = client.Send(model.ErrorEnvelope(model.CodeBadRequest, "signal 需要合法的 to"))
 		return

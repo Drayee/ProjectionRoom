@@ -13,12 +13,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"ProjectionRoom/internal/auth"
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/auth"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // 本文件是二期 T2（公开房列表）与 T3（房主的标题/公开性）的验收面。
@@ -29,7 +28,7 @@ import (
 //     （哪些房间出现、响应里有哪些字段、投递了几次 upsert），它们与 SQL 无关；
 //   - 昵称出口用一张内存昵称表（fakeNameStore）。
 //
-// 房间本身用**真实**的 usecase.Manager：它承载 T2 最核心的那条判据
+// 房间本身用**真实**的 service.Manager：它承载 T2 最核心的那条判据
 // （"内存实况 ∩ 元数据公开性"），用假房间表会把这条判据验掉。
 
 // fakeRoomMetaStore 是内存版的 rooms_meta。
@@ -234,7 +233,7 @@ func (s *fakeNameStore) ProfileNameByID(ctx context.Context, id int64) (string, 
 // roomMetaEnv 是一台"二期端点可用"的测试服务。
 type roomMetaEnv struct {
 	engine *gin.Engine
-	rooms  *usecase.Manager
+	rooms  *service.Manager
 	hub    *service.Hub
 	meta   *fakeRoomMetaStore
 	// sink 与 meta 是同一个对象（它同时是读表与异步投递出口）；
@@ -264,7 +263,7 @@ func newRoomMetaEnv(t *testing.T, mutate func(*config.Config)) *roomMetaEnv {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 
 	svc := newFakeAccountService(t)
 	owner := svc.seeded("owner", "stored-owner-pass", store.RoleUser, store.StatusActive)
@@ -423,7 +422,7 @@ func TestPublicRoomsMarksHostOfflineInGrace(t *testing.T) {
 	env.meta.seed(store.RoomMeta{RoomID: r.ID, OwnerUserID: env.owner.ID, IsPublic: true, Title: "宽限期房间"})
 
 	// 主播进房再离开 → 房间进入宽限期（Room 仍在，hostOffline 置位）。
-	if err := env.rooms.Join(usecase.JoinRequest{
+	if err := env.rooms.Join(service.JoinRequest{
 		RoomID: r.ID, ClientID: "host-conn", DisplayName: "主播", Role: model.RoleHost,
 	}); err != nil {
 		t.Fatalf("主播进房失败: %v", err)
@@ -988,7 +987,7 @@ func TestRoomMetaGetRouteNotRegisteredWithoutDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	t.Cleanup(func() { rooms.Stop(); cleanup() })
 
 	engine := NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{})
@@ -1028,7 +1027,7 @@ func TestRoomMetaRouteNotRegisteredWithoutDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 	t.Cleanup(func() { rooms.Stop(); cleanup() })
 
 	engine := NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{})

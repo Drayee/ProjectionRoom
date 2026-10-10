@@ -82,7 +82,7 @@ func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
 //   - 目标不存在 → ErrNotFound。
 //
 // ⚠ 封禁的"立即失效"还需要 +1 token_version 并断开该用户的 WS（§5），
-// 那是 usecase 的组合动作（SetUserStatus + BumpTokenVersion + hub 断连）。
+// 那是服务层（internal/service）的组合动作（SetUserStatus + BumpTokenVersion + hub 断连）。
 // 本方法刻意只改状态列：把"版本号变更"藏在改状态里，会让审计看不清到底动了什么。
 func (s *Store) SetUserStatus(ctx context.Context, id int64, status, reason string) error {
 	if !isValidStatus(status) {

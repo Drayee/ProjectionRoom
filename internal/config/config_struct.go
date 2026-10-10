@@ -55,7 +55,7 @@ type DownloadsConfig struct {
 // RoomConfig 控制房间规模与生命周期。
 type RoomConfig struct {
 	// MaxMembers 是房间成员上限的硬约束（含主播）。
-	// P2P 分发的真实容量上限由 internal/usecase 依据实测上行计算（SPEC §6.2），
+	// P2P 分发的真实容量上限由 internal/service 依据实测上行计算（SPEC §6.2），
 	// 这里是最后一道防线，避免房间被挂爆。
 	MaxMembers int
 	// DefaultStreamBps 是尚未拿到 mediaIndex 时的码率估计（bit/s），
@@ -76,7 +76,7 @@ type RoomConfig struct {
 	// 每跳中继实测给端到端多加 58–78ms（docs/ALGORITHM.md §2.1），4 跳最坏再叠 ~300ms，
 	// 而多出来的那一层在十几人的房间里很少真的换来容量。深度与容量是对价关系，
 	// 所以留成配置项：需要更大的房间时显式抬高，而不是默认让所有人替少数场景买单。
-	// 分配侧的兜底常量是 usecase.DefaultMaxDepth，两者必须一致。
+	// 分配侧的兜底常量是 service.DefaultMaxDepth，两者必须一致。
 	MaxDepth int
 
 	// —— 以下都是 S-3（建房无限速、房间永不回收）的闸门与回收参数。
@@ -101,7 +101,7 @@ type RoomConfig struct {
 	// HostGraceZeroTTL 是"主播断线宽限期内且房间已经没人"时的回收阈值
 	//（PR_ROOM_EMPTY_TTL，默认 30m）。
 	//
-	// 关键约束：**hostOffline 期间一律不回收**（见 usecase.reclaimOnce）——
+	// 关键约束：**hostOffline 期间一律不回收**（见 service.reclaimOnce）——
 	// 宽限期内那几 KB 元数据正是"主播重连时房间码还能用"的全部依据，
 	// 扫掉它等于把 60s 宽限期作废。这一项只覆盖一种极少见的状态：
 	// 房间既没有成员、又**不在**宽限期里（正常路径下 Leave 已经销毁了它），

@@ -5,8 +5,8 @@
 package main
 
 import (
+	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/service/segment"
-	"ProjectionRoom/internal/usecase"
 )
 
 // printProbe 打印探测结果（一键脚本里"源: Xs (Y 分钟) 视频=… 音频=…"那一段）。
@@ -67,14 +67,14 @@ func (a *app) printSummary(out string, artifacts *segment.Artifacts) {
 
 // printCapacityHint 把"这个码率下主播能带几个直连子节点"直接告诉主播（SPEC §6.1、§6.2）。
 //
-// K0 = floor(上行 × 0.8 ÷ 码率)，上限 8（usecase.MaxChildren）。
+// K0 = floor(上行 × 0.8 ÷ 码率)，上限 8（service.MaxChildren）。
 func (a *app) printCapacityHint(streamBps int64) {
 	uplinkMbps := a.opts.uplinkMbps
-	slots := usecase.HostChildSlots(int64(uplinkMbps*1_000_000), streamBps)
+	slots := service.HostChildSlots(int64(uplinkMbps*1_000_000), streamBps)
 
 	a.sayf("")
 	a.sayf("容量提示（按主播上行 %.1f Mbps 估算，K0 = floor(上行 × %.1f ÷ 码率)，上限 %d）:",
-		uplinkMbps, usecase.SafetyFactor, usecase.MaxChildren)
+		uplinkMbps, service.SafetyFactor, service.MaxChildren)
 	a.sayf("  K0 = %d", slots)
 	a.sayf("  注意：K0 是主播能直接带几个子节点，不是能带几个人；其余成员挂在这些直连节点下面。")
 

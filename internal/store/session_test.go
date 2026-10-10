@@ -114,7 +114,7 @@ func TestCreateSessionRejectsDuplicateTokenHash(t *testing.T) {
 		t.Fatalf("第一次创建失败：%v", err)
 	}
 	// 同一个 token 落两次 = 调用方复用了刷新凭证（或哈希算错），必须吵。
-	// 返回值必须是哨兵错误：上层（usecase 的并发双花判定）靠 errors.Is 认它，
+	// 返回值必须是哨兵错误：上层（service 的并发双花判定）靠 errors.Is 认它，
 	// 而不是匹配错误文案。
 	err := s.CreateSession(ctx, &Session{UserID: u.ID, TokenHash: hash, ExpiresAt: future})
 	if err == nil {

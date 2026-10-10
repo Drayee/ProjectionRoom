@@ -173,7 +173,7 @@ func TestSetUserStatus(t *testing.T) {
 	if !banned.CreatedAt.Equal(before.CreatedAt) {
 		t.Fatalf("created_at 不该被动")
 	}
-	// 状态变更不该顺手改 token_version（§5 的组合动作由 usecase 负责，见方法注释）。
+	// 状态变更不该顺手改 token_version（§5 的组合动作由 service 负责，见方法注释）。
 	if banned.TokenVersion != 1 {
 		t.Fatalf("SetUserStatus 不该改 token_version，实际 %d", banned.TokenVersion)
 	}

@@ -15,12 +15,11 @@ import (
 
 	"github.com/coder/websocket"
 
-	"ProjectionRoom/internal/auth"
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
+	"ProjectionRoom/internal/service/auth"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // sampleIndex 是 M2 用的自洽索引，覆盖索引发布与容量计算两条链路。
@@ -52,14 +51,14 @@ func startTestServer(t *testing.T, cfg *config.Config) *httptest.Server {
 
 // startTestServerWithManager 额外把 Manager 暴露给用例：
 // S-3 的房间回收（清扫协程）、房间数上限、单帧预算等都需要直接观察 Manager。
-func startTestServerWithManager(t *testing.T, cfg *config.Config) (*httptest.Server, *usecase.Manager, *config.Config) {
+func startTestServerWithManager(t *testing.T, cfg *config.Config) (*httptest.Server, *service.Manager, *config.Config) {
 	t.Helper()
 
 	hub, cleanup, err := service.NewHub(cfg)
 	if err != nil {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
-	rooms := usecase.NewManager(cfg, hub)
+	rooms := service.NewManager(cfg, hub)
 
 	// 信令用例不涉及切片端点，这里传 nil 跳过 /api/v1/segment/* 的注册。
 	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, roomTestAccountDeps(t, cfg), AdminDeps{}))
@@ -128,7 +127,7 @@ func roomFixtureToken(t *testing.T) string {
 	return tok
 }
 
-// newTestServer 起一个真实的 gin + WebSocket 服务，走完整链路（REST → Hub → usecase.Manager）。
+// newTestServer 起一个真实的 gin + WebSocket 服务，走完整链路（REST → Hub → service.Manager）。
 func newTestServer(t *testing.T) (*httptest.Server, *config.Config) {
 	t.Helper()
 
@@ -864,9 +863,9 @@ func TestMediaIndexAndCapacityFlow(t *testing.T) {
 }
 
 // TestMaxDepthFromEnvDrivesAssignment 是 PR_MAX_DEPTH 的端到端检查（与 TestHostGraceFromEnvDrivesLifecycle 同型）：
-// 环境变量 → config.Load → usecase.NewManager → Room.Create → ReassignTopology → Assign → 下发载荷。
+// 环境变量 → config.Load → service.NewManager → Room.Create → ReassignTopology → Assign → 下发载荷。
 //
-// 为什么必须到这一层：usecase 的单测只能证明"值进了 Options 之后"的行为，
+// 为什么必须到这一层：service 的单测只能证明"值进了 Options 之后"的行为，
 // 而"配置真的从环境变量走到了分配器与下发报文里"只有走一次真实 gin + WebSocket + protobuf 才能证明。
 //
 // 拓扑：主播 4 Mbps（K0=1 → 单链）、relay 5 Mbps（2 个子节点位）、三个无上行叶子。

@@ -7,9 +7,9 @@
 //
 //  1. **授权 100% 在服务端**：整组路由挂在 RequireAuth + RequireAdmin 之下，
 //     前端有没有把按钮画出来与本层无关（不变量 I3）。
-//  2. **响应体里永不出现 PasswordHash**：所有用户数据都经 usecase.ProfileOf 出口，
+//  2. **响应体里永不出现 PasswordHash**：所有用户数据都经 service.ProfileOf 出口，
 //     而 Profile 类型里根本没有那个字段（类型系统比"记得别写"可靠）。
-//  3. **写操作有审计**：封禁/解禁/改角色的审计由 usecase（T6）在同一个调用里投递
+//  3. **写操作有审计**：封禁/解禁/改角色的审计由 service（T6）在同一个调用里投递
 //     （actor/target/action/detail/ip 齐全）。本层**不再写第二份** ——
 //     同一动作两行审计不是"更安全"，而是让审计表里出现两条互相矛盾的事实。
 package handler
@@ -32,7 +32,6 @@ import (
 	"ProjectionRoom/internal/model"
 	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // 分页口径与 store.clampPage 一致（默认 50、上限 200）。
@@ -57,7 +56,7 @@ type AdminUserStore interface {
 	UserByID(ctx context.Context, id int64) (*store.User, error)
 }
 
-// AdminAccountWriter 是管理端的写操作（*usecase.AccountService 的方法集满足它）。
+// AdminAccountWriter 是管理端的写操作（*service.AccountService 的方法集满足它）。
 //
 // 三个方法都**自带审计投递**（T6）：本层调它们就等于"改状态 + 写审计"两件事都做了。
 type AdminAccountWriter interface {
@@ -71,7 +70,7 @@ type AdminAccountWriter interface {
 // CloseByUser 是封禁的第二件事（ACCOUNTS §5）：只改 status 的话，
 // 已经建立的长连接仍然是"已授权"的，它还能继续进房、发信令、留在房间里。
 //
-// CloseRoom 是**强制关闭房间**的第二件事（T4）：usecase 的关房路径已经通过
+// CloseRoom 是**强制关闭房间**的第二件事（T4）：service 的关房路径已经通过
 // Broadcaster 广播了 room-closed 并调用了 bus.CloseRoom（生产装配里 Broadcaster
 // 就是本 Hub），这里再显式调一次是**装配期的防御**：只要 deps.Hub 与 Manager 的
 // Broadcaster 指向同一个连接池（生产与测试都是），重复调用是幂等的空操作
@@ -83,7 +82,7 @@ type AdminHub interface {
 	CloseRoom(roomID string)
 }
 
-// AdminRoomStats 是房间实况的只读/受控写能力（*usecase.Manager 满足它）。
+// AdminRoomStats 是房间实况的只读/受控写能力（*service.Manager 满足它）。
 //
 // 为什么把 CloseRoomByAdmin / SetRoomMeta 也放在这里，而不是新开一个"管理员房间写"接口：
 // 它们与 RoomCount/ListRooms 的**owner 完全相同**（内存里的房间表），
@@ -91,8 +90,8 @@ type AdminHub interface {
 // （那正是"两个接口指向不同实例"这类装配错的温床）。
 type AdminRoomStats interface {
 	RoomCount() int
-	ListRooms() []usecase.RoomSnapshot
-	// CloseRoomByAdmin 是 closeRoom 的受控导出（见 usecase 的说明）：强制关闭房间。
+	ListRooms() []service.RoomSnapshot
+	// CloseRoomByAdmin 是 closeRoom 的受控导出（见 service 的说明）：强制关闭房间。
 	CloseRoomByAdmin(roomID, reason string) error
 	// SetRoomMeta 在内存侧复核"房间还在、调用者是房主"。管理端下架时会拿到
 	// ErrNotRoomOwner（管理员通常不是房主），调用方按"库侧那一份才是权威"处理。
@@ -121,12 +120,12 @@ type AdminAuditWriter interface {
 	InsertAudit(ctx context.Context, a *store.AdminAudit) error
 }
 
-// AdminAuditSink 是审计的**异步投递**出口（*usecase.WriterJobs 满足它）。
+// AdminAuditSink 是审计的**异步投递**出口（*service.WriterJobs 满足它）。
 //
 // 为什么签名里没有 gorm 类型：本层从一期起就不 import gorm（见 errors.go 里
-// storeNotFound 别名的说明），因此不能用 store.Writer.Submit 的原签名
+// service.StoreNotFound 别名的说明），因此不能用 store.Writer.Submit 的原签名
 // （它是 func(ctx, *gorm.DB) error）。这里收的是"只吃 context"的作业，
-// 由 usecase.SubmitWriterJob 在**已经 import gorm 的那一层**做翻译 ——
+// 由 service.SubmitAccountJob 在**已经 import gorm 的那一层**做翻译 ——
 // 与建房路径投递 rooms_meta 走的是同一条路（见 router.go 的 roomMetaSink）。
 type AdminAuditSink interface {
 	SubmitJob(fn func(ctx context.Context) error) bool
@@ -223,7 +222,7 @@ func registerAdminRoutes(api *gin.RouterGroup, deps AdminDeps, cfg *config.Confi
 	admin.GET("/metrics", h.metrics)
 	// 一期自报的缺口：日志端点是"把服务端日志整段交出去"的读取入口，
 	// 没有限速时一个管理员 token 就能把它变成日志导出器。
-	// 复用与登录/建房同一条令牌桶实现（internal/limiters），只是换了一组参数。
+	// 复用与登录/建房同一条令牌桶实现（internal/service/limiter），只是换了一组参数。
 	admin.GET("/logs", newKeyedLimiter(cfg.IPC.AdminLogsPerMinute, cfg.IPC.AdminLogsBurst, "管理端日志"), h.logs)
 
 	// T4：房间管理与审计。
@@ -274,12 +273,12 @@ type adminUserPatch struct {
 // 响应形状 {items, total} 与 §10 对齐；额外的 limit/offset 是**生效值**回显
 // （客户端不必再猜自己传的 1000 被夹到了多少）。
 func (h *adminHandler) listUsers(c *gin.Context) {
-	limit, err := adminPageLimit(c.Query("limit"))
+	limit, err := boundedLimit(c.Query("limit"), defaultAdminPageLimit, maxAdminPageLimit)
 	if err != nil {
 		adminBadRequest(c, err.Error())
 		return
 	}
-	offset, err := adminPageOffset(c.Query("offset"))
+	offset, err := boundedOffset(c.Query("offset"))
 	if err != nil {
 		adminBadRequest(c, err.Error())
 		return
@@ -295,11 +294,11 @@ func (h *adminHandler) listUsers(c *gin.Context) {
 		return
 	}
 
-	items := make([]usecase.Profile, 0, len(users))
+	items := make([]service.Profile, 0, len(users))
 	for i := range users {
 		// ProfileOf 是**唯一出口**：PasswordHash 不在 Profile 的字段里，
 		// 因此"忘了剔除"这件事在类型层面就不可能发生。
-		items = append(items, usecase.ProfileOf(&users[i]))
+		items = append(items, service.ProfileOf(&users[i]))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"items":  items,
@@ -318,7 +317,7 @@ func (h *adminHandler) listUsers(c *gin.Context) {
 // 每一步都是**独立的写操作**，各自写自己的审计行（user.role / user.ban / user.unban），
 // 因此一次性传 role+status 会得到两行审计 —— 那正是"改了两件事"的如实记录。
 //
-// 封禁的**两件事**都在这里发生：usecase.BanUser（status=banned + token_version+1，
+// 封禁的**两件事**都在这里发生：service.BanUser（status=banned + token_version+1，
 // 让已签发的 access token 立刻失效）**以及** hub.CloseByUser（断开在跑的长连接）。
 // 只做前者会留下"被封禁的连接继续发信令"的窗口。
 func (h *adminHandler) patchUser(c *gin.Context) {
@@ -389,14 +388,14 @@ func (h *adminHandler) patchUser(c *gin.Context) {
 	// 前者才是真的，而管理端面板显示的就是这个值）。
 	u, err := h.deps.Users.UserByID(ctx, targetID)
 	if err != nil {
-		if errors.Is(err, usecase.StoreNotFound) {
+		if errors.Is(err, service.StoreNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "账号不存在", "code": model.CodeBadRequest})
 			return
 		}
 		adminInternalError(c, "回读账号失败", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"user": usecase.ProfileOf(u)})
+	c.JSON(http.StatusOK, gin.H{"user": service.ProfileOf(u)})
 }
 
 // closeUserConnections 是封禁的第二件事（ACCOUNTS §5）：断开该账号的全部长连接。
@@ -472,12 +471,12 @@ func (h *adminHandler) logs(c *gin.Context) {
 		})
 		return
 	}
-	limit, err := adminPageLimit(c.Query("limit"))
+	limit, err := boundedLimit(c.Query("limit"), defaultAdminPageLimit, maxAdminPageLimit)
 	if err != nil {
 		adminBadRequest(c, err.Error())
 		return
 	}
-	offset, err := adminPageOffset(c.Query("offset"))
+	offset, err := boundedOffset(c.Query("offset"))
 	if err != nil {
 		adminBadRequest(c, err.Error())
 		return
@@ -543,12 +542,12 @@ type adminRoomItem struct {
 //   - 分页在**并集之后的内存里**做：两个来源的排序规则不同，先各自分页再合并
 //     会丢行/重复行（这正是"分页要在一处做"的经典理由）。
 func (h *adminHandler) listRooms(c *gin.Context) {
-	limit, err := adminPageLimit(c.Query("limit"))
+	limit, err := boundedLimit(c.Query("limit"), defaultAdminPageLimit, maxAdminPageLimit)
 	if err != nil {
 		adminBadRequest(c, err.Error())
 		return
 	}
-	offset, err := adminPageOffset(c.Query("offset"))
+	offset, err := boundedOffset(c.Query("offset"))
 	if err != nil {
 		adminBadRequest(c, err.Error())
 		return
@@ -566,7 +565,7 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 	}
 
 	// ① 内存快照（含未公开的房间）。缺装配时按空处理：列表的其余部分仍然有价值。
-	snapshots := []usecase.RoomSnapshot{}
+	snapshots := []service.RoomSnapshot{}
 	if h.deps.Rooms != nil {
 		snapshots = h.deps.Rooms.ListRooms()
 	}
@@ -761,7 +760,7 @@ func (h *adminHandler) closeRoom(c *gin.Context) {
 
 	const reason = "管理员强制关闭了该房间"
 	if err := h.deps.Rooms.CloseRoomByAdmin(roomID, reason); err != nil {
-		if errors.Is(err, usecase.ErrNotFound) {
+		if errors.Is(err, service.ErrNotFound) {
 			// 与上面同一条语义的竞态分支（两次查询之间房间被回收）。
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
 				"error": "房间不存在（可能已经被回收或已关闭）",
@@ -776,7 +775,7 @@ func (h *adminHandler) closeRoom(c *gin.Context) {
 		h.deps.Hub.CloseRoom(roomID)
 	}
 
-	// 审计：与封禁/改角色同一条异步路径（由本层投递一次，usecase 不再写第二份）。
+	// 审计：与封禁/改角色同一条异步路径（由本层投递一次，service 不再写第二份）。
 	// 明细里不带标题：标题要另查一次库，而"谁在何时强制关闭了哪个房间"这个事实
 	// 由 actor/action/target 三者已经完全确定（房间码是唯一键）。
 	h.writeRoomAudit(c, actor.ID, "room.force_close", roomID, map[string]any{
@@ -817,7 +816,7 @@ func (h *adminHandler) closeRoom(c *gin.Context) {
 //
 // 两处一起改（与 T3 同一条约定）：
 //
-//	内存侧 usecase.Manager.SetRoomMeta（授权判据）；
+//	内存侧 service.Manager.SetRoomMeta（授权判据）；
 //	库侧 UpsertRoomMeta（**整体覆盖**，所以先读当前行再覆盖 is_public）。
 func (h *adminHandler) unpublishRoom(c *gin.Context) {
 	actor, ok := CurrentUser(c)
@@ -854,7 +853,7 @@ func (h *adminHandler) unpublishRoom(c *gin.Context) {
 		case err == nil && row != nil:
 			current = row
 			wasPublic = row.IsPublic
-		case errors.Is(err, usecase.StoreNotFound):
+		case errors.Is(err, service.StoreNotFound):
 			// 缺行：不是错误，下面按"需要补一行未公开的元数据"处理。
 		default:
 			adminInternalError(c, "读房间元数据", err)
@@ -867,13 +866,13 @@ func (h *adminHandler) unpublishRoom(c *gin.Context) {
 	// 而这件事由库侧那一行表达；内存侧那一份只是同一次调用里的内存事实通知。
 	if err := h.deps.Rooms.SetRoomMeta(roomID, actor.ID, nil, new(false)); err != nil {
 		switch {
-		case errors.Is(err, usecase.ErrNotFound):
+		case errors.Is(err, service.ErrNotFound):
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
 				"error": "房间不存在（可能已经被回收或已关闭）",
 				"code":  model.CodeRoomNotFound,
 			})
 			return
-		case errors.Is(err, usecase.ErrNotRoomOwner):
+		case errors.Is(err, service.ErrNotRoomOwner):
 			log.Printf("管理端下架 room=%s：管理员 %d 不是房主，只降低库侧的公开性（内存侧无副本可改）",
 				roomID, actor.ID)
 		default:
@@ -924,16 +923,16 @@ func (h *adminHandler) unpublishRoom(c *gin.Context) {
 // 它刻意不复用 publicroom 的读法，而是走 Manager.ListRooms 之外的一条更窄的路径：
 // 管理端只需要**一个**房间，遍历全部房间既浪费也掩盖了"这个房间在不在"这个判断。
 // 房间已 closed 房间（刚被并发关闭）视为不存在。
-func (h *adminHandler) roomSnapshot(roomID string) (usecase.RoomSnapshot, bool) {
+func (h *adminHandler) roomSnapshot(roomID string) (service.RoomSnapshot, bool) {
 	if h.deps.Rooms == nil {
-		return usecase.RoomSnapshot{}, false
+		return service.RoomSnapshot{}, false
 	}
 	for _, s := range h.deps.Rooms.ListRooms() {
 		if s.ID == roomID {
 			return s, true
 		}
 	}
-	return usecase.RoomSnapshot{}, false
+	return service.RoomSnapshot{}, false
 }
 
 // roomSnapshot 的补充视图：管理端房间行里要显示的标题（库里才有）。
@@ -943,10 +942,10 @@ func (h *adminHandler) roomSnapshot(roomID string) (usecase.RoomSnapshot, bool) 
 // 注意：标题缺失时审计明细里是空串，这是可接受的（审计的价值在谁在何时对谁做了什么）。
 // writeRoomAudit 投递一条房间管理动作的审计。
 //
-// 与 usecase 的封禁/改角色审计**同一条异步路径**（store.Writer 的事件类），
-// 但方向相反：那两条由 usecase 在自己的调用里投递（"改状态 + 写审计"原子配对），
-// 而房间管理动作由本层投递 —— 因为"关房"跨了两个 owner（usecase 的内存关房、
-// service.Hub 的断连），把它们塞进 usecase 会让 usecase 去调用 Hub 的另一个方法。
+// 与 service 的封禁/改角色审计**同一条异步路径**（store.Writer 的事件类），
+// 但方向相反：那两条由 service 在自己的调用里投递（"改状态 + 写审计"原子配对），
+// 而房间管理动作由本层投递 —— 因为"关房"跨了两个 owner（service 的内存关房、
+// service.Hub 的断连），把它们塞进 service 会让 service 去调用 Hub 的另一个方法。
 //
 // **只写一份**：本层投递之后没有任何地方再写第二条（§9 的要求）。
 func (h *adminHandler) writeRoomAudit(c *gin.Context, actorID int64, action, roomID string, detail map[string]any) {
@@ -978,9 +977,9 @@ func (h *adminHandler) writeRoomAudit(c *gin.Context, actorID int64, action, roo
 
 // auditDetailJSON 把结构化的审计明细编成 JSON 文本。
 //
-// 与 usecase.auditDetail 是同一件事，但它是**未导出**的（跨包用不了），
-// 而重新实现一份 8 行的函数比把 usecase 的内部工具导出更划算：
-// 导出一个"给 handler 用的小工具"会让 usecase 的公开面多出一个与业务无关的符号。
+// 与 service.auditDetail 是同一件事，但它是**未导出**的（跨包用不了），
+// 而重新实现一份 8 行的函数比把 service 的内部工具导出更划算：
+// 导出一个"给 handler 用的小工具"会让 service 的公开面多出一个与业务无关的符号。
 // 编码失败退化成 {}：明细为空远好过整条审计写不进去（§8 的"宁可写进去也别丢"）。
 func auditDetailJSON(fields map[string]any) string {
 	if len(fields) == 0 {
@@ -992,11 +991,6 @@ func auditDetailJSON(fields map[string]any) string {
 	}
 	return string(b)
 }
-
-// boolPtr 返回一个布尔量的指针（"置 false"这类 patch 用）。
-//
-//go:fix inline
-func boolPtr(v bool) *bool { return new(v) }
 
 // —— 审计读取（T4 / §10 的 GET /api/admin/audit）——
 
@@ -1034,12 +1028,12 @@ func (h *adminHandler) listAudit(c *gin.Context) {
 		})
 		return
 	}
-	limit, err := adminPageLimit(c.Query("limit"))
+	limit, err := boundedLimit(c.Query("limit"), defaultAdminPageLimit, maxAdminPageLimit)
 	if err != nil {
 		adminBadRequest(c, err.Error())
 		return
 	}
-	offset, err := adminPageOffset(c.Query("offset"))
+	offset, err := boundedOffset(c.Query("offset"))
 	if err != nil {
 		adminBadRequest(c, err.Error())
 		return
@@ -1083,9 +1077,9 @@ func (h *adminHandler) listAudit(c *gin.Context) {
 // 不在 accountErrorResponse 的映射表里（那张表属 T6/T7，本任务不动它），
 // 落到 default 分支会变成 500 "服务端内部错误" —— 那会把一次**预期内的拒绝**
 // 说成服务端故障。这里补一条：403 + FORBIDDEN（已认证、但该操作被服务端禁止），
-// 文案用 usecase 自己的说明。
+// 文案用 service 自己的说明。
 func (h *adminHandler) writeWriteError(c *gin.Context, err error) {
-	if errors.Is(err, usecase.ErrSelfTarget) {
+	if errors.Is(err, service.ErrSelfTarget) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"error": err.Error(),
 			"code":  CodeForbidden,
@@ -1123,57 +1117,18 @@ func adminPathID(c *gin.Context, name string) (int64, bool) {
 	return id, true
 }
 
-// adminPageLimit 解析 limit：缺省 50、非正数取缺省、超上限截断（与 store.clampPage 同口径）。
-//
-// 非整数**不**降级成缺省值，而是 400：静默改变分页口径会让"界面翻页翻不到东西"
-// 变成一个没人查得出来的 bug。
-func adminPageLimit(raw string) (int, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return defaultAdminPageLimit, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, fmt.Errorf("limit 必须是整数")
-	}
-	switch {
-	case n <= 0:
-		return defaultAdminPageLimit, nil
-	case n > maxAdminPageLimit:
-		return maxAdminPageLimit, nil
-	default:
-		return n, nil
-	}
-}
-
-// adminPageOffset 解析 offset：缺省 0、负数归零（与 store.clampPage 同口径）。
-func adminPageOffset(raw string) (int, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, fmt.Errorf("offset 必须是整数")
-	}
-	if n < 0 {
-		return 0, nil
-	}
-	return n, nil
-}
-
 // 断言：生产装配里的具体类型逐字满足管理端的窄接口。
 // 放在这里是为了让"是否真的满足"在**编译期**暴露，而不是等到装配时才发现。
 var (
-	_ AdminAccountWriter  = (*usecase.AccountService)(nil)
+	_ AdminAccountWriter  = (*service.AccountService)(nil)
 	_ AdminUserStore      = (*store.Store)(nil)
 	_ AdminHub            = (*service.Hub)(nil)
-	_ AdminRoomStats      = (*usecase.Manager)(nil)
-	_ AdminWriterStats    = (*usecase.WriterJobs)(nil)
+	_ AdminRoomStats      = (*service.Manager)(nil)
+	_ AdminWriterStats    = (*service.WriterJobs)(nil)
 	_ AdminLogSource      = (*service.LogRing)(nil)
 	_ AdminRoomLister     = (*store.Store)(nil)
 	_ AdminRoomMetaWriter = (*store.Store)(nil)
 	_ AdminAuditSource    = (*store.Store)(nil)
 	_ AdminAuditWriter    = (*store.Store)(nil)
-	_ AdminAuditSink      = (*usecase.WriterJobs)(nil)
+	_ AdminAuditSink      = (*service.WriterJobs)(nil)
 )

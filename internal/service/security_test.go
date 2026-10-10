@@ -1,4 +1,4 @@
-package usecase
+package service
 
 import (
 	"errors"
@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"ProjectionRoom/internal/config"
-	"ProjectionRoom/internal/limiters"
 	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/service/limiter"
 )
 
 // —— S-3：房间码白名单 ——
@@ -42,7 +42,7 @@ func TestRoomCodeWhitelist(t *testing.T) {
 }
 
 // TestCreateRejectsIllegalRoomCodeAndPassword 覆盖 Manager 层的两道入口校验：
-// 校验必须落在 usecase（REST 与 /ws 两条入口共用它），而不是只在 HTTP handler 里。
+// 校验必须落在 service（REST 与 /ws 两条入口共用它），而不是只在 HTTP handler 里。
 func TestCreateRejectsIllegalRoomCodeAndPassword(t *testing.T) {
 	m, _ := newTestManager(t, 8)
 
@@ -349,12 +349,12 @@ func TestChunkReportRejectsOversizedBitmap(t *testing.T) {
 	}
 }
 
-// —— S-11：join 失败限速（usecase 层的令牌桶由 handler 使用，这里直接验证原语与语义）——
+// —— S-11：join 失败限速（service 层的令牌桶由 handler 使用，这里直接验证原语与语义）——
 
 // TestJoinFailureRateLimitPrimitive 锁定限速原语的关键语义：
 // 正常用户的前几次永远放行，持续滥用必然被拒。
 func TestJoinFailureRateLimitPrimitive(t *testing.T) {
-	lim := limiters.NewKeyed(30, 30) // 30/分钟、容量 30
+	lim := limiter.NewKeyed(30, 30) // 30/分钟、容量 30
 	key := "127.0.0.1|ABCDEF"
 
 	for i := 0; i < 30; i++ {
@@ -371,7 +371,7 @@ func TestJoinFailureRateLimitPrimitive(t *testing.T) {
 	}
 
 	// 关闭（perMinute<=0）时永远放行。
-	if got := limiters.NewKeyed(0, 0); got != nil {
+	if got := limiter.NewKeyed(0, 0); got != nil {
 		if !got.Allow(key) {
 			t.Fatal("闸门关闭时应当永远放行")
 		}
@@ -407,11 +407,4 @@ func TestReclaimReasonsAreDescriptive(t *testing.T) {
 	if !strings.Contains(describeDuration(time.Second), "秒") {
 		t.Fatalf("1 秒应当被描述为'N 秒'，实际 %q", describeDuration(time.Second))
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

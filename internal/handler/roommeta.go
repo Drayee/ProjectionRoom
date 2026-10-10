@@ -5,7 +5,7 @@
 //  1. **授权是"房主"，不是"主播"**：房间标题与公开性是房主的资产。
 //     主播位由 hostToken 决定（S-7），两者可以是不同人（§6）；
 //     拿"是不是主播"当判据会让"临时替朋友推流"的人顺手把房间改成公开。
-//  2. **标题在服务端清洗**：去零宽/Bidi/控制符（复用一期的 usecase.StripControl）、
+//  2. **标题在服务端清洗**：去零宽/Bidi/控制符（复用一期的 service.StripControl）、
 //     去首尾空白、长度 ≤60（与 rooms_meta.title 的列上限一致）。
 //     前端一律文本插值，服务端的责任是保证**存进去的东西本身**没有欺骗字符 ——
 //     一个带 Bidi 覆盖的标题能让列表页显示成完全不同的文字。
@@ -31,8 +31,8 @@ import (
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/store"
-	"ProjectionRoom/internal/usecase"
 )
 
 // maxRoomTitleLen 是房间标题的字符上限，与 rooms_meta.title 的列上限保持一致
@@ -40,14 +40,14 @@ import (
 // 而症状是"保存按钮点了报 500"，排查要从 HTTP 层一路追到 SQL 层。
 const maxRoomTitleLen = 60
 
-// RoomMetaRoomSource 是房主改元数据需要的**内存**能力（*usecase.Manager 满足它）。
+// RoomMetaRoomSource 是房主改元数据需要的**内存**能力（*service.Manager 满足它）。
 //
 // Get 只是为了"先判存在、再判房主"这两步能给出精确的 404/403；
 // SetRoomMeta 负责在同一次调用里复核"房间还在、而且调用者是房主"。
 // 两步都保留不是重复：Get 回答"该返回 404 还是 403"，
 // SetRoomMeta 回答"这次修改真的发生了吗"（两者之间的时间窗里房间可能已被关掉）。
 type RoomMetaRoomSource interface {
-	Get(roomID string) (*usecase.Room, bool)
+	Get(roomID string) (*service.Room, bool)
 	SetRoomMeta(roomID string, actorUserID int64, title *string, isPublic *bool) error
 }
 
@@ -193,7 +193,7 @@ func (h *roomMetaHandler) patch(c *gin.Context) {
 	// 因为超长被拒，而用户看到的明明只有 60 个字符。
 	title := (*string)(nil)
 	if req.Title != nil {
-		cleaned := strings.TrimSpace(usecase.StripControl(*req.Title))
+		cleaned := strings.TrimSpace(service.StripControl(*req.Title))
 		if len([]rune(cleaned)) > maxRoomTitleLen {
 			adminBadRequest(c, "标题不能超过 60 个字符")
 			return
@@ -205,11 +205,11 @@ func (h *roomMetaHandler) patch(c *gin.Context) {
 	// 因此"非房主探测某个房间码是否存在"不会额外制造数据库往返。
 	r, exists := h.deps.Rooms.Get(roomID)
 	if !exists {
-		h.writeMetaRoomError(c, usecase.ErrNotFound, "房间不存在")
+		h.writeMetaRoomError(c, service.ErrNotFound, "房间不存在")
 		return
 	}
 	if r.OwnerUserID() != actor.ID {
-		h.writeMetaRoomError(c, usecase.ErrNotRoomOwner, "只有房主可以修改房间信息")
+		h.writeMetaRoomError(c, service.ErrNotRoomOwner, "只有房主可以修改房间信息")
 		return
 	}
 
@@ -257,7 +257,7 @@ func (h *roomMetaHandler) patch(c *gin.Context) {
 //	ownerUserId   内部账号 id：房主自己知道自己的 id，服务端没有理由把它放进
 //	              一个"房间设置"的响应里（它是从房间反查账号的第一步）；
 //	lastSeenAt / closedAt / createdAt  这些是运维/排障口径，不是房主该调的旋钮；
-//	hasPassword 的原文  见 usecase.Room.HasPassword 的说明：只出布尔。
+//	hasPassword 的原文  见 service.Room.HasPassword 的说明：只出布尔。
 type roomMetaView struct {
 	RoomID      string `json:"roomId"`
 	Title       string `json:"title"`
@@ -321,7 +321,7 @@ func (h *roomMetaHandler) get(c *gin.Context) {
 
 	m, err := h.deps.Meta.RoomMetaByID(c.Request.Context(), roomID)
 	if err != nil {
-		if errors.Is(err, usecase.StoreNotFound) {
+		if errors.Is(err, service.StoreNotFound) {
 			// ③ 缺行：房主读自己的房间却没有元数据行 —— 这是需要人知道的事
 			//（建房的异步投递可能失败过），所以记一条 WARN，再按 404 应答。
 			log.Printf("[WARN] 房主 %d 读房间 %s 的元数据，但库里缺行（房间照常可用，重新 PATCH 会补上）",
@@ -370,11 +370,11 @@ func (h *roomMetaHandler) writeMetaNotFound(c *gin.Context, message string) {
 //
 // 读失败（非"不存在"）时不报错而是用内存事实重建：一次查询抖动不该让房主改不了标题。
 // 代价（created_at 会被写成"现在"）不会真的落库 —— upsert 的冲突分支不覆盖 created_at。
-func (h *roomMetaHandler) expectedMeta(ctx context.Context, roomID string, ownerUserID int64, r *usecase.Room) *store.RoomMeta {
+func (h *roomMetaHandler) expectedMeta(ctx context.Context, roomID string, ownerUserID int64, r *service.Room) *store.RoomMeta {
 	if current, err := h.deps.Meta.RoomMetaByID(ctx, roomID); err == nil && current != nil {
 		out := *current
 		return &out
-	} else if err != nil && !errors.Is(err, usecase.StoreNotFound) {
+	} else if err != nil && !errors.Is(err, service.StoreNotFound) {
 		log.Printf("[WARN] 房间 %s 改元数据前读库失败，按内存事实重建期望状态：%v", roomID, err)
 	}
 	hasPassword := r != nil && r.HasPassword()
@@ -399,19 +399,19 @@ func (h *roomMetaHandler) expectedMeta(ctx context.Context, roomID string, owner
 // 静默变成 404（403 与 404 的语义差别是"你的房间"与"没有这个房间"）。
 func (h *roomMetaHandler) writeMetaRoomError(c *gin.Context, err error, fallback string) {
 	switch {
-	case errors.Is(err, usecase.ErrNotRoomOwner):
+	case errors.Is(err, service.ErrNotRoomOwner):
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-			"error": usecase.ErrNotRoomOwner.Error(),
+			"error": service.ErrNotRoomOwner.Error(),
 			"code":  CodeForbidden,
 		})
-	case errors.Is(err, usecase.ErrRoomChanged):
+	case errors.Is(err, service.ErrRoomChanged):
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-			"error": usecase.ErrRoomChanged.Error(),
+			"error": service.ErrRoomChanged.Error(),
 			"code":  CodeForbidden,
 		})
-	case errors.Is(err, usecase.ErrBadRoomMeta):
-		adminBadRequest(c, usecase.ErrBadRoomMeta.Error())
-	case errors.Is(err, usecase.ErrNotFound):
+	case errors.Is(err, service.ErrBadRoomMeta):
+		adminBadRequest(c, service.ErrBadRoomMeta.Error())
+	case errors.Is(err, service.ErrNotFound):
 		// 借用既有房间错误码：前端对"房间不存在"只有一套处理（退回列表页），
 		// 多造一个码会让它多一条分支而没有任何行为差异。
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{

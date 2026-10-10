@@ -95,7 +95,7 @@ const (
 )
 
 // ModePending 表示尚未拿到实测上行、容量未定（SPEC §6.1、§6.2）。
-// M3 之后由 usecase 的分配算法给出 fanout / chain。
+// M3 之后由 service 的分配算法给出 fanout / chain。
 const ModePending = "pending"
 
 // Envelope 是所有 WebSocket 文本消息的统一封装。

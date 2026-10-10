@@ -1,4 +1,4 @@
-package usecase
+package service
 
 import (
 	"crypto/rand"
@@ -31,8 +31,23 @@ const (
 	degradedReplanInterval = 3 * time.Second
 )
 
-// Broadcaster 由 service.Hub 实现。
-// 接口定义在 usecase 包内，使依赖方向保持 handler → usecase → Broadcaster ← service，不产生环。
+// Broadcaster 由同包的 Hub 实现（见 hub.go）。
+//
+// **为什么合并 usecase → service 之后仍然保留这个接口**（本轮整理里唯一一个
+// "本可去掉的间接层"，结论与理由如下）：
+//
+//  1. 它现在是**可测性接缝**，不再是"破解包级依赖环"的补丁。manager_test /
+//     host_grace_test / room_snapshot_test / security_test 四个用例文件都用 fakeBus
+//     记录"谁在什么时候收到哪一条报文"，并用 m.bus.(*fakeBus) 反查这些记录。
+//     *Hub 是具体类型、无法替换：换成它等于要求每个房间用例都起真实 WebSocket
+//     连接，并放弃全部报文级断言（那正是这批用例唯一能验的东西）；
+//  2. 它把"房间用例依赖信令层的**哪四个能力**"钉在一处（下面这四个方法）；
+//     Hub 上其余方法（Register / CloseByUser / Stats …）因此不可能被房间用例
+//     意外用上；
+//  3. 代价只是装配处多一次显式投影（service.NewBroadcaster(*Hub) → Broadcaster），
+//     即 wire 的 provider 列表里多一行 —— 可见、一次性。
+//
+// 因此这里保留接口，而不是把 Manager.bus 直接写成 *Hub。
 type Broadcaster interface {
 	SendTo(id string, msg []byte) error
 	BroadcastToRoom(roomID string, msg []byte, except string) int
@@ -195,7 +210,7 @@ func (m *Manager) roomMaxDepth() int {
 // 返回的 token 只在这一次响应里下发，服务端只存哈希。
 //
 // 本入口**不绑定房主**（ownerUserID = 0）。REST 建房走 CreateOwned；这里保留
-// 三参数形态，是因为 usecase 的多个单测与 handler 的夹具都以它建"无房主房间"，
+// 三参数形态，是因为本包的多个单测与 handler 的夹具都以它建"无房主房间"，
 // 而那些用例与账号无关。
 func (m *Manager) Create(roomID, password string, streamBps int64) (*Room, string, error) {
 	return m.create(roomID, password, streamBps, 0)
@@ -291,7 +306,7 @@ func (m *Manager) RoomCount() int {
 // 为什么单独一个类型而不是直接暴露 *Room：*Room 带 mu、Password、members、
 // hostToken 等一切内部状态；把指针交给 handler 之后，"响应里不会出现密码"
 // 就只能靠调用方自觉。这个类型**在字段层面**就不含密码与成员明细，
-// 于是"泄露"这件事在类型系统里就不可能发生（与 usecase.Profile 之于 PasswordHash 同一条理由）。
+// 于是"泄露"这件事在类型系统里就不可能发生（与 Profile 之于 PasswordHash 同一条理由）。
 //
 // HasPassword 仍然要外露：它是列表页"🔒"标记的依据（§6 明说列表要能看出密码房），
 // 而它只是一个布尔量，不构成密码面。
@@ -388,7 +403,7 @@ var ErrBadRoomMeta = errors.New("room: 至少要指定 title 或 isPublic 之一
 // 房主的资产，与谁此刻在推流无关。
 //
 // 注意它**不碰数据库**：rooms_meta 的落库是 §9 的"事件类"，由调用方（handler）
-// 走异步 RoomMetaSink 投递 —— usecase 只向接口投递事件，不持有写队列（I4）。
+// 走异步 RoomMetaSink 投递 —— 本包只向接口投递事件，不持有写队列（I4）。
 //
 // 房间已被销毁 / 从未存在 → ErrNotFound（与房间用例的既有 not-found 语义一致）。
 func (m *Manager) SetRoomMeta(roomID string, actorUserID int64, title *string, isPublic *bool) error {

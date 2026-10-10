@@ -161,7 +161,7 @@ func (s *Store) Close() error {
 }
 
 // AttachWriter 挂上事件写入器（§9 的事件类），让只拿到 *Store 的上层
-// （usecase/handler）也能投递事件，而不必各自持有 Writer。
+// （service/handler）也能投递事件，而不必各自持有 Writer。
 // 传 nil 表示本进程不写事件（账号能力关闭时的形态）。
 func (s *Store) AttachWriter(w *Writer) {
 	s.mu.Lock()

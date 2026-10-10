@@ -15,7 +15,7 @@ import (
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
-	"ProjectionRoom/internal/usecase"
+	"ProjectionRoom/internal/service"
 )
 
 // —— S-5：WebSocket Origin 校验 ——
@@ -340,7 +340,7 @@ func TestSweepKeepsRoomWithinHostGrace(t *testing.T) {
 }
 
 // waitRoomGone 轮询到房间消失（HTTP 404 且 Manager 里查不到），并顺带推进清扫。
-func waitRoomGone(t *testing.T, baseURL string, rooms *usecase.Manager, roomID, desc string) {
+func waitRoomGone(t *testing.T, baseURL string, rooms *service.Manager, roomID, desc string) {
 	t.Helper()
 
 	deadline := time.Now().Add(testTimeout)
