@@ -61,9 +61,10 @@
 
 - **混合式会话**：refresh = HttpOnly Cookie 里的不透明串（库里只存 sha256，每次刷新**轮换** + **重放检测→撤销全部会话**）；access = 15 分钟 JWT，**只存内存 + `sessionStorage`**（**不进 localStorage**）。
 - 前端缓存的 `pr:profile` 只用于显示，**不是授权依据**。
-- **DB 表**：`users` / `sessions` / `rooms_meta` / `admin_audit` / `schema_migrations`（二期又加了房间元数据读接口；`friendships`/`messages`/`posts` 属后续阶段）。
+- **DB 表**：`users`（含 `email` + `email_verified_at`，`lower(email)` 上有**部分唯一索引**）/ `sessions` / `password_resets`（验证与重置**共用**，靠 `purpose` 区分：`email_verify` / `password_reset`；只存 token 的 sha256）/ `rooms_meta` / `admin_audit` / `schema_migrations`（`friendships`/`messages`/`posts` 属后续阶段）。
+- **邮箱与找回**：注册**必须**填邮箱（不填会被拒）→ 发验证邮件 → **只有验证过的邮箱能用于找回**；管理员 `PATCH /api/admin/users/:id {email}` 绑定邮箱时会**同时标记已验证**（管理端 UI 已有该入口）。重置邮件里是一次性链接 `<PR_PUBLIC_BASE_URL>/reset#token=…`（token 在 **fragment** 里，故不进服务端访问日志）；验证链接同理走 `/verify#token=…`。
 - **迁移**：内嵌有序 DDL，启动自动补齐，**只做加法**；`schema_migrations` 记版本。
-- **API 速查**：`/api/auth/{register,login,refresh,logout,logout-all,me,ws-ticket}`、`/api/rooms`(POST 建房，需登录)、`/api/rooms/:roomId`(信息)、`/api/rooms/:roomId/meta`(GET 仅房主读回 / PATCH 房主改)、`/api/public-rooms`(免登录)、`/api/ice`、`/api/v1/segment/*`、`/api/admin/{users,rooms,metrics,logs,audit}` + `/api/admin/rooms/:roomId/{close,unpublish}`。
+- **API 速查**：`/api/auth/{register,login,refresh,logout,logout-all,me,ws-ticket}`、**`/api/auth/forgot`**（恒定 200，不泄露账号是否存在）、**`/api/auth/reset`**、**`/api/auth/verify-email`**（注意是 `verify-email` 而不是 `verify`）、`/api/rooms`(POST 建房，需登录)、`/api/rooms/:roomId`(信息)、`/api/rooms/:roomId/meta`(GET 仅房主读回 / PATCH 房主改)、`/api/public-rooms`(免登录)、`/api/ice`、`/api/v1/segment/*`、`/api/admin/{users,rooms,metrics,logs,audit}` + `/api/admin/rooms/:roomId/{close,unpublish}`。
 - **账号能力开关**：`PR_DB_DSN` 为空 = 账号关闭（不连库、不注册 `/api/auth/*` 与 `/api/admin/*`，游客照常进房）。这是刻意的**两步部署**路径。
 
 ## 5. 配置（环境变量）
@@ -73,6 +74,7 @@
 - **账号能力总开关**：`PR_DB_DSN` 为空 ⇒ 账号整体关闭（不连库、不注册 `/api/auth/*` 与 `/api/admin/*`，游客照常进房）。这是刻意的**两步部署**路径。配了 DSN 而 `PR_JWT_SECRET` 少于 32 字节 ⇒ **拒绝启动**（缺密钥的症状是"所有人随机掉线"，极难归因）。
 - **`PR_TRUSTED_PROXIES` 默认只信回环**：配错（把直连来源也标为可信）会让按 IP 限速退化成全局限速。
 - **`PR_SECURITY_CSP` 是本地矩阵的开关**：默认严格 CSP 会拦住脚手架注入的跨源本机媒体服务器；本地跑验收矩阵时临时放行 `http://127.0.0.1:*`。
+- **邮件能力的开关是 `PR_SMTP_HOST`**（为空 ⇒ `forgot` 返回 503 `MAIL_UNAVAILABLE`，对外仍是恒定响应）。两个会在启动期被拦下的组合：`PR_SMTP_TLS=none` + 非回环 host（标准库 `PlainAuth` 本来就会拒，提前拒更好归因）；以及 `PR_SMTP_FROM` 与认证账号不一致（QQ 会在 RCPT 阶段 550）。**发信是异步入队的**（队列满只记日志、对外仍恒定 200），所以"日志里出现『已入队』不等于『已投递』"——排查时要看两态。
 
 ## 6. 构建与验证（照抄即可）
 
@@ -106,8 +108,7 @@ go test ./internal/store/ -count=1
 | `verify-room-resume` | 主播断线/宽限期/同码重建 | **`--grace` 必须与服务端 `PR_ROOM_HOST_GRACE` 对齐**；素材用默认 `short_video/cut`；服务端自报 grace 要一致 |
 | `verify-ice` | ICE 下发/刷新/重启 | 实例需 `PR_ICE_TTL=30s` |
 | `verify-health` | 卡顿换父与健康度 | 素材用 `mkw_cut`（短素材会假失败） |
-| `verify-auth` | 账号 30 判据（含重放撤销、封禁断连、游客进房） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉 |
-| `verify-auth` | 账号 34 判据（含重放撤销、封禁断连、游客进房、**`forgot` 不泄露账号存在性**） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉。**换环境时**：`forgot` 的期望值取决于实例是否配了 SMTP（未配=两条路径都 503，已配=都 200），脚本会先探测并打印它选了哪条 |
+| `verify-auth` | 账号 **34** 判据（重放撤销、封禁断连、游客进房、**`forgot` 不泄露账号存在性**） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉。**换环境时**：`forgot` 的期望值取决于实例是否配了 SMTP（未配=两条路径都 503，已配=都 200），脚本会先探测并打印它选了哪条 |
 | （待补）`verify-public-rooms` / `verify-admin` | 公开房列表与管理端强关/下架/审计 | **尚未在仓库里**（计划 T8 的产出，因故未落地）；需要时按 §6 起实例 + 管理员凭据自建 |
 | `lib/browser.mjs` | 公共库：`startChrome/openTarget/waitFor/createRoom/seedAndEnter/ensureAccount/lastAccount/newCookieJar/findChrome/argOf/percentile` | `createRoom` 会自动取测试账号（账号能力关闭时退化为匿名）；`seedAndEnter` 可传第 7 参 account 给主播窗口播种会话 |
 
