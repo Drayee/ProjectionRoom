@@ -374,10 +374,7 @@ func slicePage[T any](in []T, offset, limit int) []T {
 	if offset >= len(in) || limit <= 0 {
 		return []T{}
 	}
-	end := offset + limit
-	if end > len(in) {
-		end = len(in)
-	}
+	end := min(offset+limit, len(in))
 	// 复制一份而不是返回子切片：子切片会让调用方（或它启动的 goroutine）
 	// 继续持有整个底层数组，而这里恰好可以顺手切掉。
 	out := make([]T, end-offset)

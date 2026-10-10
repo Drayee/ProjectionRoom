@@ -249,7 +249,7 @@ func splitArgs(args []string, boolFlags map[string]bool) (flags []string, positi
 		if len(arg) > 1 && arg[0] == '-' {
 			flags = append(flags, arg)
 			name := strings.TrimLeft(arg, "-")
-			if idx := strings.IndexByte(name, '='); idx >= 0 {
+			if found := strings.Contains(name, "="); found {
 				continue // -x=v：值已经在里面了
 			}
 			if boolFlags[name] {

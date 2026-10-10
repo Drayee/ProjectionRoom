@@ -214,7 +214,7 @@ func parseStsd(data []byte) ([]string, error) {
 
 	var codecs []string
 	off := 8
-	for i := uint32(0); i < entryCount; i++ {
+	for range entryCount {
 		if off+8 > len(data) {
 			return nil, errTruncated
 		}

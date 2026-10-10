@@ -1,5 +1,7 @@
 package ice
 
+import "slices"
+
 // stickyHosts 是"粘性"STUN 主机：只要本轮还能应答，就始终占一个下发名额。
 //
 // 为什么单独点名这两台：它们是默认列表里少数同时具备 A 与 AAAA 记录的服务器，
@@ -18,10 +20,5 @@ func IsSticky(rawURL string) bool {
 	if host == "" {
 		return false
 	}
-	for _, h := range stickyHosts {
-		if host == h {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(stickyHosts, host)
 }

@@ -295,9 +295,7 @@ func (q *Queue) Tools() Tools { return q.tools }
 // Start 启动后台清理协程（幂等）。
 func (q *Queue) Start() {
 	q.startOnce.Do(func() {
-		q.wg.Add(1)
-		go func() {
-			defer q.wg.Done()
+		q.wg.Go(func() {
 			ticker := time.NewTicker(q.cfg.CleanupInterval)
 			defer ticker.Stop()
 			for {
@@ -308,7 +306,7 @@ func (q *Queue) Start() {
 					q.Cleanup()
 				}
 			}
-		}()
+		})
 	})
 }
 
@@ -472,10 +470,7 @@ func (q *Queue) takeTokenLocked() (bool, time.Duration) {
 		return true, 0
 	}
 	// 距离下一个令牌还差多少：向上取整到秒，避免 Retry-After: 0。
-	need := time.Duration(math.Ceil((1-q.tokens)/ratePerSecond)) * time.Second
-	if need < time.Second {
-		need = time.Second
-	}
+	need := max(time.Duration(math.Ceil((1-q.tokens)/ratePerSecond))*time.Second, time.Second)
 	return false, need
 }
 

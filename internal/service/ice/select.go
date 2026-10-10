@@ -67,7 +67,7 @@ func (s *selector) pick(cands []weighted, n int) []string {
 
 	out := make([]string, 0, n)
 	picked := make(map[string]bool, n)
-	for k := 0; k < n; k++ {
+	for range n {
 		// 每轮给**所有**候选加一次权重（这才是"按比例分配"的来源），
 		// 但只在还没被选中的候选里决胜。
 		for _, c := range usable {

@@ -116,10 +116,7 @@ func writeSegmentSubmitError(c *gin.Context, err error) {
 	var quota *segment.QuotaError
 	switch {
 	case errors.As(err, &quota):
-		seconds := int(math.Ceil(quota.RetryAfter.Seconds()))
-		if seconds < 1 {
-			seconds = 1
-		}
+		seconds := max(int(math.Ceil(quota.RetryAfter.Seconds())), 1)
 		c.Header("Retry-After", strconv.Itoa(seconds))
 		code := codeSegmentQueueFull
 		if errors.Is(quota.Err, segment.ErrRateLimited) {

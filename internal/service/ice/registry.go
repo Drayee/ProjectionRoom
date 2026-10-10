@@ -136,9 +136,7 @@ func NewRegistryWithProber(cfg *config.Config, prober Prober) *Registry {
 // 可重复调用，只有第一次生效。
 func (r *Registry) Start() {
 	r.startOnce.Do(func() {
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
+		r.wg.Go(func() {
 
 			r.ProbeOnce(context.Background())
 
@@ -152,7 +150,7 @@ func (r *Registry) Start() {
 					r.ProbeOnce(context.Background())
 				}
 			}
-		}()
+		})
 	})
 }
 

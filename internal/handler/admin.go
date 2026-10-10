@@ -580,10 +580,7 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 		//（房间码按定义是同一个键），因此"内存房间数 + 一页"足以覆盖所有可能与内存求交的行。
 		// 多出来的那些（已关闭的历史行）排在 last_seen_at DESC 的尾部，
 		// 它们除了让并集变大之外不提供实时信息，而管理端真正要管的正是"现在还在的房间"。
-		limitRows := len(snapshots) + maxAdminPageLimit
-		if limitRows < maxAdminPageLimit {
-			limitRows = maxAdminPageLimit
-		}
+		limitRows := max(len(snapshots)+maxAdminPageLimit, maxAdminPageLimit)
 		rows, total, err := h.deps.RoomMeta.QueryRoomMetas(c.Request.Context(), store.RoomMetaQuery{
 			Search:      search,
 			PublicOnly:  publicOnly,
@@ -868,7 +865,7 @@ func (h *adminHandler) unpublishRoom(c *gin.Context) {
 	// 内存侧：房主身份校验在 SetRoomMeta 里。管理员通常不是房主，
 	// 因此这里**不把 ErrNotRoomOwner 当失败**：下架的权威后果是"is_public=false"，
 	// 而这件事由库侧那一行表达；内存侧那一份只是同一次调用里的内存事实通知。
-	if err := h.deps.Rooms.SetRoomMeta(roomID, actor.ID, nil, boolPtr(false)); err != nil {
+	if err := h.deps.Rooms.SetRoomMeta(roomID, actor.ID, nil, new(false)); err != nil {
 		switch {
 		case errors.Is(err, usecase.ErrNotFound):
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
@@ -997,7 +994,9 @@ func auditDetailJSON(fields map[string]any) string {
 }
 
 // boolPtr 返回一个布尔量的指针（"置 false"这类 patch 用）。
-func boolPtr(v bool) *bool { return &v }
+//
+//go:fix inline
+func boolPtr(v bool) *bool { return new(v) }
 
 // —— 审计读取（T4 / §10 的 GET /api/admin/audit）——
 

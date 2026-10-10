@@ -367,7 +367,7 @@ func parseTraf(payload []byte) (trafInfo, error) {
 		flagsPresent := trunFlags&0x000400 != 0
 		ctoPresent := trunFlags&0x000800 != 0
 
-		for s := uint32(0); s < sampleCount; s++ {
+		for s := range sampleCount {
 			if durationPresent {
 				if p+4 > len(trun.Data) {
 					return info, errTruncated

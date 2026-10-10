@@ -182,7 +182,9 @@ node test/script/verify-segment-ui.mjs
 go run ./cmd
 
 # 终端 2：前端（默认 127.0.0.1:5173，/api 与 /ws 自动代理到服务端）
-cd client && npm install && npm run dev
+cd client
+npm install
+npm run dev
 ```
 
 浏览器打开 http://127.0.0.1:5173 ，一个窗口「创建房间」当主播，另一个窗口用房间码「加入房间」。

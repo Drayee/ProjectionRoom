@@ -1302,7 +1302,7 @@ func (m *Manager) closeRoomIf(roomID string, cond func(*Room) bool, reasonOf fun
 
 // newRoomIDLocked 生成一个当前未被占用的房间码；调用方需持有 m.mu。
 func (m *Manager) newRoomIDLocked() (string, error) {
-	for attempt := 0; attempt < 16; attempt++ {
+	for range 16 {
 		id, err := utils.RandomCode(utils.RoomCodeAlphabet, roomCodeLen)
 		if err != nil {
 			return "", err
