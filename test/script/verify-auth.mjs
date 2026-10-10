@@ -21,6 +21,15 @@
  *   ⑦ 匿名 `POST /api/rooms` → 401，且**没有**因此创建出房间
  *   ⑧ 归属一致：建房响应的 roomId ↔ `GET /api/rooms/:id` ↔ 管理端用户列表里的 owner
  *   ⑨ 附加：`GET /api/admin/logs?limit=5` 分页且**新→旧**；非 admin → 403
+ *   ⑪ 附加（账号体系"邮箱"部分）：`POST /api/auth/forgot` 对"**已注册**邮箱"与
+ *      "**未注册**邮箱"返回**逐字相同**的 status + body（不泄露账号是否存在）。
+ *      期望值按实例的**真实能力**选：没配 SMTP（能力关闭）→ 两条路径都 503；
+ *      配了 SMTP → 两条都 200 `{"status":"sent"}`。选到哪一条会打印出来。
+ *      （邮箱验证 / 重置口令的完整链路不在这里：token 拿不到，属后端线的验收范围。）
+ *
+ * 注册报文自"邮箱 + 忘记密码"起**必填 email**：本脚本提交
+ * `testEmailFor(username)` = `<小写用户名>@example.test`（RFC 2606 保留域，
+ * 脚本里的注册**不会**真的投递邮件；唯一性与确定性见 lib/browser.mjs 的说明）。
  *
  * 时序上有两条**必须**的约束（踩过的坑）：
  *   - 房间有 TTL（本实例 `PR_ICE_TTL=30s`，房间创建响应里带 `expiresAt`）。判据 ⑥/⑧
@@ -64,6 +73,7 @@ import {
   seedAndEnter,
   sleep,
   startChrome,
+  testEmailFor,
   waitFor,
 } from './lib/browser.mjs'
 
@@ -260,18 +270,22 @@ async function withLibRateLimitRetry(label, fn, { attempts = 4, waitMs = 16000 }
 
 /**
  * 注册一个新账号（**不**复用 lib/browser.mjs 的 registerUser：判据 ① 要的是原始响应体
- * 文本 + 状态码 + Set-Cookie 三样东西，那个封装只返回 {token,user,username,status}）。
+ * 文本 + 状态码 + Set-Cookie 三样东西，那个封装只返回 {token,user,username,email,status}）。
  * 注册桶默认 5/分钟 ⇒ 连跑第二遍脚本时可能先撞 429，必须等它回血再判。
+ *
+ * 判据口径未变：①-1 仍是 201、①-2 仍是"响应体不含口令字段"、①-3 仍是 /me 读得回。
+ * 唯一变化是报文多一个**必填** `email`（保留域派生，见文件头），因为契约把注册的 email 变成必填。
  */
 async function step1Register(server) {
   const username = `t11_${Math.random().toString(36).slice(2, 10)}`
+  const email = testEmailFor(username)
   const resp = await withRateLimitRetry('①注册', () =>
     raw(`${server}/api/auth/register`, {
       method: 'POST',
-      body: { username, password: PASSWORD, displayName: 'T11 受害者' },
+      body: { username, password: PASSWORD, displayName: 'T11 受害者', email },
     }),
   )
-  evidence('register', { status: resp.status, body: resp.text, setCookie: resp.setCookie })
+  evidence('register', { status: resp.status, body: resp.text, setCookie: resp.setCookie, email })
   const leaked = /passwordHash|password_hash|"password"\s*:/i.test(resp.text)
   record(
     '①-1 注册返回 201',
@@ -302,7 +316,7 @@ async function step1Register(server) {
     `HTTP ${me.status} user.id=${meUser.id}（注册时 id=${user.id}）username=${JSON.stringify(meUser.username)} ` +
       `role=${meUser.role} status=${meUser.status} 字段=${JSON.stringify(Object.keys(user))}`,
   )
-  return { username, user, accessToken: resp.json.accessToken }
+  return { username, user, accessToken: resp.json.accessToken, email }
 }
 
 // ---------- 判据 ② 登录 Cookie ----------
@@ -886,6 +900,139 @@ async function step9AdminLogs(server, admin, nonAdminToken) {
   )
 }
 
+// ---------- 判据 ⑪ 忘记密码不泄露账号是否存在 ----------
+
+/**
+ * 期望值按实例的**真实能力**二选一（契约里 /forgot 的合法状态只有这两种）：
+ *   - 配了 SMTP → 200 `{"status":"sent"}`；
+ *   - 没配 SMTP（能力关闭）→ 503。
+ *
+ * 判据本体是两条路径**逐字相同**；这里的期望值只用来挡住"两边都 404/400"这种空相同。
+ */
+function forgotExpectation(status) {
+  if (status === 200) {
+    return { expect: 200, why: '实例配了 SMTP（探测响应 HTTP 200）→ 期望两条路径都 200 {"status":"sent"}' }
+  }
+  if (status === 503) {
+    return { expect: 503, why: '实例未配 SMTP / 能力关闭（探测响应 HTTP 503）→ 期望两条路径都 503' }
+  }
+  return null
+}
+
+/**
+ * ⑪ `POST /api/auth/forgot {email}` 对"**已注册**邮箱"与"**未注册**邮箱"必须
+ * 返回**逐字相同**的 status + body。
+ *
+ * 为什么这条判据值得单独钉住：找回入口是枚举账号的天然靶子 —— 只要两种输入有任何可观测
+ * 差异（状态码、body 文本、错误码、甚至长度），任何人拿一个邮箱字典就能把"这个站有哪些
+ * 注册用户"扫出来。因此这里不看"语义相等"，而是把 `HTTP status` 与**响应体文本**直接
+ * 逐字比较（`===`）。时延同样是一种枚举侧信道，但抖动大、不是可执行判据，本用例按任务
+ * 口径只钉 status + body。
+ *
+ * 两条**反假绿**的前置（缺了它们，"相同"是空的）：
+ *   ⑪-1 提交的邮箱真的绑到了这个账号 —— 否则"已注册邮箱"是库里不存在的地址；
+ *   ⑪-2 未注册邮箱确实不在库里 —— 否则"未注册"那一侧可能撞上真实账号。
+ *
+ * 端点未落地（404/405）或把合法邮箱判成 400/其它码，都记 FAIL：那是后端还没交付，
+ * 不是"恒同"成立。
+ */
+async function step11ForgotNoEnumeration(server, { victim, admin }) {
+  // ⑪-1：两个独立来源任一能读到提交值即可（本人读 /api/auth/me；管理员读用户列表）。
+  const me = await raw(`${server}/api/auth/me`, {
+    headers: { Authorization: `Bearer ${victim.accessToken}` },
+  })
+  const meEmail = me.json?.user?.email ?? null
+  const list = await raw(
+    `${server}/api/admin/users?search=${encodeURIComponent(victim.username)}&limit=50`,
+    { headers: { Authorization: `Bearer ${admin.accessToken}` } },
+  )
+  const row = (list.json?.items ?? []).find((u) => u.username === victim.username)
+  const adminEmail = row?.email ?? null
+  const match = (value) => String(value ?? '').trim().toLowerCase() === victim.email.toLowerCase()
+  const bound = match(meEmail) || match(adminEmail)
+  evidence('emailBinding', {
+    submitted: victim.email,
+    me: { status: me.status, email: meEmail },
+    adminList: { status: list.status, email: adminEmail },
+  })
+  record(
+    '⑪-1 注册提交的 email 真的绑定到了账号（否则"已注册邮箱"路径是空的，恒同判据会假绿）',
+    bound,
+    bound
+      ? `提交 ${victim.email}；GET /api/auth/me → HTTP ${me.status} email=${JSON.stringify(meEmail)}；` +
+        `GET /api/admin/users?search=${victim.username} → HTTP ${list.status} email=${JSON.stringify(adminEmail)}`
+      : `提交 ${victim.email}，但 GET /api/auth/me（HTTP ${me.status}）与 GET /api/admin/users（HTTP ${list.status}）都读不到它：` +
+        `me.email=${JSON.stringify(meEmail)} admin.email=${JSON.stringify(adminEmail)}` +
+        '（后端若尚未把 email 收进注册报文，这条必然红 —— 属预期；等后端落地后复跑）',
+  )
+
+  // ⑪-2：未注册邮箱 = nobody_<8 位随机>@example.test。
+  // 它"没人用过"有两层理由：本仓库脚本的账号前缀是固定的（t_/t11_/hero_/o_/ot_/ow_/pr_admin …），
+  // 以及 <用户名>@example.test 是唯一的派生约定 —— 再用管理端搜索把"库里没有这个用户名"
+  // 也记成证据，避免"未注册"那一侧其实是真账号。
+  const unregistered = testEmailFor(`nobody_${Math.random().toString(36).slice(2, 10)}`)
+  const probe = await raw(
+    `${server}/api/admin/users?search=${encodeURIComponent(unregistered.split('@')[0])}&limit=50`,
+    { headers: { Authorization: `Bearer ${admin.accessToken}` } },
+  )
+  const unregisteredVerified = probe.status === 200 && probe.json?.total === 0
+  evidence('forgotUnregisteredSide', {
+    email: unregistered,
+    adminSearch: { status: probe.status, total: probe.json?.total },
+  })
+  record(
+    '⑪-2 未注册邮箱确实不在库里（否则"未注册"那一侧是假的）',
+    unregisteredVerified,
+    `未注册邮箱=${unregistered}；管理端搜索 local part=${unregistered.split('@')[0]} → HTTP ${probe.status} ` +
+      `total=${probe.json?.total}（期望 0）`,
+  )
+
+  // 两条路径各发一次。顺序有意：**先未注册**那一侧，因为它同时是"这台实例有没有 SMTP"的探测。
+  const unreg = await withRateLimitRetry('⑪未注册邮箱 forgot', () =>
+    raw(`${server}/api/auth/forgot`, { method: 'POST', body: { email: unregistered } }),
+  )
+  const reg = await withRateLimitRetry('⑪已注册邮箱 forgot', () =>
+    raw(`${server}/api/auth/forgot`, { method: 'POST', body: { email: victim.email } }),
+  )
+  evidence('forgotResponses', {
+    unregistered: { email: unregistered, status: unreg.status, body: unreg.text },
+    registered: { email: victim.email, status: reg.status, body: reg.text },
+  })
+
+  const choice = forgotExpectation(unreg.status)
+  console.log(
+    `  · forgot 能力口径：${
+      choice
+        ? choice.why
+        : `未能判定（未注册侧探测响应 HTTP ${unreg.status} body=${JSON.stringify(unreg.text.slice(0, 160))}）`
+    }`,
+  )
+  record(
+    '⑪-3 forgot 端点已落地（不是"两边都 404/405"）',
+    unreg.status !== 404 && unreg.status !== 405 && reg.status !== 404 && reg.status !== 405,
+    `未注册 → HTTP ${unreg.status}；已注册 → HTTP ${reg.status}（404/405 = 端点未落地，判据无法成立）`,
+  )
+
+  const identical = unreg.status === reg.status && unreg.text === reg.text
+  const meaningful = bound && unregisteredVerified && Boolean(choice) && unreg.status === choice?.expect
+  record(
+    '⑪-4 forgot 对已注册/未注册邮箱逐字相同（status + body）',
+    identical && meaningful,
+    identical
+      ? meaningful
+        ? `两条路径都 HTTP ${unreg.status} body=${JSON.stringify(unreg.text)}（逐字相同）；` +
+          `已注册侧用的是账号 ${victim.username} 的地址 ${victim.email}，与库里那条记录一致 → 无枚举侧信道`
+        : `两条路径确实逐字相同（HTTP ${unreg.status} body=${JSON.stringify(unreg.text)}），但这**不能判绿**：` +
+          `${bound ? '' : '已注册邮箱未绑定（见 ⑪-1）；'}` +
+          `${unregisteredVerified ? '' : '未注册侧不成立（见 ⑪-2）；'}` +
+          `${choice ? '' : `探测响应 HTTP ${unreg.status} 不在契约的 200/503 里；`}` +
+          `${choice && unreg.status !== choice.expect ? `响应码 ${unreg.status} 与能力口径期望的 ${choice.expect} 不一致；` : ''}` +
+          '（空的"相同"不是不泄露）'
+      : `存在可观测差异：未注册 → HTTP ${unreg.status} body=${JSON.stringify(unreg.text)}；` +
+        `已注册 → HTTP ${reg.status} body=${JSON.stringify(reg.text)}（期望 status 与 body 都逐字相同）`,
+  )
+}
+
 // ---------- 主流程 ----------
 
 async function main() {
@@ -933,6 +1080,12 @@ async function main() {
     const victim = await step1Register(SERVER_URL)
     if (!victim) return
     report.victim = { id: victim.user.id, username: victim.username }
+
+    // ---------- ⑪ 忘记密码不泄露账号是否存在 ----------
+    // 紧跟在 ① 之后：此时"受害者"是刚注册、未被封禁、邮箱最干净的那个账号
+    //（⑤ 会把它封掉并解封，放后面会让 /forgot 多带一个"账号被封"的变量）。
+    console.log('\n=== ⑪ 忘记密码不泄露账号是否存在（forgot 恒同） ===')
+    await step11ForgotNoEnumeration(SERVER_URL, { victim, admin })
 
     // ---------- ② 登录 Cookie ----------
     console.log('\n=== ② 登录 Cookie 属性 ===')

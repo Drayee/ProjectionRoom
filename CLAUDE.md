@@ -95,6 +95,7 @@ go test ./internal/store/ -count=1
 ```
 ⚠️ **两个坑**：① 测试库与生产库是**两个库**，DSN 的 `dbname` 必须含 `_test`（用例里有护栏）；② **`internal/store` 的真库用例会 TRUNCATE 表**，所以任何手工 fixture（如验收用的管理员账号）在跑过它们之后就不在了——需要重新注册并提权（`UPDATE users SET role='admin' WHERE username='…'`）。
 ⚠️ **测试实例收尾必须停进程**：曾有一个后台实例直连测试库、绕过了用例的跨进程隔离锁，导致 store 用例随机红。
+⚠️ **并存会话的 fixture 会被清掉**：`public.users` 被 store 用例 TRUNCATE ⇒ 刚 seed 的管理员可能在几分钟后消失、`verify-auth` 因此假红。规避办法是**在同一个 `projectionroom_test` 里建隔离 schema**（DSN 追加 `search_path=pr_xxx`），在其中造 fixture、跑完 `DROP SCHEMA`；`public` 侧不留痕。
 ⚠️ 起实例做真机验收需要调试钩子（既有脚本依赖 `window.__pr`，而**生产构建刻意没有**）：`$env:VITE_DEBUG_HOOKS='1'; npx vite build --outDir dist-debug` + `PR_STATIC_DIR=client/dist-debug`，跑完删掉并重建干净 `dist`。
 
 ## 7. 验收脚本（`test/script/*.mjs`，真机 headless Chrome）
@@ -106,7 +107,8 @@ go test ./internal/store/ -count=1
 | `verify-ice` | ICE 下发/刷新/重启 | 实例需 `PR_ICE_TTL=30s` |
 | `verify-health` | 卡顿换父与健康度 | 素材用 `mkw_cut`（短素材会假失败） |
 | `verify-auth` | 账号 30 判据（含重放撤销、封禁断连、游客进房） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉 |
-| `verify-public-rooms` / `verify-admin` | 公开房与管理端 | 需管理员凭据 + 真库 |
+| `verify-auth` | 账号 34 判据（含重放撤销、封禁断连、游客进房、**`forgot` 不泄露账号存在性**） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉。**换环境时**：`forgot` 的期望值取决于实例是否配了 SMTP（未配=两条路径都 503，已配=都 200），脚本会先探测并打印它选了哪条 |
+| （待补）`verify-public-rooms` / `verify-admin` | 公开房列表与管理端强关/下架/审计 | **尚未在仓库里**（计划 T8 的产出，因故未落地）；需要时按 §6 起实例 + 管理员凭据自建 |
 | `lib/browser.mjs` | 公共库：`startChrome/openTarget/waitFor/createRoom/seedAndEnter/ensureAccount/lastAccount/newCookieJar/findChrome/argOf/percentile` | `createRoom` 会自动取测试账号（账号能力关闭时退化为匿名）；`seedAndEnter` 可传第 7 参 account 给主播窗口播种会话 |
 
 CSP 会拦住"跨源本机媒体服务器"的注入路径（脚手架用法），本地矩阵可用 `PR_SECURITY_CSP` 临时放行 `http://127.0.0.1:*`，其余保持严格。

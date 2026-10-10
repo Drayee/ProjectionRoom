@@ -294,10 +294,13 @@ export async function loadMedia(host, mediaDir, mediaServerRef) {
 const hostTokens = new Map()
 
 /**
- * serverUrl → `{token, user}` | `null`（见 ensureAccount 的说明）。
+ * serverUrl → `{token, user, username, email}` | `null`（见 ensureAccount 的说明）。
  *
  * 只装**确定性结论**：拿到凭据的会话，或者"账号能力确实关闭"的 null。
  * 暂时性失败（限速/网络/5xx）**不写这里** —— 否则同一个进程内后续调用会永远拿到 null。
+ *
+ * `email` 只在**本进程注册出来的**账号上非空：`null` 表示"这个账号的邮箱我不知道"，
+ * 而不是"它没有邮箱"（例如 PR_TEST_USER 走登录路径时，库里的地址与本次派生值无关）。
  */
 const accountCache = new Map()
 
@@ -375,17 +378,55 @@ async function fetchWithRateLimitRetry(url, init) {
   }
 }
 
-/** 注册一个账号，返回 {token, user}。成功状态码是 **201**（见 internal/handler/auth.go）。 */
-export async function registerUser(serverUrl, { username, password, displayName, cookieJar } = {}) {
+/**
+ * 验收脚本使用的邮箱域：**RFC 2606 / RFC 6761 保留域**（DNS 上永远没有 MX）。
+ *
+ * 为什么必须是保留域：注册（以及找回密码）会**真的触发服务端发信**。用真域名会让
+ * 验收流量投递到陌生人的信箱（退信也会落回服务端的信封发件人），所以脚本里出现的
+ * 每一个邮箱都必须落在 `example.test` 这种保留域里 —— 要么在 RCPT 阶段被直接拒，
+ * 要么原地退信，**不会有任何真实投递**。
+ */
+export const TEST_EMAIL_DOMAIN = 'example.test'
+
+/**
+ * `username` → 该账号在验收里使用的邮箱（**确定性**映射：同一个用户名永远同一个地址）。
+ *
+ * 唯一性从哪来：服务端把用户名归一化成**小写**且 `users.username` 唯一
+ * （`^[A-Za-z0-9_]{3,20}$`，见 internal/service/account.go 的 CanonicalUsername），
+ * 而本地部分**逐字等于小写用户名**，因此 `<小写用户名>@example.test` 在同一个库里
+ * 天然唯一（`lower(email)` 上的部分唯一索引不会撞）；同时它对**同一个用户名是稳定值** ——
+ * 重跑脚本不会每跑一次就换一个邮箱（否则"注册时提交的邮箱"与库里那条记录的地址会漂移，
+ * 依赖"已注册邮箱"的判据在第二跑就会指向一个不存在的地址）。
+ *
+ * 需要"库里一定不存在"的地址时（例如忘记密码的负例），用
+ * `testEmailFor(`nobody_${随机}`)` —— 与任何脚本的账号命名前缀都不重叠。
+ */
+export function testEmailFor(username) {
+  return `${String(username ?? '').trim().toLowerCase()}@${TEST_EMAIL_DOMAIN}`
+}
+
+/**
+ * 注册一个账号，返回 `{token, user, username, email, status}`。
+ * 成功状态码是 **201**（见 internal/handler/auth.go）。
+ *
+ * `email` 自账号体系引入"邮箱 + 忘记密码"起是**兼容必填**：库里 `users.email` 带
+ * `lower(email) WHERE email IS NOT NULL` 的部分唯一索引，注册报文缺它会被服务端拒绝。
+ * 因此这里**默认派生** `testEmailFor(username)`，既有调用点（其它验收脚本与
+ * %TEMP% 里的临时脚本）不改一行也能继续注册；确实要显式指定地址时传 `email`。
+ * 返回的 `email` 是**本次提交的那个地址**（不是服务端回显），调用方要对照回显请自己读
+ * `/api/auth/me`。
+ */
+export async function registerUser(serverUrl, { username, password, displayName, cookieJar, email } = {}) {
+  const mail = email ?? testEmailFor(username)
   const resp = await fetchWithRateLimitRetry(`${serverUrl}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password, displayName: displayName ?? username }),
+    body: JSON.stringify({ username, password, displayName: displayName ?? username, email: mail }),
   })
   cookieJar?.absorb(resp)
   const body = await readAuthBody(resp)
   if (!resp.ok) throw authError(resp, body, '注册')
-  return { token: body.accessToken, user: body.user, username, status: resp.status }
+  return { token: body.accessToken, user: body.user, username, email: mail, status: resp.status }
 }
 
 /** 登录，返回 {token, user}。 */
@@ -410,6 +451,10 @@ export async function loginUser(serverUrl, { username, password, cookieJar } = {
  *     就往库里塞一个用户）；登录失败再尝试注册；
  *  3. 否则注册一个随机账号（t_<随机>）。
  *
+ * 注册路径固定带上 `email = testEmailFor(username)`：注册自账号体系引入"邮箱 + 忘记密码"
+ * 起把 email 列为必填，缺字段会被服务端拒绝。登录路径拿不到"这个账号的邮箱"，因此
+ * 返回里的 `email` 记 `null`（见 accountCache 的说明）。
+ *
  * **账号能力未开启时返回 null 而不是抛错**：那时服务端不注册 /api/auth/*（返回 404），
  * 脚本应当退化为"匿名建房"，这样同一份脚本既能跑带账号的实例、也能跑没账号的实例
  *（部署是分两步走的：先上代码、再配 PR_DB_DSN）。
@@ -422,6 +467,8 @@ export async function ensureAccount(serverUrl, { cookieJar } = {}) {
   const username = process.env.PR_TEST_USER || `t_${Math.random().toString(36).slice(2, 10)}`
   // 口令必须满足服务端策略：≥8 字符且同时含字母与数字。
   const password = process.env.PR_TEST_PASS || 'pr-test-pass1'
+  // 注册必填的邮箱：确定性派生（保留域，见 testEmailFor）。
+  const email = testEmailFor(username)
 
   // 缓存只写**确定性结论**（拿到 token，或"账号能力关闭"这种稳定事实）。
   // 暂时性失败（429 限速、5xx、网络不可达）**不写缓存** —— 否则一次限速会让整个
@@ -436,7 +483,9 @@ export async function ensureAccount(serverUrl, { cookieJar } = {}) {
   if (process.env.PR_TEST_USER) {
     try {
       const r = await withTransientBackoff(() => loginUser(serverUrl, { username, password, cookieJar }))
-      return definitive({ token: r.token, user: r.user })
+      // 登录路径不知道这个账号在库里的邮箱（可能是历史账号，地址与派生值无关）→ 记 null，
+      // 别让调用方误以为 testEmailFor(username) 就是它的找回地址。
+      return definitive({ token: r.token, user: r.user, username, email: null })
     } catch (err) {
       if (process.env.PR_TEST_STRICT === '1') throw err
       if (isTransientError(err)) return transient()
@@ -444,8 +493,8 @@ export async function ensureAccount(serverUrl, { cookieJar } = {}) {
     }
   }
   try {
-    const r = await withTransientBackoff(() => registerUser(serverUrl, { username, password, cookieJar }))
-    return definitive({ token: r.token, user: r.user })
+    const r = await withTransientBackoff(() => registerUser(serverUrl, { username, password, cookieJar, email }))
+    return definitive({ token: r.token, user: r.user, username, email })
   } catch (err) {
     const msg = String(err?.message ?? err)
     if (msg.includes('HTTP 404') || msg.includes('HTTP 503')) {
@@ -453,10 +502,10 @@ export async function ensureAccount(serverUrl, { cookieJar } = {}) {
       return definitive(null)
     }
     if (msg.includes('HTTP 409')) {
-      // 随机用户名撞车（或固定账号已存在）→ 登录
+      // 随机用户名撞车（或固定账号已存在）→ 登录。这条路径同样不知道库里的邮箱 → null。
       try {
         const r = await withTransientBackoff(() => loginUser(serverUrl, { username, password, cookieJar }))
-        return definitive({ token: r.token, user: r.user })
+        return definitive({ token: r.token, user: r.user, username, email: null })
       } catch (loginErr) {
         if (process.env.PR_TEST_STRICT === '1') throw loginErr
         return isTransientError(loginErr) ? transient() : definitive(null)
@@ -467,7 +516,7 @@ export async function ensureAccount(serverUrl, { cookieJar } = {}) {
   }
 }
 
-/** 该实例最近一次拿到的账号（含档案）；没拿到过返回 null。 */
+/** 该实例最近一次拿到的账号（`{token, user, username, email}`；登录路径的 email 为 null）；没拿到过返回 null。 */
 export function lastAccount(serverUrl) {
   return accountCache.get(serverUrl) ?? null
 }
