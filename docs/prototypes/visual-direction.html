@@ -277,13 +277,13 @@ button.start:hover { transform: translateY(-1px); }
 /* ---- 变体 A：顶部标题栏 + 分区胶囊 + 右下 FAB ---- */
 .layout-A .bar {
   position: sticky; top: 12px; z-index: 10;
-  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  display: flex; align-items: center; gap: 14px;
   padding: 10px 14px; border-radius: var(--radius);
   background: color-mix(in srgb, var(--panel-solid) 72%, transparent);
   backdrop-filter: blur(var(--glass-blur)); border: 1px solid var(--border);
 }
-.layout-A .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; text-decoration: none; color: var(--text); }
-.layout-A .zones { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.layout-A .brand { order: 2; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; text-decoration: none; color: var(--text); }
+.layout-A .zones { order: 1; flex: 1; justify-content: flex-start; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .layout-A .zone-pill {
   display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
   border-radius: var(--radius-pill); border: 1px solid transparent; color: var(--text-dim);
@@ -291,7 +291,7 @@ button.start:hover { transform: translateY(-1px); }
 }
 .layout-A .zone-pill:hover { color: var(--text); border-color: var(--border); }
 .layout-A .zone-pill.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.layout-A .bar-right { display: flex; align-items: center; gap: 8px; }
+.layout-A .bar-right { order: 3; flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 
 /* ---- 变体 B：左侧图标 Dock ---- */
 .layout-B .shell-inner { display: grid; grid-template-columns: 64px 1fr; gap: 18px; max-width: 1080px; }
@@ -319,10 +319,11 @@ button.start:hover { transform: translateY(-1px); }
 
 /* ---- 变体 C：顶栏 + 分区 tab + 右下 FAB（亮色卡片） ---- */
 .layout-C .bar {
-  display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 4px 12px;
+  display: flex; align-items: center; gap: 14px; padding: 8px 4px 12px; border-bottom: 1px solid var(--border);
 }
-.layout-C .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; color: var(--text); text-decoration: none; }
-.layout-C .tabs { display: flex; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.layout-C .tabs { order: 1; flex: 1; justify-content: flex-start; display: flex; gap: 4px; }
+.layout-C .brand { order: 2; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; color: var(--text); text-decoration: none; }
+.layout-C .bar-right { order: 3; flex: 1; display: flex; justify-content: flex-end; align-items: center; }
 .layout-C .tab {
   padding: 8px 16px; border-radius: var(--radius-sm); color: var(--text-dim);
   text-decoration: none; cursor: pointer; font-weight: 600;
@@ -514,15 +515,15 @@ button.start:hover { transform: translateY(-1px); }
     <div class="layout layout-C">
       <div class="shell-inner">
         <header class="bar">
+          <nav class="tabs" aria-label="站点分区">
+            <a class="tab" href="#">房间室</a>
+            <a class="tab" href="#">番剧论坛</a>
+            <a class="tab active" href="#">帖子</a>
+            <a class="tab" href="#">消息</a>
+          </nav>
           <a class="brand" href="#"><svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg> 月喵</a>
-          <span class="avatar" aria-label="我的主页（月夜猫）" data-tip="我的主页（月夜猫）">月</span>
+          <div class="bar-right"><span class="avatar" aria-label="我的主页（月夜猫）" data-tip="我的主页（月夜猫）">月</span></div>
         </header>
-        <nav class="tabs" aria-label="站点分区">
-          <a class="tab" href="#">房间室</a>
-          <a class="tab" href="#">番剧论坛</a>
-          <a class="tab active" href="#">帖子</a>
-          <a class="tab" href="#">消息</a>
-        </nav>
 
         <div class="section-head"><svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><h2>帖子</h2></div>
         <div class="feed feed-C"></div>
