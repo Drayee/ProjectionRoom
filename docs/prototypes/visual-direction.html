@@ -3,16 +3,15 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>月喵 · 视觉方向原型（PROTOTYPE — 抛弃式）</title>
+<title>月喵 · 视觉方向原型（月夜玻璃 · PROTOTYPE — 抛弃式）</title>
 <style>
 /* ============================================================
-   月喵 视觉方向原型（throwaway — 只用于回答「重写后的 UI 长什么样」）
-   - 三个视觉方向 A/B/C，底部悬浮切换 + ?variant=A|B|C + ←/→ 键
+   月喵 视觉方向原型（throwaway — 已定稿：月夜玻璃）
    - 流程：落地页 → 登录窗（morph）→ 外壳 → 帖子列表
+   - 标题栏 icon-first：导航只留图标（aria-label + tooltip），月喵放大居中
    - 状态只存内存，无持久化。不是生产代码。
    ============================================================ */
 
-/* ---------- 基础 token（默认 = A 月夜玻璃） ---------- */
 :root {
   --bg: #0b0e18;
   --bg-grad-a: #0b0e18;
@@ -37,55 +36,6 @@
   color-scheme: dark;
 }
 
-/* ---------- 变体 B：极简夜光（近黑 + 月光金 + 左侧图标 Dock） ---------- */
-#app[data-variant="B"] {
-  --bg: #07080c;
-  --bg-grad-a: #07080c;
-  --bg-grad-b: #0a0c12;
-  --panel: #0e1016;
-  --panel-solid: #0e1016;
-  --border: #22262f;
-  --text: #f2f4f8;
-  --text-dim: #6b7280;
-  --accent: #f5c76a;
-  --accent-ink: #171208;
-  --accent-2: #59e0c8;
-  --ok: #4ade80;
-  --danger: #f87171;
-  --radius: 8px;
-  --radius-sm: 6px;
-  --radius-pill: 8px;
-  --shadow: 0 0 0 1px rgba(245, 199, 106, 0.12), 0 8px 30px rgba(0, 0, 0, 0.6);
-  --glow-a: rgba(245, 199, 106, 0.28);
-  --glow-b: rgba(89, 224, 200, 0.2);
-  --glass-blur: 0px;
-}
-
-/* ---------- 变体 C：暖月卡片（亮色 + 粉 + 暖橙） ---------- */
-#app[data-variant="C"] {
-  --bg: #f6f1ea;
-  --bg-grad-a: #f6f1ea;
-  --bg-grad-b: #efe6da;
-  --panel: #ffffff;
-  --panel-solid: #ffffff;
-  --border: #e7dccc;
-  --text: #2c2638;
-  --text-dim: #8a8298;
-  --accent: #fb7299;
-  --accent-ink: #ffffff;
-  --accent-2: #ff9e64;
-  --ok: #22a06b;
-  --danger: #e5484d;
-  --radius: 14px;
-  --radius-sm: 10px;
-  --radius-pill: 999px;
-  --shadow: 0 12px 30px rgba(90, 70, 50, 0.14);
-  --glow-a: rgba(251, 114, 153, 0.22);
-  --glow-b: rgba(255, 158, 100, 0.2);
-  --glass-blur: 0px;
-  color-scheme: light;
-}
-
 * { box-sizing: border-box; }
 
 html, body {
@@ -103,7 +53,6 @@ body {
     radial-gradient(1000px 700px at -10% 110%, var(--glow-b), transparent 60%),
     linear-gradient(160deg, var(--bg-grad-a), var(--bg-grad-b));
   background-attachment: fixed;
-  transition: background 0.35s ease;
 }
 
 #app { min-height: 100vh; }
@@ -184,7 +133,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 }
 
 /* ============================================================
-   落地页（三个变体共享 morph 骨架，只换视觉参数）
+   落地页
    ============================================================ */
 .landing { min-height: 100vh; display: flex; flex-direction: column; padding: 18px 20px 28px; }
 .landing-top { display: flex; justify-content: flex-end; gap: 8px; }
@@ -261,81 +210,45 @@ button.start:hover { transform: translateY(-1px); }
 .landing-foot { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin: 0; color: var(--text-dim); font-size: 12px; text-align: center; }
 
 /* ============================================================
-   外壳（三套结构，按变体显隐）
+   外壳（月夜玻璃：图标标题栏 + 帖子 + FAB）
    ============================================================ */
 .shell { display: none; }
 #app[data-stage="shell"] .shell { display: block; }
 #app[data-stage="shell"] .landing { display: none; }
 
-.layout { display: none; }
-#app[data-variant="A"] .layout-A { display: block; }
-#app[data-variant="B"] .layout-B { display: block; }
-#app[data-variant="C"] .layout-C { display: block; }
-
 .shell-inner { max-width: 1080px; margin: 0 auto; padding: 18px 20px 96px; }
 
-/* ---- 变体 A：顶部标题栏 + 分区胶囊 + 右下 FAB ---- */
-.layout-A .bar {
+.bar {
   position: sticky; top: 12px; z-index: 10;
   display: flex; align-items: center; gap: 14px;
   padding: 10px 14px; border-radius: var(--radius);
   background: color-mix(in srgb, var(--panel-solid) 72%, transparent);
   backdrop-filter: blur(var(--glass-blur)); border: 1px solid var(--border);
 }
-.layout-A .brand { order: 2; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; text-decoration: none; color: var(--text); }
-.layout-A .zones { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.layout-A .zones-left { order: 1; flex: 1; justify-content: flex-end; }
-.layout-A .zones-right { order: 3; flex: 1; justify-content: flex-start; }
-.layout-A .zone-pill {
-  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
-  border-radius: var(--radius-pill); border: 1px solid transparent; color: var(--text-dim);
-  text-decoration: none; cursor: pointer;
-}
-.layout-A .zone-pill:hover { color: var(--text); border-color: var(--border); }
-.layout-A .zone-pill.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 
-/* ---- 变体 B：左侧图标 Dock ---- */
-.layout-B .shell-inner { display: grid; grid-template-columns: 64px 1fr; gap: 18px; max-width: 1080px; }
-.layout-B .dock {
-  position: sticky; top: 16px; align-self: start; height: calc(100vh - 32px);
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  padding: 12px 8px; border-radius: var(--radius);
-  background: var(--panel-solid); border: 1px solid var(--border);
+/* 月喵：放大 1.5 倍（16px → 24px），居中 */
+.brand {
+  order: 2; flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 8px;
+  font-weight: 700; font-size: 24px; text-decoration: none; color: var(--text);
 }
-.layout-B .dock-brand { margin-bottom: 10px; color: var(--accent); }
-.layout-B .dock-btn {
+
+/* icon-first 分区导航：只有图标，无文字（aria-label + tooltip） */
+.zones { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.zones-left { order: 1; flex: 1; justify-content: flex-end; }
+.zones-right { order: 3; flex: 1; justify-content: flex-start; }
+
+.zone-pill {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 42px; height: 42px; padding: 0; border-radius: 50%;
-  background: transparent; border: 1px solid transparent; color: var(--text-dim); line-height: 0;
+  width: 36px; height: 36px; padding: 0; border-radius: 50%;
+  border: 1px solid transparent; color: var(--text-dim);
+  text-decoration: none; line-height: 0;
 }
-.layout-B .dock-btn:hover { color: var(--text); border-color: var(--border); }
-.layout-B .dock-btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: 0 0 18px var(--glow-a); }
-.layout-B .dock-spacer { flex: 1; }
-.layout-B .dock-plus {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 42px; height: 42px; padding: 0; border-radius: 50%;
-  background: var(--accent); border: 1px solid var(--accent); color: var(--accent-ink); line-height: 0;
-}
-.layout-B .main { min-width: 0; }
+.zone-pill:hover { color: var(--text); border-color: var(--border); }
+.zone-pill.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 
-/* ---- 变体 C：顶栏 + 分区 tab + 右下 FAB（亮色卡片） ---- */
-.layout-C .bar {
-  display: flex; align-items: center; gap: 14px; padding: 8px 4px 12px; border-bottom: 1px solid var(--border);
-}
-.layout-C .tabs { display: flex; align-items: center; gap: 4px; }
-.layout-C .tabs-left { order: 1; flex: 1; justify-content: flex-end; }
-.layout-C .tabs-right { order: 3; flex: 1; justify-content: flex-start; }
-.layout-C .brand { order: 2; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; color: var(--text); text-decoration: none; }
-.layout-C .tab {
-  padding: 8px 16px; border-radius: var(--radius-sm); color: var(--text-dim);
-  text-decoration: none; cursor: pointer; font-weight: 600;
-}
-.layout-C .tab:hover { color: var(--text); }
-.layout-C .tab.active { background: var(--accent); color: var(--accent-ink); }
-
-/* ---- FAB（A/C 右下浮动；B 集成在 Dock） ---- */
-.fab { position: relative; }
-.layout-A .fab, .layout-C .fab { position: fixed; right: 22px; bottom: 84px; z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+/* FAB（右下浮动） */
+.fab { position: fixed; right: 22px; bottom: 84px; z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .fab-toggle {
   display: inline-flex; align-items: center; justify-content: center;
   width: 48px; height: 48px; padding: 0; border-radius: 50%;
@@ -350,23 +263,16 @@ button.start:hover { transform: translateY(-1px); }
 }
 .fab-action:hover { border-color: var(--accent); color: var(--accent); }
 
-/* ---- 帖子流（三变体各自结构） ---- */
+/* 帖子流 */
 .section-head { display: flex; align-items: center; gap: 8px; margin: 18px 0 14px; }
 .section-head h2 { margin: 0; font-size: 16px; }
 
-.feed-A, .feed-C { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.feed-B { display: flex; flex-direction: column; gap: 0; }
+.feed { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 760px) { .feed { grid-template-columns: minmax(0, 1fr); } }
 
-.post { display: flex; flex-direction: column; gap: 10px; }
-.feed-A .post, .feed-C .post { padding: 14px; border-radius: var(--radius); border: 1px solid var(--border); }
-.feed-A .post { background: color-mix(in srgb, var(--panel-solid) 72%, transparent); backdrop-filter: blur(var(--glass-blur)); }
-.feed-C .post { background: var(--panel); box-shadow: var(--shadow); }
-.feed-B .post { padding: 14px 14px 14px 16px; border-left: 2px solid var(--border); }
-.feed-B .post:hover { border-left-color: var(--accent); background: var(--panel); }
-
+.post { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: var(--radius); border: 1px solid var(--border); background: color-mix(in srgb, var(--panel-solid) 72%, transparent); backdrop-filter: blur(var(--glass-blur)); }
 .post-head { display: flex; align-items: center; gap: 10px; }
 .post-avatar { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; color: #fff; font-weight: 700; font-size: 13px; flex: none; }
-.feed-B .post-avatar { border-radius: var(--radius-sm); }
 .post-meta { display: flex; flex-direction: column; min-width: 0; }
 .post-author { font-weight: 600; }
 .post-time { font-size: 12px; color: var(--text-dim); }
@@ -376,7 +282,7 @@ button.start:hover { transform: translateY(-1px); }
 .post-stat { display: inline-flex; align-items: center; gap: 5px; color: var(--text-dim); font-size: 12px; }
 
 /* ============================================================
-   原型 chrome（明显不是被评估的设计本身）
+   原型 chrome（非设计本身）
    ============================================================ */
 .meta {
   position: fixed; bottom: 16px; left: 12px; z-index: 50;
@@ -392,22 +298,6 @@ button.start:hover { transform: translateY(-1px); }
   font-family: 'Cascadia Mono', Consolas, monospace;
 }
 
-.switcher {
-  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 40;
-  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
-  border-radius: var(--radius-pill);
-  background: rgba(10, 10, 16, 0.92); color: #eef2ff;
-  border: 1px solid rgba(255, 255, 255, 0.14); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-}
-.switcher button {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px; padding: 0; border-radius: 50%;
-  background: #1b1d26; border: 1px solid #2c2f3a; color: #eef2ff; font-size: 16px; line-height: 1;
-}
-.switcher button:hover { border-color: #f5c76a; }
-.switcher-label { min-width: 150px; text-align: center; font-size: 13px; font-weight: 600; }
-.switcher-hint { font-size: 11px; color: #8b91a3; }
-
 /* 降级：系统要求减少动效 */
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
@@ -415,7 +305,7 @@ button.start:hover { transform: translateY(-1px); }
 </style>
 </head>
 <body>
-<div id="app" data-variant="A" data-stage="landing">
+<div id="app" data-stage="landing">
   <!-- ==================== 落地页 ==================== -->
   <section class="landing">
     <div class="landing-top">
@@ -459,90 +349,35 @@ button.start:hover { transform: translateY(-1px); }
     <p class="landing-foot">看片不需要账号，有房间码就能进</p>
   </section>
 
-  <!-- ==================== 外壳（三套结构） ==================== -->
+  <!-- ==================== 外壳（icon-first 标题栏 + 帖子） ==================== -->
   <section class="shell">
-    <!-- 变体 A：顶部标题栏 + 分区胶囊 + 右下 FAB -->
-    <div class="layout layout-A">
-      <div class="shell-inner">
-        <header class="bar">
-          <nav class="zones zones-left" aria-label="站点分区（左）">
-            <a class="zone-pill" href="#"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg> 房间室</a>
-            <a class="zone-pill" href="#"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg> 番剧论坛</a>
-          </nav>
-          <a class="brand" href="#"><svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg> 月喵</a>
-          <nav class="zones zones-right" aria-label="站点分区（右）">
-            <a class="zone-pill active" href="#"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> 帖子</a>
-            <a class="zone-pill" href="#"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> 消息</a>
-            <span class="avatar" aria-label="我的主页（月夜猫）" data-tip="我的主页（月夜猫）">月</span>
-          </nav>
-        </header>
-
-        <div class="section-head"><svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><h2>帖子</h2></div>
-        <div class="feed feed-A"></div>
-
-        <div class="fab" id="fab-A">
-          <button type="button" class="fab-toggle" aria-expanded="false" aria-controls="fab-A-actions" aria-label="展开快捷操作（新建房间 / 发送帖子 / 添加番剧）" data-tip="新建房间 / 发送帖子 / 添加番剧">
-            <svg class="ic" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          </button>
-          <div class="fab-actions" id="fab-A-actions" aria-hidden="true">
-            <button type="button" class="fab-action" aria-label="新建房间" data-tip="新建房间"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
-            <button type="button" class="fab-action" aria-label="发送帖子" data-tip="发送帖子"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></button>
-            <button type="button" class="fab-action" aria-label="添加番剧" data-tip="添加番剧"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 变体 B：左侧图标 Dock -->
-    <div class="layout layout-B">
-      <div class="shell-inner">
-        <nav class="dock" aria-label="站点分区（图标）">
-          <span class="dock-brand"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></span>
-          <button type="button" class="dock-btn" aria-label="房间室" data-tip="房间室"><svg class="ic" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
-          <button type="button" class="dock-btn" aria-label="番剧论坛" data-tip="番剧论坛"><svg class="ic" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></button>
-          <button type="button" class="dock-btn active" aria-label="帖子" data-tip="帖子"><svg class="ic" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></button>
-          <button type="button" class="dock-btn" aria-label="消息" data-tip="消息"><svg class="ic" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
-          <div class="dock-spacer"></div>
-          <button type="button" class="dock-btn" aria-label="管理界面" data-tip="管理界面"><svg class="ic" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></button>
-          <button type="button" class="dock-plus" aria-label="新建房间" data-tip="新建房间"><svg class="ic" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-          <span class="avatar" aria-label="我的主页（月夜猫）" data-tip="我的主页（月夜猫）">月</span>
+    <div class="shell-inner">
+      <header class="bar">
+        <nav class="zones zones-left" aria-label="站点分区（左）">
+          <a class="zone-pill" href="#" aria-label="房间室" data-tip="房间室"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></a>
+          <a class="zone-pill" href="#" aria-label="番剧论坛" data-tip="番剧论坛"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></a>
         </nav>
 
-        <main class="main">
-          <div class="section-head"><svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><h2>帖子</h2></div>
-          <div class="feed feed-B"></div>
-        </main>
-      </div>
-    </div>
+        <a class="brand" href="#"><svg class="ic" width="30" height="30" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg> 月喵</a>
 
-    <!-- 变体 C：顶栏 + 分区 tab + 右下 FAB -->
-    <div class="layout layout-C">
-      <div class="shell-inner">
-        <header class="bar">
-          <nav class="tabs tabs-left" aria-label="站点分区（左）">
-            <a class="tab" href="#">房间室</a>
-            <a class="tab" href="#">番剧论坛</a>
-          </nav>
-          <a class="brand" href="#"><svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg> 月喵</a>
-          <nav class="tabs tabs-right" aria-label="站点分区（右）">
-            <a class="tab active" href="#">帖子</a>
-            <a class="tab" href="#">消息</a>
-            <span class="avatar" aria-label="我的主页（月夜猫）" data-tip="我的主页（月夜猫）">月</span>
-          </nav>
-        </header>
+        <nav class="zones zones-right" aria-label="站点分区（右）">
+          <a class="zone-pill active" href="#" aria-label="帖子" data-tip="帖子"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></a>
+          <a class="zone-pill" href="#" aria-label="消息" data-tip="消息"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></a>
+          <span class="avatar" aria-label="我的主页（月夜猫）" data-tip="我的主页（月夜猫）">月</span>
+        </nav>
+      </header>
 
-        <div class="section-head"><svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><h2>帖子</h2></div>
-        <div class="feed feed-C"></div>
+      <div class="section-head"><svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><h2>帖子</h2></div>
+      <div class="feed" id="feed"></div>
 
-        <div class="fab" id="fab-C">
-          <button type="button" class="fab-toggle" aria-expanded="false" aria-controls="fab-C-actions" aria-label="展开快捷操作（新建房间 / 发送帖子 / 添加番剧）" data-tip="新建房间 / 发送帖子 / 添加番剧">
-            <svg class="ic" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          </button>
-          <div class="fab-actions" id="fab-C-actions" aria-hidden="true">
-            <button type="button" class="fab-action" aria-label="新建房间" data-tip="新建房间"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
-            <button type="button" class="fab-action" aria-label="发送帖子" data-tip="发送帖子"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></button>
-            <button type="button" class="fab-action" aria-label="添加番剧" data-tip="添加番剧"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
-          </div>
+      <div class="fab" id="fab">
+        <button type="button" class="fab-toggle" aria-expanded="false" aria-controls="fab-actions" aria-label="展开快捷操作（新建房间 / 发送帖子 / 添加番剧）" data-tip="新建房间 / 发送帖子 / 添加番剧">
+          <svg class="ic" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <div class="fab-actions" id="fab-actions" aria-hidden="true">
+          <button type="button" class="fab-action" aria-label="新建房间" data-tip="新建房间"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></button>
+          <button type="button" class="fab-action" aria-label="发送帖子" data-tip="发送帖子"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></button>
+          <button type="button" class="fab-action" aria-label="添加番剧" data-tip="添加番剧"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
         </div>
       </div>
     </div>
@@ -552,32 +387,16 @@ button.start:hover { transform: translateY(-1px); }
 <!-- 原型 meta（非设计本身） -->
 <div class="meta">
   <span class="meta-badge">PROTOTYPE · 抛弃式</span>
-  <span class="meta-line" id="state-line">variant=A stage=landing motion=on</span>
-</div>
-
-<!-- 底部悬浮切换器 -->
-<div class="switcher" aria-label="原型变体切换器">
-  <button type="button" id="sw-prev" aria-label="上一个变体">←</button>
-  <span class="switcher-label" id="sw-label">A — 月夜玻璃</span>
-  <button type="button" id="sw-next" aria-label="下一个变体">→</button>
-  <span class="switcher-hint" id="sw-hint">←/→ 切换</span>
+  <span class="meta-line" id="state-line">stage=landing motion=on</span>
 </div>
 
 <script>
 (function () {
   'use strict'
 
-  var VARIANTS = {
-    A: { key: 'A', name: '月夜玻璃' },
-    B: { key: 'B', name: '极简夜光' },
-    C: { key: 'C', name: '暖月卡片' }
-  }
-  var ORDER = ['A', 'B', 'C']
   var STAGES = { landing: '落地页', auth: '登录窗', shell: '外壳/帖子' }
-
   var app = document.getElementById('app')
   var stateLine = document.getElementById('state-line')
-  var swLabel = document.getElementById('sw-label')
 
   // ---------- 帖子占位数据（假数据，图片槽位用渐变占位） ----------
   var POSTS = [
@@ -598,9 +417,7 @@ button.start:hover { transform: translateY(-1px); }
   }
 
   function postHTML(p) {
-    var media = p.img
-      ? '<div class="post-media">动图槽位（占位）</div>'
-      : ''
+    var media = p.img ? '<div class="post-media">动图槽位（占位）</div>' : ''
     return (
       '<article class="post">' +
         '<div class="post-head">' +
@@ -618,32 +435,7 @@ button.start:hover { transform: translateY(-1px); }
   }
 
   function renderPosts() {
-    var html = POSTS.map(postHTML).join('')
-    var feeds = document.querySelectorAll('.feed')
-    for (var i = 0; i < feeds.length; i++) feeds[i].innerHTML = html
-  }
-
-  // ---------- 变体状态 ----------
-  function variantFromURL() {
-    var m = /[?&]variant=([ABC])/.exec(location.search)
-    return m ? m[1] : 'A'
-  }
-
-  function setVariant(key, updateURL) {
-    app.dataset.variant = key
-    swLabel.textContent = key + ' — ' + VARIANTS[key].name
-    if (updateURL !== false) {
-      var u = new URL(location.href)
-      u.searchParams.set('variant', key)
-      history.replaceState(null, '', u)
-    }
-    renderState()
-  }
-
-  function cycleVariant(dir) {
-    var idx = ORDER.indexOf(app.dataset.variant)
-    idx = (idx + dir + ORDER.length) % ORDER.length
-    setVariant(ORDER[idx])
+    document.getElementById('feed').innerHTML = POSTS.map(postHTML).join('')
   }
 
   // ---------- 阶段状态 ----------
@@ -666,24 +458,20 @@ button.start:hover { transform: translateY(-1px); }
     window.scrollTo(0, 0)
   }
 
-  // 深链：?stage=landing|auth|shell 可直接跳到某阶段（便于作者只看外壳/帖子，不用每次点过登录）。
+  // 深链：?stage=landing|auth|shell 可直接跳到某阶段。
   function stageFromURL() {
     var m = /[?&]stage=(landing|auth|shell)/.exec(location.search)
     return m ? m[1] : 'landing'
   }
 
-  // ---------- 状态外显 ----------
   function reducedMotion() {
     return window.matchMedia('(prefers-reduced-motion: reduce)').matches
   }
 
   function renderState() {
-    var v = app.dataset.variant
     var s = app.dataset.stage
     var motion = reducedMotion() ? 'off' : 'on'
-    stateLine.textContent =
-      'variant=' + v + ' (' + VARIANTS[v].name + ')  stage=' + s + ' (' + STAGES[s] + ')  motion=' + motion +
-      '  ?variant=' + v
+    stateLine.textContent = 'stage=' + s + ' (' + STAGES[s] + ')  motion=' + motion
   }
 
   // ---------- 事件 ----------
@@ -691,21 +479,12 @@ button.start:hover { transform: translateY(-1px); }
     setStage(app.dataset.stage === 'auth' ? 'landing' : 'auth')
   })
 
-  document.getElementById('auth-close').addEventListener('click', function () {
-    setStage('landing')
-  })
+  document.getElementById('auth-close').addEventListener('click', function () { setStage('landing') })
 
-  document.getElementById('auth-form').addEventListener('submit', function (e) {
-    e.preventDefault()
-    enterShell()
-  })
+  document.getElementById('auth-form').addEventListener('submit', function (e) { e.preventDefault(); enterShell() })
 
   document.getElementById('direct-entry').addEventListener('click', enterShell)
 
-  document.getElementById('sw-prev').addEventListener('click', function () { cycleVariant(-1) })
-  document.getElementById('sw-next').addEventListener('click', function () { cycleVariant(1) })
-
-  // FAB 展开（A / C 共用一套行为；B 的 dock-plus 无需展开，保留即可）
   document.querySelectorAll('.fab-toggle').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var fab = btn.closest('.fab')
@@ -714,22 +493,12 @@ button.start:hover { transform: translateY(-1px); }
     })
   })
 
-  // 键盘 ←/→ 切换变体；输入框聚焦时不拦截
-  document.addEventListener('keydown', function (e) {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
-    var t = e.target
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
-    cycleVariant(e.key === 'ArrowRight' ? 1 : -1)
-  })
-
-  // 动效偏好变化时刷新状态外显
   if (window.matchMedia) {
     window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', renderState)
   }
 
   // ---------- 启动 ----------
   renderPosts()
-  setVariant(variantFromURL(), false)
   setStage(stageFromURL())
 })()
 </script>
