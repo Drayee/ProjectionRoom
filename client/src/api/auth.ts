@@ -20,8 +20,16 @@ export interface AuthUser {
   id: number
   username: string
   displayName: string
-  /** 预留字段，本期不验证；服务端可能给 null，这里统一归一成空串。 */
+  /** 账号邮箱；服务端可能给 null（未绑定），这里统一归一成空串。 */
   email: string
+  /**
+   * 邮箱是否已验证。
+   *
+   * **可选字段**是刻意的：服务端的 `usecase.Profile` 目前还没有这个键，
+   * 写成必填会让"服务端没返回"与"确实未验证"在类型层面被抹平 —— 而界面
+   * 要显示的恰恰是"服务端未返回验证状态"（不编造结论）。
+   */
+  emailVerified?: boolean
   /** user | admin；**只决定显示什么**，授权 100% 在服务端（规格不变量 I3）。 */
   role: string
   /** active | banned。 */
@@ -46,6 +54,33 @@ export interface RegisterInput {
   username: string
   displayName: string
   password: string
+  /**
+   * 邮箱（**必填**）：它只在两处有用 —— 找回密码、以及管理端改邮箱后的验证标记。
+   * 不拿它做登录标识（登录仍走用户名），所以它在注册流程里不参与任何本地授权判断。
+   */
+  email: string
+}
+
+/** POST /api/auth/forgot 的请求体：只要邮箱。 */
+export interface ForgotInput {
+  email: string
+}
+
+/** POST /api/auth/forgot 的成功体。契约固定为 `{"status":"sent"}`。 */
+export interface ForgotResult {
+  /** `sent` = 请求已被受理。**它不代表"该邮箱存在"**（见 forgot() 的说明）。 */
+  status: string
+}
+
+/** POST /api/auth/reset 的请求体。token 只在这里（请求体），绝不进 URL。 */
+export interface ResetInput {
+  token: string
+  password: string
+}
+
+/** POST /api/auth/verify-email 的请求体。 */
+export interface VerifyEmailInput {
+  token: string
 }
 
 export interface LoginInput {
@@ -134,17 +169,24 @@ function asString(raw: unknown): string {
 
 function normalizeUser(raw: unknown): AuthUser {
   const user = (raw ?? {}) as Partial<AuthUser>
-  return {
+  const normalized: AuthUser = {
     id: typeof user.id === 'number' ? user.id : 0,
     username: asString(user.username),
     displayName: asString(user.displayName),
-    // email 允许为 null（预留字段）：归一成空串，界面就不用处理两种"空"。
+    // email 允许为 null（未绑定）：归一成空串，界面就不用处理两种"空"。
     email: asString(user.email),
     role: asString(user.role) || 'user',
     status: asString(user.status) || 'active',
     // 服务端给的是 RFC3339；缺失时留空串（界面负责说"服务端未返回"，不在这里编时间）。
     createdAt: asString(user.createdAt),
   }
+  // emailVerified 是**可选**键：只有服务端真的返回布尔值时才有值。
+  // 缺它就保持 undefined —— 界面据此显示"服务端未返回验证状态"，
+  // 而不是把"字段不存在"谎报成"未验证"。
+  if (typeof user.emailVerified === 'boolean') {
+    normalized.emailVerified = user.emailVerified
+  }
+  return normalized
 }
 
 function normalizeSession(raw: unknown): AuthSession {
@@ -274,4 +316,41 @@ export async function wsTicket(token: string): Promise<WsTicket> {
     throw new AuthApiError({ status: 0, code: 'AUTH_BAD_RESPONSE', message: '服务端响应缺少 ticket' })
   }
   return { ticket, expiresIn: typeof body?.expiresIn === 'number' ? body.expiresIn : 0 }
+}
+
+// ---------- 找回密码 / 重置 / 验证邮箱（三条都是**匿名**端点，不带 Authorization）----------
+
+/**
+ * POST /api/auth/forgot —— 申请重置邮件。
+ *
+ * **不泄露账号是否存在是服务端的契约**：邮箱不存在时它同样返回 200 与同一个响应体
+ * （所以这里的成功**不代表**"该邮箱已注册"）。前端必须与它保持同一口径 ——
+ * 界面文案只写中性表述，绝不出现"已发送到 x@y"这类回显。
+ *
+ * 三种失败要分开（调用方按 `status` 分诊，不靠文案匹配）：
+ *   400 邮箱格式不合法；429 限速；503 邮件能力未配置。
+ */
+export async function forgot(input: ForgotInput): Promise<ForgotResult> {
+  const body = (await request('forgot', { method: 'POST', body: input })) as Partial<ForgotResult> | null
+  return { status: asString(body?.status) }
+}
+
+/**
+ * POST /api/auth/reset —— 用一次性 token 改密码。成功是 **204**（无响应体）。
+ *
+ * 失败分诊靠 `AuthApiError.code`：
+ *   `RESET_TOKEN_INVALID` = 非法 / 过期 / 已用过（服务端对三者给同一个码，刻意不区分）；
+ *   400 且不是该码 = 弱密码，服务端文案原样展示。
+ */
+export async function reset(input: ResetInput): Promise<void> {
+  await request('reset', { method: 'POST', body: input })
+}
+
+/**
+ * POST /api/auth/verify-email —— 用一次性 token 完成邮箱验证。成功是 **204**。
+ *
+ * 失败：`VERIFY_TOKEN_INVALID` = 非法 / 过期 / 已用过（同样同码）。
+ */
+export async function verifyEmail(input: VerifyEmailInput): Promise<void> {
+  await request('verify-email', { method: 'POST', body: input })
 }

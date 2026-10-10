@@ -94,6 +94,9 @@ function readStoredProfile(): AuthProfile | null {
     username,
     displayName: typeof value.displayName === 'string' && value.displayName !== '' ? value.displayName : username,
     email: typeof value.email === 'string' ? value.email : '',
+    // 验证状态是**可选**的：老缓存里没有这个键。缺就保持 undefined（界面显示"服务端未返回"），
+    // 绝不把"缓存里没有"当成 false —— 那会把"不知道"谎报成"未验证"。
+    ...(typeof value.emailVerified === 'boolean' ? { emailVerified: value.emailVerified } : {}),
     role: typeof value.role === 'string' ? value.role : 'user',
     status: typeof value.status === 'string' ? value.status : 'active',
     // 加入时间：老缓存里没有这个键（它是后加的），缺就留空串 —— 用户详情页会显示"服务端未返回"，
@@ -159,6 +162,11 @@ export const useAuthStore = defineStore('auth', () => {
    *
    * 三处一起清：内存 ref、sessionStorage、localStorage 里的档案。
    * 少清任何一处，"登出"就只是看起来登出了。
+   *
+   * 对外导出（名字 `clearSession`）：**密码重置成功**也必须走这一条 —— 旧的
+   * access token / 档案是改密码之前的凭据，留着就等于"改了密码却还是登录态"。
+   * 复用同一条清理逻辑而不是在新页面里再抄一遍，是为了保住"少清一处就只是看起来退出了"
+   * 这个教训（将来加一处存储时，只有一份代码需要改）。
    */
   function clearSession(): void {
     accessToken.value = ''
@@ -355,6 +363,7 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     register,
     logout,
+    clearSession,
     authedFetch,
     ensureLoggedIn,
     redirectToLogin,

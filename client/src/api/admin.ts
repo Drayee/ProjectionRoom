@@ -23,6 +23,11 @@ export interface AdminUser {
   username: string
   displayName: string
   email: string
+  /**
+   * 邮箱是否已验证。**可选**：服务端的 `usecase.Profile` 目前可能不返回这个键，
+   * 写成必填会把"字段不存在"与"确实未验证"抹平（界面要显示的恰恰是这个区别）。
+   */
+  emailVerified?: boolean
   role: string
   status: string
   createdAt: string
@@ -36,10 +41,18 @@ export interface AdminUserPage {
   offset: number
 }
 
-/** 管理端改用户：role / status 至少一个；reason 只进审计明细。 */
+/**
+ * 管理端改用户：role / status 至少一个；reason 只进审计明细。
+ *
+ * 本轮新增 `email`：服务端在写库时会把该邮箱标记为**已验证**（管理员代改 = 已验证）。
+ * 它单独走 `patchUserEmail`（不与 role/status 混在一次请求里），因为它的语义不同：
+ * 改角色/封禁是**权限与状态**变更，改邮箱是**身份标识**变更，两者的确认文案与错误
+ * 处理都不一样，混在一起只会让"这次到底改了什么"变得不清晰。
+ */
 export interface AdminUserPatch {
   role?: string
   status?: string
+  email?: string
   reason?: string
 }
 
@@ -133,7 +146,7 @@ function asBool(raw: unknown): boolean {
 
 function normalizeUser(raw: unknown): AdminUser {
   const u = (raw ?? {}) as Record<string, unknown>
-  return {
+  const normalized: AdminUser = {
     id: asNumber(u.id),
     username: asString(u.username),
     displayName: asString(u.displayName),
@@ -143,6 +156,12 @@ function normalizeUser(raw: unknown): AdminUser {
     createdAt: asString(u.createdAt),
     lastSeenAt: asString(u.lastSeenAt),
   }
+  // 只有服务端真的返回布尔值时才有值：缺它就保持 undefined（界面显示"未返回"，
+  // 而不是把"字段不存在"谎报成"未验证"）。
+  if (typeof u.emailVerified === 'boolean') {
+    normalized.emailVerified = u.emailVerified
+  }
+  return normalized
 }
 
 function normalizeRoom(raw: unknown): AdminRoom {
@@ -215,6 +234,27 @@ export async function patchUser(
   await requestJSON<Record<string, unknown>>(authedFetch, `/api/admin/users/${userId}`, {
     method: 'PATCH',
     body: patch,
+    redirectOnAuthFailure: false,
+  })
+}
+
+/**
+ * PATCH /api/admin/users/:id —— **绑定 / 修改邮箱**（危险操作，调用方必须二次确认）。
+ *
+ * 服务端会把这样写进去的邮箱标记为**已验证**（管理员代改视为已验证）——所以确认框里
+ * 必须把这句话说出来：用户不会自己想到"管理员填的邮箱为什么是已验证的"。
+ *
+ * 单独一个函数而不是给 `patchUser` 传 `{email}`：见 `AdminUserPatch` 的说明。
+ * `email` 走服务端校验（格式不合法返回 400，文案原样展示），前端不自己先判死。
+ */
+export async function patchUserEmail(
+  authedFetch: AuthedFetch,
+  userId: number,
+  email: string,
+): Promise<void> {
+  await requestJSON<Record<string, unknown>>(authedFetch, `/api/admin/users/${userId}`, {
+    method: 'PATCH',
+    body: { email } satisfies AdminUserPatch,
     redirectOnAuthFailure: false,
   })
 }

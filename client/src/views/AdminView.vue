@@ -39,12 +39,27 @@ const TABS: Array<{ key: AdminSection; text: string; icon: string }> = [
  * 后者在列表刷新之后会与行脱钩（确认框还开着，但那一行已经没了）。
  * 确认动作本身就是一次状态机转移（idle → confirm → 执行 → idle）。
  */
-type PendingAction = { kind: 'ban' | 'unban' | 'role' | 'close' | 'unpublish'; key: string; label: string; detail: string }
+type PendingAction = {
+  kind: 'ban' | 'unban' | 'role' | 'email' | 'close' | 'unpublish'
+  key: string
+  label: string
+  detail: string
+  /**
+   * 只有 `email` 用：确认框里输入的初始值（当前邮箱，没有就空串）。
+   *
+   * 放在 pending 里而不是另开一个 ref 同步，是因为"确认的是哪一行、输入框该显示什么"
+   * 必须同生同死：列表刷新后行会变，两个状态分开放迟早会对不上（曾经踩到的正是
+   * "确认框还开着，但那一行已经没了"）。
+   */
+  initial?: string
+}
 const pending = ref<PendingAction | null>(null)
 /** 改角色时需要选目标角色，因此单独一个下拉值。 */
 const roleTarget = ref('user')
 /** 封禁原因（进审计明细，可留空）。 */
 const reason = ref('')
+/** 改邮箱时输入的新邮箱（危险操作：服务端会把这样写进去的邮箱标为已验证）。 */
+const emailDraft = ref('')
 
 const activeTab = computed(() => TABS.find((tab) => tab.key === store.section) ?? TABS[0]!)
 
@@ -55,6 +70,7 @@ onMounted(() => {
 function ask(action: PendingAction) {
   reason.value = ''
   roleTarget.value = 'user'
+  emailDraft.value = action.initial ?? ''
   pending.value = action
 }
 
@@ -73,7 +89,9 @@ async function confirm() {
   if (!action) return
   const user = store.users.items.find((u) => `user:${u.id}` === action.key)
   const room = store.rooms.items.find((r) => `room:${r.roomId}` === action.key)
-  if ((action.kind === 'ban' || action.kind === 'unban' || action.kind === 'role') && !user) {
+  const isUserAction =
+    action.kind === 'ban' || action.kind === 'unban' || action.kind === 'role' || action.kind === 'email'
+  if (isUserAction && !user) {
     pending.value = null
     return
   }
@@ -85,6 +103,7 @@ async function confirm() {
   if (action.kind === 'ban') await store.setUserStatus(user as AdminUser, 'banned', reason.value.trim())
   else if (action.kind === 'unban') await store.setUserStatus(user as AdminUser, 'active', reason.value.trim())
   else if (action.kind === 'role') await store.setUserRole(user as AdminUser, roleTarget.value, reason.value.trim())
+  else if (action.kind === 'email') await store.setUserEmail(user as AdminUser, emailDraft.value.trim())
   else if (action.kind === 'close') await store.closeRoom(room as AdminRoom)
   else await store.unpublishRoom(room as AdminRoom)
 
@@ -109,6 +128,27 @@ function askRole(user: AdminUser) {
     key: `user:${user.id}`,
     label: `修改 ${user.username} 的角色`,
     detail: `当前角色：${user.role}。管理员可以管理全部用户、房间、日志与审计，请谨慎授予。`,
+  })
+}
+
+/**
+ * 绑定 / 修改邮箱（危险操作）。
+ *
+ * 确认框里必须写清两件用户不会自己想到的事：
+ *   1. **服务端会把这个邮箱标记为已验证** —— 管理员代改就是"已验证"的来源，
+ *      将来用户拿它找回密码时不会再收到验证邮件；
+ *   2. 旧邮箱会被替换（不是"再绑一个"），而它可能是该用户唯一的找回密码通道。
+ */
+function askEmail(user: AdminUser) {
+  ask({
+    kind: 'email',
+    key: `user:${user.id}`,
+    label: `修改 ${user.username} 的邮箱`,
+    initial: user.email,
+    detail:
+      user.email === ''
+        ? '该用户当前没有绑定邮箱。保存后服务端会把它标记为已验证（管理员代改视为已验证），此后可用于找回密码。'
+        : `当前邮箱：${user.email}（会被替换掉，不是并存）。保存后服务端会把它标记为已验证；若这是该用户唯一的找回密码通道，替换后旧邮箱立刻失效。`,
   })
 }
 
@@ -150,6 +190,24 @@ function roomBusy(room: AdminRoom): boolean {
 
 function userBusy(user: AdminUser): boolean {
   return store.busyKey.startsWith(`user:${user.id}:`)
+}
+
+/**
+ * 邮箱单元格的文字。
+ *
+ * 三种"空"必须分开（否则排障时会看错）：
+ *   没绑 → `未绑定`；绑了没验证 → 邮箱 + `未验证`；绑了已验证 → 邮箱 + `已验证`。
+ * 服务端尚未返回 `emailVerified` 时显示 `验证状态未返回` —— **不把"不知道"说成"未验证"**。
+ */
+function emailCell(user: AdminUser): string {
+  if (user.email.trim() === '') return '未绑定'
+  return user.email
+}
+
+function emailStateText(user: AdminUser): string {
+  if (user.email.trim() === '') return ''
+  if (user.emailVerified === undefined) return '验证状态未返回'
+  return user.emailVerified ? '已验证' : '未验证'
 }
 </script>
 
@@ -247,6 +305,24 @@ function userBusy(user: AdminUser): boolean {
           <option value="user">user</option>
           <option value="admin">admin</option>
         </select>
+        <!-- 改邮箱：输入框初值是**当前邮箱**（改一半更常见），但提交的是这里的内容。 -->
+        <template v-if="pending.kind === 'email'">
+          <label for="admin-user-email-input">新邮箱</label>
+          <input
+            id="admin-user-email-input"
+            v-model="emailDraft"
+            name="email"
+            type="email"
+            inputmode="email"
+            autocomplete="off"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            maxlength="254"
+            placeholder="user@example.com"
+            data-testid="admin-user-email-input"
+          />
+        </template>
         <label v-if="pending.kind === 'ban' || pending.kind === 'unban' || pending.kind === 'role'" for="admin-reason">
           原因（会写进审计，可留空）
         </label>
@@ -316,6 +392,7 @@ function userBusy(user: AdminUser): boolean {
                 <tr>
                   <th>用户名</th>
                   <th>昵称</th>
+                  <th>邮箱</th>
                   <th>角色</th>
                   <th>状态</th>
                   <th>最近活跃</th>
@@ -326,6 +403,11 @@ function userBusy(user: AdminUser): boolean {
                 <tr v-for="user in store.users.items" :key="user.id" :data-testid="`admin-user-row-${user.id}`">
                   <td>{{ user.username }}</td>
                   <td>{{ user.displayName }}</td>
+                  <!-- 邮箱是用户可控文本（管理员填的），一律文本插值；验证状态单独一个小徽章。 -->
+                  <td class="email-cell" :data-testid="`admin-user-email-cell-${user.id}`">
+                    <span class="mono">{{ emailCell(user) }}</span>
+                    <span class="badge" v-if="emailStateText(user) !== ''">{{ emailStateText(user) }}</span>
+                  </td>
                   <td><span class="badge" :class="{ host: user.role === 'admin' }">{{ user.role }}</span></td>
                   <td>
                     <span class="badge" :class="user.status === 'banned' ? 'danger' : 'ok'">{{ user.status }}</span>
@@ -349,6 +431,15 @@ function userBusy(user: AdminUser): boolean {
                     >
                       <BrandIcon name="settings" decorative :size="13" />
                       改角色
+                    </button>
+                    <button
+                      type="button"
+                      :disabled="userBusy(user)"
+                      :data-testid="`admin-user-email-${user.id}`"
+                      @click="askEmail(user)"
+                    >
+                      <BrandIcon name="tips" decorative :size="13" />
+                      {{ user.email.trim() === '' ? '绑定邮箱' : '改邮箱' }}
                     </button>
                   </td>
                 </tr>
@@ -876,6 +967,17 @@ th {
   max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 邮箱列：邮箱本身 + 验证状态徽章；窄屏下邮箱可以换行，不把表格撑得更宽。 */
+.email-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: 260px;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .flags,

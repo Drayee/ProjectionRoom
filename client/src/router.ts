@@ -8,6 +8,8 @@ import PublicRoomsView from './views/PublicRoomsView.vue'
 import AdminView from './views/AdminView.vue'
 import AboutView from './views/AboutView.vue'
 import UserView from './views/UserView.vue'
+import ResetPasswordView from './views/ResetPasswordView.vue'
+import VerifyEmailView from './views/VerifyEmailView.vue'
 import ComingSoonView from './views/ComingSoonView.vue'
 
 /**
@@ -39,6 +41,20 @@ export const router = createRouter({
     { path: '/room/:roomId', name: 'room', component: RoomView, props: true },
     { path: '/login', name: 'login', component: LoginView },
     { path: '/register', name: 'register', component: RegisterView },
+    /*
+     * 邮件链接的两条落点（`/reset` 与 `/verify`）——**免登录**页面。
+     *
+     * 为什么这里**必须**自己解析 fragment：邮件里的链接形态是
+     * `<域名>/reset#token=<一次性串>`，token 刻意放在 fragment（不进 nginx 访问日志），
+     * 而本路由用的是 `createWebHistory()` —— vue-router **不消费 fragment**，
+     * 所以路由只匹配到 `/reset`，`#token=…` 得由页面挂载时自己读（见
+     * `utils/fragmentToken.ts`：读到的同时立刻把 hash 抹掉）。
+     *
+     * 为什么不做成"路由参数"（`/reset/:token`）：那样 token 会进 URL 路径 —— 进 nginx
+     * 访问日志、进 Referer、进浏览历史，与"刻意放 fragment"的初衷正好相反。
+     */
+    { path: '/reset', name: 'reset', component: ResetPasswordView },
+    { path: '/verify', name: 'verify', component: VerifyEmailView },
     // 说明页：所有长篇解释集中在这里，核心页面只留一句话 + 图标入口。
     { path: '/help', name: 'help', component: HelpView },
     // 公开房间列表（二期 T5）：**免登录**，与落地页的「直接进入放映室」是同一条路径 ——

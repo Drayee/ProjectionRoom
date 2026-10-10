@@ -282,6 +282,22 @@ export const useAdminStore = defineStore('admin', () => {
     })
   }
 
+  /**
+   * 绑定 / 修改邮箱（**危险操作**，成功提示里说明"服务端已把它标为已验证"）。
+   *
+   * 为什么不收"原因"：服务端的 PATCH 契约里 `reason` 只影响审计明细，而邮箱绑定这条路径
+   * 它的语义是"管理员代为设置"（服务端自己会写审计）。留一个收下却不发出去的参数，
+   * 只会让人以为它生效了 —— 要么真的发，要么就不收（这里选后者，理由写在注释里）。
+   */
+  async function setUserEmail(user: AdminUser, email: string): Promise<boolean> {
+    return mutate(`user:${user.id}:email`, async () => {
+      await api.patchUserEmail(auth.authedFetch, user.id, email)
+      await loadUsers(users.value.offset)
+      // 成功提示里带上新邮箱：列表刷新之后仍要能确认"改的就是这个值"。
+      return `已把 ${user.username} 的邮箱改为 ${email}（服务端已标记为已验证）`
+    })
+  }
+
   /** 强制关闭房间（房内连接会被服务端断开）。 */
   async function closeRoom(room: AdminRoom): Promise<boolean> {
     return mutate(`room:${room.roomId}:close`, async () => {
@@ -349,6 +365,7 @@ export const useAdminStore = defineStore('admin', () => {
     loadAudit,
     setUserStatus,
     setUserRole,
+    setUserEmail,
     closeRoom,
     unpublishRoom,
     hasNext,

@@ -49,6 +49,28 @@ const isSelf = computed(() => {
 
 const roleText = computed(() => (auth.profile?.role === 'admin' ? '管理员' : '普通用户'))
 
+/**
+ * 档案里的邮箱（可能为空）。
+ *
+ * 判据就一条：**服务端返回了邮箱才显示这一行**。没有邮箱时这一行整个不出现 ——
+ * 不编"未绑定 you@example.com"这类占位，也不把空串渲染成一个看起来像邮箱的东西。
+ */
+const email = computed(() => (auth.profile?.email ?? '').trim())
+
+/**
+ * 邮箱是否已验证。
+ *
+ * 三种情况必须分开，`undefined` 不是 false：
+ *   `true` → 已验证；`false` → 未验证；`undefined`（服务端还没返回这个键）→ "验证状态未返回"。
+ * 把"字段不存在"显示成"未验证"会让用户白跑一趟重新验证。
+ */
+const emailState = computed(() => {
+  const value = auth.profile?.emailVerified
+  if (value === true) return '已验证'
+  if (value === false) return '未验证'
+  return '验证状态未返回'
+})
+
 /** 加入时间：服务端给的是 RFC3339；本地按时区渲染，解析不了就照原样显示（不吞信息）。 */
 const joinedAt = computed(() => {
   const raw = auth.profile?.createdAt ?? ''
@@ -129,6 +151,14 @@ async function doLogout() {
           <dd data-testid="user-nickname">{{ auth.displayName }}</dd>
           <dt>用户名</dt>
           <dd class="mono">{{ auth.profile?.username }}</dd>
+          <!-- 邮箱只在**服务端返回了**的时候才出现（没有就不显示，不编占位）。 -->
+          <template v-if="email !== ''">
+            <dt>邮箱</dt>
+            <dd class="mono" data-testid="user-email">
+              {{ email }}
+              <span class="muted small" data-testid="user-email-verified">（{{ emailState }}）</span>
+            </dd>
+          </template>
           <dt>角色</dt>
           <dd data-testid="user-role">
             {{ roleText }}
