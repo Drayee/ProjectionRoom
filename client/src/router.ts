@@ -11,6 +11,9 @@ import UserView from './views/UserView.vue'
 import ResetPasswordView from './views/ResetPasswordView.vue'
 import VerifyEmailView from './views/VerifyEmailView.vue'
 import ComingSoonView from './views/ComingSoonView.vue'
+import PostsView from './views/PostsView.vue'
+import PostDetailView from './views/PostDetailView.vue'
+import PostEditorView from './views/PostEditorView.vue'
 
 /**
  * 路由表。
@@ -121,18 +124,18 @@ export const router = createRouter({
     {
       path: '/posts',
       name: 'posts',
-      component: ComingSoonView,
-      props: {
-        title: '帖子界面',
-        icon: 'tips',
-        summary: '帖子列表与详情：发帖、回复、引用，和论坛共用同一套帖子模型。',
-        bullets: [
-          '发帖与回复（对应快速入口里的「发送帖子」）。',
-          '列表页：最新/热门两个维度，带分页。',
-          '内容一律**文本插值**渲染：不引入 HTML 注入（v-html / innerHTML 在本项目是禁区）。',
-        ],
-        depends: ['posts / replies 表的读写接口', '发帖限速（与既有按 IP 令牌桶同一套机制）'],
-      },
+      component: PostsView,
+    },
+    {
+      path: '/posts/new',
+      name: 'post-editor',
+      component: PostEditorView,
+    },
+    {
+      path: '/posts/:id',
+      name: 'post-detail',
+      component: PostDetailView,
+      props: true,
     },
     {
       path: '/messages',

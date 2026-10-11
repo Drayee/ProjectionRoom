@@ -1,21 +1,31 @@
 :root {
-  --bg: #101014;
-  --panel: #17171d;
+  --bg: #0b0e18;
+  --bg-grad-a: #0b0e18;
+  --bg-grad-b: #151a2c;
+  --panel: rgba(255, 255, 255, 0.055);
+  --panel-solid: #151a2c;
   --panel-2: #1f1f27;
-  --border: #2a2a35;
-  --text: #e8e8ef;
-  --text-dim: #9a9aab;
+  --border: rgba(255, 255, 255, 0.12);
+  --text: #eef2ff;
+  --text-dim: #98a1c4;
   --accent: #00a1d6;
+  --accent-ink: #04141b;
   --accent-2: #fb7299;
   --danger: #ff5c5c;
   --ok: #3ddc97;
+  --radius: 20px;
+  --radius-sm: 12px;
+  --radius-pill: 999px;
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  --glow-a: rgba(0, 161, 214, 0.5);
+  --glow-b: rgba(251, 114, 153, 0.4);
+  --glass-blur: 14px;
   color-scheme: dark;
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --transition-fast: 0.15s ease;
+  --transition-med: 0.28s ease;
+  --transition-slow: 0.44s var(--ease-out);
 
-  /* ---------- 落地页动图槽位 ----------
-     标题背后的动图尺寸/柔化/不透明度集中在这里（`HeroMotion.vue` 里还各留了同值兜底，
-     单独去调那个组件时不必动这里）。素材放 `client/public/hero/`，
-     清单在 `src/heroAssets.ts`，替换步骤见 `client/public/hero/README.md`。
-     现在**没有素材**：槽位只有纯 CSS 渐变，不会出现破图。 */
   --hero-motion-w: min(560px, 86vw);
   --hero-motion-h: min(440px, 58vh);
   --hero-motion-opacity: 0.55;
@@ -28,10 +38,14 @@
 
 body {
   margin: 0;
-  background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
   font-size: 14px;
+  background:
+    radial-gradient(1200px 700px at 80% -10%, var(--glow-a), transparent 60%),
+    radial-gradient(1000px 700px at -10% 110%, var(--glow-b), transparent 60%),
+    linear-gradient(160deg, var(--bg-grad-a), var(--bg-grad-b));
+  background-attachment: fixed;
 }
 
 button {
@@ -39,7 +53,7 @@ button {
   color: var(--text);
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px 14px;
   cursor: pointer;
 }
@@ -53,14 +67,11 @@ button:disabled {
   cursor: not-allowed;
 }
 
-/* 进行中态：禁用 + 描边强调，和"不可用"区分开（不可用只是变灰）。 */
 button[aria-busy='true'] {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-/* 链接配色：深色主题下浏览器默认蓝对比度不够，统一用强调色；
-   悬停加下划线作为可点击的补充提示（键盘可达由下面的 :focus-visible 保证）。 */
 a {
   color: var(--accent);
 }
@@ -69,7 +80,6 @@ a:hover {
   text-decoration: underline;
 }
 
-/* 键盘可达：所有可交互元素在 Tab 聚焦时都有可见轮廓（Enter/Space 激活是浏览器原生行为）。 */
 button:focus-visible,
 summary:focus-visible,
 a:focus-visible,
@@ -81,7 +91,7 @@ a:focus-visible,
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #04141b;
+  color: var(--accent-ink);
   font-weight: 600;
 }
 
@@ -90,8 +100,8 @@ input {
   color: var(--text);
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
   width: 100%;
 }
 
@@ -112,8 +122,17 @@ label {
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 16px;
+}
+
+/* 玻璃卡片（月夜玻璃核心视觉）。 */
+.glass {
+  background: color-mix(in srgb, var(--panel-solid) 72%, transparent);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .muted {
@@ -128,7 +147,7 @@ label {
   background: rgba(255, 92, 92, 0.12);
   border: 1px solid var(--danger);
   color: #ffdada;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 8px 12px;
   display: flex;
   justify-content: space-between;
@@ -161,10 +180,8 @@ label {
 }
 
 /* ---------- 图标按钮 ----------
-   只由图标承担点击区的控件（登出、复制、分享、刷新、上传、关闭、帮助、
-   诊断入口……）统一用这一套外形：点击区靠 padding 撑到可点，视觉上一律低调，
-   可访问名一律由 aria-label + title 提供（图标本身没有文字）。
-   组件里如需更紧的间距（例如错误条里的关闭按钮）再就地覆盖 padding。 */
+   只由图标承担点击区的控件统一用透明背景 + 胶囊圆角。
+   可访问名一律由 aria-label + title 提供。 */
 .icon-btn,
 button.icon-only {
   display: inline-flex;
@@ -173,10 +190,11 @@ button.icon-only {
   padding: 5px 7px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-pill);
   color: var(--text-dim);
   text-decoration: none;
   line-height: 0;
+  transition: var(--transition-fast);
 }
 
 .icon-btn:hover,
@@ -186,7 +204,7 @@ button.icon-only:hover:not(:disabled) {
   text-decoration: none;
 }
 
-/* 成功态提示条（登录/注册成功后跳转前的一帧）。 */
+/* 成功态提示条。 */
 .ok-bar {
   display: flex;
   align-items: center;
@@ -194,4 +212,42 @@ button.icon-only:hover:not(:disabled) {
   color: var(--ok);
   font-size: 12px;
   line-height: 1.6;
+}
+
+/* 页面通用布局（月夜玻璃风格页面的公共容器）。 */
+.page-glass {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 18px 20px 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 页面淡入。 */
+.page-fade-enter-active,
+.page-fade-leave-active {
+  transition: opacity var(--transition-med);
+}
+
+.page-fade-enter-from,
+.page-fade-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body {
+    background: var(--bg);
+  }
+
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+@media (max-width: 460px) {
+  .page-glass {
+    padding: 14px 12px 32px;
+  }
 }
