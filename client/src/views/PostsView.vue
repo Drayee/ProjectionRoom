@@ -106,6 +106,13 @@ onBeforeUnmount(() => {
       <RouterLink class="btn-primary" :to="{ name: 'post-editor' }">写帖子</RouterLink>
     </div>
 
+    <!-- FAB 写帖子按钮 -->
+    <RouterLink class="fab-write" :to="{ name: 'post-editor' }" aria-label="写帖子" v-tip="'写帖子'">
+      <svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+    </RouterLink>
+
     <TransitionGroup name="card" tag="div" class="feed">
       <article v-for="post in items" :key="post.id" class="post glass" @click="goDetail(post)" role="button" :tabindex="0" @keydown.enter="goDetail(post)">
         <div class="post-head">
@@ -210,8 +217,22 @@ button.icon-btn {
   color: inherit; line-height: 0;
 }
 
+/* FAB 写帖子按钮 */
+.fab-write {
+  position: fixed; right: 22px; bottom: 84px; z-index: 20;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 50px; height: 50px; padding: 0; border-radius: 50%;
+  background: var(--accent); border: 1px solid var(--accent);
+  color: var(--accent-ink); text-decoration: none; line-height: 0;
+  box-shadow: 0 4px 16px rgba(0, 161, 214, 0.35);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.fab-write:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(0, 161, 214, 0.45); text-decoration: none; }
+.fab-write svg { display: block; }
+
 @media (prefers-reduced-motion: reduce) {
   .sort-tab, .post, .card-enter-active { transition: none; }
+  .fab-write { box-shadow: none; }
 }
 @media (max-width: 600px) { .feed { grid-template-columns: minmax(0, 1fr); } }
 </style>

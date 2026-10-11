@@ -1,8 +1,14 @@
 <script setup lang="ts">
 /**
- * 首页：一个路由两种形态（授权 100% 在服务端，这里只按登录态换渲染）。
+ * 首页：一个路由两种形态（授权 100% 在服务端，这里只按登录态换渲染内容）。
  *   - 未登录：落地页（月喵 + 开始）→ 点「开始」morph 成半透明登录窗；
  *   - 已登录：外壳（icon-first 标题栏 + FAB + 建房/进房/我的房间）。
+ *
+ * 落地页视觉清理（按 YG 反馈）：
+ *   - 去掉 "一起看 · 作者 drayee · 开源" 副标题
+ *   - 去掉 HeroMotion 背景光晕噪点
+ *   - > 改为竖线 | 上下浮动
+ *   - 加强 morph 动画丝滑度
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
@@ -10,7 +16,6 @@ import AppHeader from '../components/AppHeader.vue'
 import AuthPanel from '../components/AuthPanel.vue'
 import BrandIcon from '../components/BrandIcon.vue'
 import CreateRoomCard from '../components/CreateRoomCard.vue'
-import HeroMotion from '../components/HeroMotion.vue'
 import HomeFab from '../components/HomeFab.vue'
 import JoinRoomCard from '../components/JoinRoomCard.vue'
 import MyRoomsCard from '../components/MyRoomsCard.vue'
@@ -21,12 +26,11 @@ const auth = useAuthStore()
 const REPO_URL = 'https://github.com/Drayee/ProjectionRoom'
 const NAME_KEY = 'pr:name'
 
-/** 本机昵称：本机上次用过的 > 账号昵称 > 随机。建房/进房共用一份。 */
 const displayName = ref(
   localStorage.getItem(NAME_KEY) ?? auth.profile?.displayName ?? `观众${Math.floor(Math.random() * 900 + 100)}`,
 )
 
-// ---------- 落地页：hero（标题 + 开始）↔ auth（登录窗） ----------
+// ---------- 落地页：hero（标题 + 开始）↔ auth（登录窗）----------
 type Stage = 'hero' | 'auth'
 const stage = ref<Stage>('hero')
 const transitioning = ref(false)
@@ -89,7 +93,6 @@ onBeforeUnmount(() => {
   windowObserver = undefined
 })
 
-/** 有凭证但鉴权失败（401 且刷新也不成）→ 落到登录窗并说明原因，而不是空白屏。 */
 async function bootstrapAuth() {
   const hadCredential = hasStoredCredential()
   await auth.bootstrap()
@@ -133,7 +136,6 @@ const booting = computed(() => auth.restoring)
 </script>
 
 <template>
-  <!-- landing ↔ shell 整屏淡入淡出（登录成功/登出）。 -->
   <Transition name="home" mode="out-in">
     <!-- 恢复登录中 -->
     <div v-if="booting" key="boot" class="home boot" data-testid="home-restoring">
@@ -148,14 +150,7 @@ const booting = computed(() => auth.restoring)
       <div v-if="capabilityNotice" class="capability" data-testid="home-capability-notice">
         <BrandIcon name="tips" label="提示" :size="15" />
         <span class="msg">{{ capabilityNotice }}</span>
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="关闭提示"
-          v-tip="'关闭提示'"
-          data-testid="home-capability-close"
-          @click="capabilityNotice = ''"
-        >
+        <button type="button" class="icon-btn" aria-label="关闭提示" v-tip="'关闭提示'" data-testid="home-capability-close" @click="capabilityNotice = ''">
           <BrandIcon name="close" decorative :size="14" />
         </button>
       </div>
@@ -168,15 +163,8 @@ const booting = computed(() => auth.restoring)
     </div>
 
     <!-- 未登录：落地页 -->
-    <div
-      v-else
-      key="landing"
-      class="home landing"
-      data-testid="home-landing"
-      :data-stage="stage"
-      :data-transitioning="transitioning ? 'true' : 'false'"
-      :class="{ 'is-auth': stage === 'auth' }"
-    >
+    <div v-else key="landing" class="home landing" data-testid="home-landing" :data-stage="stage" :data-transitioning="transitioning ? 'true' : 'false'" :class="{ 'is-auth': stage === 'auth' }">
+      <!-- 右上角 GitHub / 作者 / 帮助 -->
       <div class="landing-top">
         <a class="round-btn" :href="REPO_URL" target="_blank" rel="noopener noreferrer" aria-label="开源仓库（作者 drayee）" v-tip="'开源仓库（作者 drayee）'" data-testid="home-github">
           <BrandIcon name="github" decorative :size="18" />
@@ -191,32 +179,15 @@ const booting = computed(() => auth.restoring)
 
       <div class="landing-stage">
         <header class="hero-head" :class="{ lifted: stage === 'auth' }">
-          <HeroMotion />
           <h1 class="moon-title" data-testid="home-title">月喵</h1>
-          <p class="tagline muted">一起看 · 作者 drayee · 开源</p>
         </header>
 
         <div class="morph" :class="{ open: stage === 'auth', 'is-transitioning': transitioning }" :style="morphStyle">
-          <button
-            type="button"
-            class="start"
-            :class="{ 'is-open': stage === 'auth' }"
-            :aria-expanded="stage === 'auth'"
-            aria-controls="home-auth-window"
-            data-testid="home-start"
-            @click="toggleStage"
-          >
+          <button type="button" class="start" :class="{ 'is-open': stage === 'auth' }" :aria-expanded="stage === 'auth'" aria-controls="home-auth-window" data-testid="home-start" @click="toggleStage">
             <span class="start-label" data-testid="home-start-label">开始</span>
           </button>
 
-          <section
-            id="home-auth-window"
-            ref="authWindow"
-            class="auth-window"
-            data-testid="home-auth-window"
-            :aria-hidden="stage !== 'auth'"
-            @transitionend="onWindowTransitionEnd"
-          >
+          <section id="home-auth-window" ref="authWindow" class="auth-window" data-testid="home-auth-window" :aria-hidden="stage !== 'auth'" @transitionend="onWindowTransitionEnd">
             <template v-if="windowContent">
               <div class="window-bar">
                 <span class="window-title"><BrandIcon name="login" decorative :size="15" /> 登录月喵</span>
@@ -224,12 +195,10 @@ const booting = computed(() => auth.restoring)
                   <BrandIcon name="close" decorative :size="16" />
                 </button>
               </div>
-
               <p v-if="expiredHint" class="window-hint" data-testid="home-auth-expired">
                 <BrandIcon name="alert-triangle" label="注意" :size="14" />
                 {{ expiredHint }}
               </p>
-
               <AuthPanel plain direct-entry>
                 <template #direct>
                   <JoinRoomCard v-model:name="displayName" heading="直接进入放映室" direct data-testid="home-direct-join" />
@@ -239,7 +208,8 @@ const booting = computed(() => auth.restoring)
           </section>
         </div>
 
-        <span class="chev" aria-hidden="true" data-testid="home-chevron">&gt;</span>
+        <!-- 竖线 | 上下浮动 -->
+        <span class="chev" aria-hidden="true" data-testid="home-chevron">|</span>
       </div>
 
       <p class="landing-foot muted small">
@@ -262,350 +232,159 @@ const booting = computed(() => auth.restoring)
   flex-direction: column;
   gap: 18px;
 }
-
-.home.boot {
-  min-height: 40vh;
-  justify-content: center;
-  align-items: center;
-}
+.home.boot { min-height: 40vh; justify-content: center; align-items: center; }
 
 /* ---------------- 落地页 ---------------- */
-.home.landing {
-  min-height: 100vh;
-  padding: 18px 20px 28px;
-  gap: 14px;
-}
+.home.landing { min-height: 100vh; padding: 18px 20px 28px; gap: 14px; }
 
-.landing-top {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
+.landing-top { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 
 .round-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; padding: 0; border-radius: 50%;
   border: 1px solid var(--border);
   background: rgba(31, 31, 39, 0.6);
-  color: var(--text-dim);
-  text-decoration: none;
-  line-height: 0;
+  color: var(--text-dim); text-decoration: none; line-height: 0;
 }
-
-.round-btn:hover {
-  color: var(--text);
-  border-color: var(--accent);
-  text-decoration: none;
-}
-
-.round-btn.small {
-  width: 30px;
-  height: 30px;
-}
+.round-btn:hover { color: var(--text); border-color: var(--accent); text-decoration: none; }
+.round-btn.small { width: 30px; height: 30px; }
 
 .landing-stage {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  padding-top: clamp(24px, 14vh, 140px);
-  gap: 20px;
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 24px;
 }
 
 .hero-head {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  transition:
-    transform 0.46s cubic-bezier(0.22, 0.61, 0.36, 1),
-    opacity 0.46s ease;
+  display: flex; flex-direction: column; align-items: center; gap: 0;
+  transition: transform 0.6s var(--ease-out), opacity 0.6s ease;
 }
-
 .hero-head.lifted {
-  transform: translateY(calc(-1 * clamp(48px, 18vh, 190px))) scale(0.34);
-  opacity: 0.16;
+  transform: translateY(-clamp(48px, 18vh, 190px)) scale(0.28);
+  opacity: 0.10;
 }
 
 .moon-title {
-  position: relative;
-  z-index: 1;
   margin: 0;
-  font-size: clamp(56px, 13vw, 108px);
+  font-size: clamp(60px, 14vw, 120px);
   line-height: 1.05;
   letter-spacing: 0.06em;
-  text-shadow: 0 6px 30px rgba(0, 161, 214, 0.35);
-}
-
-.tagline {
-  position: relative;
+  color: var(--text);
   z-index: 1;
-  margin: 0;
-  font-size: 13px;
-  letter-spacing: 0.08em;
 }
 
-/* 变形舞台：开始按钮 ↔ 登录窗 */
+/* 变形舞台 */
 .morph {
-  position: relative;
-  display: flex;
-  justify-content: center;
-  width: 100%;
-  min-height: 56px;
-  transition: min-height 0.44s cubic-bezier(0.22, 0.61, 0.36, 1);
+  position: relative; display: flex; justify-content: center;
+  width: 100%; min-height: 56px;
+  transition: min-height 0.6s var(--ease-out);
 }
+.morph.open { min-height: var(--aw-h, 440px); }
 
-.morph.open {
-  min-height: var(--aw-h, 440px);
-}
-
+/* 开始按钮 */
 button.start {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 168px;
-  padding: 14px 46px;
-  border-radius: 999px;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  color: #04141b;
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  transition:
-    opacity 0.42s ease 0.24s,
-    transform 0.32s ease;
+  align-self: flex-start; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 168px; padding: 16px 52px;
+  border-radius: var(--radius-pill);
+  background: var(--accent); border: 1px solid var(--accent);
+  color: var(--accent-ink); font-size: 20px; font-weight: 700; letter-spacing: 0.16em;
+  transition: opacity 0.5s ease 0.3s, transform 0.35s ease;
+  box-shadow: 0 4px 20px rgba(0, 161, 214, 0.35);
 }
+button.start:hover { transform: translateY(-2px); box-shadow: 0 6px 28px rgba(0, 161, 214, 0.45); }
+button.start.is-open { opacity: 0; }
 
-button.start:hover {
-  transform: translateY(-1px);
-}
+.morph.is-transitioning button.start { z-index: 3; }
+.morph.is-transitioning .auth-window { pointer-events: none; }
 
-button.start.is-open {
-  opacity: 0;
-}
+.start-label { transition: opacity 0.25s ease; }
+button.start.is-open .start-label { opacity: 0; }
 
-.morph.is-transitioning button.start {
-  z-index: 3;
-}
-
-.morph.is-transitioning .auth-window {
-  pointer-events: none;
-}
-
-.start-label {
-  transition: opacity 0.22s ease;
-}
-
-button.start.is-open .start-label {
-  opacity: 0;
-}
-
+/* 登录窗 */
 .auth-window {
-  position: absolute;
-  top: 0;
-  left: 50%;
-  width: min(440px, 100%);
-  padding: 16px;
-  border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(23, 23, 29, 0.72);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  position: absolute; top: 0; left: 50%;
+  width: min(440px, 100%); padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-solid) 72%, transparent);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  box-shadow: var(--shadow);
   transform-origin: top center;
-  transform: translateX(-50%) scale(0.5);
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition:
-    transform 0.44s cubic-bezier(0.22, 0.61, 0.36, 1),
-    opacity 0.3s ease,
-    border-radius 0.44s ease,
-    visibility 0s linear 0.44s;
+  transform: translateX(-50%) scale(0.35);
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: transform 0.6s var(--ease-out), opacity 0.35s ease, border-radius 0.6s ease, visibility 0s linear 0.6s;
 }
-
 .morph.open .auth-window {
   transform: translateX(-50%) scale(1);
-  opacity: 0.96;
-  visibility: visible;
-  pointer-events: auto;
-  transition:
-    transform 0.44s cubic-bezier(0.22, 0.61, 0.36, 1),
-    opacity 0.34s ease 0.12s,
-    border-radius 0.44s ease,
-    visibility 0s linear 0s;
+  opacity: 0.96; visibility: visible; pointer-events: auto;
+  transition: transform 0.6s var(--ease-out), opacity 0.4s ease 0.15s, border-radius 0.6s ease, visibility 0s linear 0s;
 }
-
-.morph:not(.open) .auth-window {
-  border-radius: 999px;
-}
+.morph:not(.open) .auth-window { border-radius: var(--radius-pill); }
 
 .window-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 12px;
 }
-
-.window-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 15px;
-  font-weight: 600;
-}
-
+.window-title { display: inline-flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; }
 .window-hint {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  margin: 0 0 12px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
+  display: flex; align-items: flex-start; gap: 6px;
+  margin: 0 0 12px; padding: 8px 10px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text-dim); font-size: 12px; line-height: 1.6;
 }
 
+/* 竖线 | 上下浮动 */
 .chev {
-  font-size: 22px;
-  line-height: 1;
-  color: var(--text-dim);
-  animation: chev-float 1.5s ease-in-out infinite alternate;
+  font-size: 24px; line-height: 1; color: var(--accent);
+  animation: chev-float 1.8s ease-in-out infinite;
+  opacity: 0.6;
 }
-
-.home.landing.is-auth .chev {
-  opacity: 0;
-  animation: none;
-}
+.home.landing.is-auth .chev { opacity: 0; animation: none; }
 
 @keyframes chev-float {
-  from {
-    transform: translateY(-5px);
-  }
-  to {
-    transform: translateY(4px);
-  }
+  0%   { transform: translateY(-10px); opacity: 0.3; }
+  50%  { transform: translateY(6px);  opacity: 0.7; }
+  100% { transform: translateY(-10px); opacity: 0.3; }
 }
 
-.home.landing.is-auth :deep(.hero-motion) {
-  opacity: 0.3;
-}
+.home.landing.is-auth :deep(.hero-motion) { opacity: 0.3; }
 
 .landing-foot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin: 0;
-  text-align: center;
+  display: flex; align-items: center; justify-content: center;
+  gap: 10px; flex-wrap: wrap; margin: 0; text-align: center;
 }
+.text-link { display: inline-flex; align-items: center; gap: 4px; text-decoration: none; }
 
-.text-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  text-decoration: none;
-}
-
-/* ---------------- 已登录外壳 ---------------- */
+/* ---------------- 外壳 ---------------- */
 .capability {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-2);
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--panel-2);
+  color: var(--text-dim); font-size: 12px; line-height: 1.6;
 }
-
-.capability .msg {
-  flex: 1;
-  min-width: 0;
-}
+.capability .msg { flex: 1; min-width: 0; }
 
 button.icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 3px;
-  background: transparent;
-  border-color: transparent;
-  color: inherit;
-  line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 3px; background: transparent; border-color: transparent;
+  color: inherit; line-height: 0;
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-  align-items: start;
-}
-
-@media (max-width: 760px) {
-  .grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+@media (max-width: 760px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 460px) {
-  .home {
-    padding: 20px 12px 32px;
-  }
-
-  .home.landing {
-    padding: 14px 12px 22px;
-  }
-
-  .auth-window {
-    padding: 12px;
-  }
+  .home { padding: 20px 12px 32px; }
+  .home.landing { padding: 14px 12px 22px; }
+  .auth-window { padding: 12px; }
 }
 
-/* landing ↔ shell 整屏淡入淡出（外壳标题栏另有滑入动画，见 AppHeader）。 */
-.home-enter-active,
-.home-leave-active {
-  transition: opacity 0.28s ease;
-}
-
-.home-enter-from,
-.home-leave-to {
-  opacity: 0;
-}
+/* landing ↔ shell 整屏淡入淡出 */
+.home-enter-active, .home-leave-active { transition: opacity 0.3s ease; }
+.home-enter-from, .home-leave-to { opacity: 0; }
 
 @media (prefers-reduced-motion: reduce) {
-  .hero-head,
-  .morph,
-  .auth-window,
-  button.start,
-  .start-label {
-    transition: none;
-  }
-
-  .chev {
-    animation: none;
-  }
-
-  .home-enter-active,
-  .home-leave-active {
-    transition: none;
-  }
+  .hero-head, .morph, .auth-window, button.start, .start-label { transition: none; }
+  .chev { animation: none; }
+  .home-enter-active, .home-leave-active { transition: none; }
 }
 </style>
