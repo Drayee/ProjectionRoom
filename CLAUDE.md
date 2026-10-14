@@ -3,7 +3,7 @@
 > **这是 AI 会话进入本项目后的唯一入口。默认只读本文件**，需要动某处时再按下面的路径精确打开那几个文件，不要重新遍历整棵树。
 >
 > **维护约定（必须遵守）**：目录结构、关键约定、命令、部署事实一旦变化，**同步更新本文件**。过时地图比没有地图更危险——后续会话会按它行动。
-> 最近一次同步：结构整理（`usecase` 并入 `service`、`auth`/`limiter` 下沉、`cmd` 根包只留三文件、provider 迁入 `internal/bootstrap`）之后。
+> 最近一次同步：前端展示层按「月夜故障 · B」从零重建（`views/` 与根级 `components/` 删除、新结构 `pages/` + `components/{ui,features}/` + `styles/{tokens,base}.css`，票 #8/#19/#20 收尾）之后。
 
 ---
 
@@ -40,7 +40,7 @@
 | `internal/pb/` | **生成代码**（勿手改）；真源是 `proto/projection_room.proto`，重新生成用 `scripts/gen-proto.ps1` |
 | `internal/utils/` | 小工具（`rand.go` 的 crypto/rand 封装等） |
 | `cmd/` | **根包只有三个文件**：`main.go`(最薄骨架：读配置 → `InitializeApp` → 起服务 → 优雅退出，无业务代码) · `wire.go`(**只有** `//go:build wireinject` 头 + `InitializeApp`，`wire.Build(bootstrap.ProviderSet)`，无业务代码) · `wire_gen.go`(`go tool wire ./cmd` 生成)。**provider 全在 `internal/bootstrap/`**。另有独立 main 包 `cmd/segmenter/`(本地切片器 CLI，被 `scripts/build-segmenter.ps1` 交叉编译成用户下载的 exe；它的改动会影响构建脚本与 `docs/SEGMENT.md`) |
-| `client/` | Vue 3 + TS + Vite：`src/views/`、`src/components/`、`src/stores/`、`src/api/`、`src/utils/`、`src/gen/`(生成的原型代码)、`public/icons/`(**本地 SVG 图标，用多少复制多少**)、`scripts/prune-dist.mjs`(构建后清理陈旧产物) |
+| `client/` | Vue 3 + TS + Vite（月夜故障 · B 重建后）：`src/pages/`、`src/components/{ui,features}/`、`src/styles/{tokens,base}.css`、`src/stores/`、`src/api/`、`src/utils/`、`src/gen/`(生成的原型代码)、`public/icons/`(**本地 SVG 图标，用多少复制多少**)、`public/fonts/`、`scripts/prune-dist.mjs`(构建后清理陈旧产物)。旧 `src/views/` 与根级 `src/components/` 已删（零残留） |
 | `test/script/` | 真机验收脚本（headless Chrome，见 §6） |
 | `test/resource/` | 媒体夹具（`short_video/cut`、`mkw_cut` 等） |
 | `docs/` | `SPEC.md`(房间与信令协议)、`ALGORITHM.md`、`SEGMENT.md`、`ACCOUNTS.md`(账号/社交/管理端规格)、`plans/`(实施计划)、`reports/`(验收报告) |
@@ -87,7 +87,7 @@ go test ./... -count=1 -timeout 900s
 $env:CGO_ENABLED='1'; $env:CC='D:\IT\zip-application\winlibs-mingw64\mingw64\bin\gcc.exe'
 go test -race ./internal/service/ ./internal/handler/ -count=1
 # 前端
-npm --prefix client run build              # 含 vue-tsc；产物必须 0 个 window.__pr
+npm --prefix client run build              # 含 vue-tsc；产物必须 0 个 window.__pr；grep "v-html" client/src ≤1（仅 MarkdownView）、innerHTML=0
 ```
 
 **真库测试**（`internal/store` 的用例依赖它，否则 Skip）：
@@ -127,8 +127,8 @@ CSP 会拦住"跨源本机媒体服务器"的注入路径（脚手架用法）�
 
 - **语言**：注释与提交信息用中文；代码标识符用英文；字符串一律 **ASCII 引号**。
 - **改文件**：用编辑工具（apply_patch / 编辑器）改源码——PowerShell 直接读写含中文的源文件会 GBK 乱码。
-- **前端渲染**：一切用户可控内容走**文本插值**（`{{ }}`）。可测试的判据：`grep -rn "v-html\|innerHTML" client/src` 应为 0。
-- **`data-testid` 与主行动按钮文案是验收脚本的契约**：新增可以，改名/删除会打挂 `test/script/**`（改之前先 `grep` 一遍谁在用）。
+- **前端渲染**：一切用户可控内容走**文本插值**（`{{ }}`）；唯一例外是 Markdown 消毒出口 `ui/MarkdownView.vue`（`marked` 解析 + `DOMPurify.sanitize()` 后注入）。判据：`grep -rn "v-html" client/src` 命中 ≤1 且处在该文件；`grep -rn "innerHTML" client/src` 为 0。
+- **`data-testid` 与主行动按钮文案是验收脚本的契约**：本轮前端重写只保留 3 个脚本消费 testid（`room-code`/`room-code-copied`/`room-code-copy-failed`），其余旧 testid 全部丢弃（票 #12）。新增可以，改名/删除会打挂 `test/script/**`（改之前先 `grep` 一遍谁在用）。
 - **提交**：`<type>(<scope>): <描述>`，一次任务一次提交；`git push` 仅在明确要求时执行。
 - **遇到语义不清、或需要人拍板的点**：**停下来问**（弹选项/提问窗等待），带着选项和你的推荐问。
 - **AI 会话**：先读本文件，再按 §2 精确打开指到的那几个文件；需要全树认知时读本文件而不是遍历代码树。
@@ -138,7 +138,7 @@ CSP 会拦住"跨源本机媒体服务器"的注入路径（脚手架用法）�
 ## 10. 待办与已知缺口（按优先级）
 
 1. **无 TLS**：上 TLS 后立刻给 cookie 补 `Secure` 并收紧 `SameSite`（有测试断言钉住当前行为，改它要先改断言）。
-2. **论坛/帖子、好友、私聊、消息**：尚未实现（数据模型与协议另立计划）。
+2. **论坛/帖子、好友、私聊、消息**：前端帖子三页已重建（列表/详情/发帖，本地 mock），但**后端数据模型与协议尚未实现**（另立计划）。
 3. `GET /api/rooms/mine`（"我的房间"目前只读本标签页 `sessionStorage`）。
 4. `client/dist/downloads/room-media` 移出静态根（公网可下载）。
 5. 房间元数据"投递失败只记日志"：补偿（启动对账/重投）待公开列表扩大后一起做。

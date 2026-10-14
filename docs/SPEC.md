@@ -759,26 +759,21 @@ interface RoomState {
 ```
 client/
 ├── src/
+│   ├── pages/                    # 18 条路由页面（HomePage/RoomPage/PostsPage…）
 │   ├── components/
-│   │   ├── RoomView.vue          # 房间布局（左播放器 / 右聊天+成员）
-│   │   ├── PlayerStage.vue       # <video> + 缓冲/同步状态浮层
-│   │   ├── HostPanel.vue         # 选片目录、开播、模式/容量/上行占用显示
-│   │   ├── TopologyBadge.vue     # 当前模式（扇出/单链）、分发节点、我的深度
-│   │   ├── MemberList.vue        # 成员、角色、深度、缓冲健康度
-│   │   └── ChatPanel.vue         # 文字聊天
-│   ├── composables/
-│   │   ├── useSignaling.ts       # WS 连接、重连、消息路由（含 seq 过滤）
-│   │   ├── useWebRTC.ts          # PeerConnection/DataChannel 生命周期、ICE、getStats 采集
-│   │   ├── useMediaIndex.ts      # 选目录、解析 index.json、isTypeSupported 校验
-│   │   ├── useChunkStore.ts      # 分片持有（File / 收到的 ArrayBuffer）+ bitset
-│   │   ├── useChunkRequester.ts  # 二进制协议编解码、请求/超时/转投
-│   │   ├── useChunkScheduler.ts  # 预取窗口、多父加权条带化、在途上限、背压
-│   │   ├── useChunkPlayer.ts     # MediaSource/SourceBuffer、append 队列、remove+seek
-│   │   └── useSyncClock.ts       # NTP 最小滤波、漂移三级矫正
-│   ├── stores/room.ts
-│   └── views/HomeView.vue        # 建房 / 加入房
+│   │   ├── ui/                   # 纯展示：AppHeader/BrandIcon/MarkdownView/TooltipLayer…
+│   │   └── features/             # 按域分桶
+│   │       ├── shell/            #   LandingView（落地页 → 登录窗 morph）
+│   │       ├── room/             #   PlayerStage/HostPanel/ChatPanel/JoinRoomCard…
+│   │       └── auth/posts/…      #   其余域
+│   ├── styles/{tokens,base}.css  # 月夜故障·B token + 元素基线
+│   ├── stores/room.ts            # 房间逻辑层（未改）
+│   ├── composables/              # 现有 9 个（未改）+ 展示层 composable 新增
+│   └── router.ts                 # 18 条 path/name（与旧表逐字一致）
 └── vite.config.ts                # /ws 与 /api 代理到 :8080
 ```
+
+> 旧 `src/views/`（`HomeView.vue`/`RoomView.vue` 等 15 个）与根级 `src/components/`（18 个）已随前端重写删除（零残留）；上表是重写后的结构。
 
 ### 9.2 前端与后端的契约边界
 

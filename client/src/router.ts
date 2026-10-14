@@ -10,7 +10,7 @@ import ResetPasswordPage from './pages/ResetPasswordPage.vue'
 import VerifyEmailPage from './pages/VerifyEmailPage.vue'
 import ComingSoonPage from './pages/ComingSoonPage.vue'
 import PostsPage from './pages/PostsPage.vue'
-import PostDetailView from './pages/PostDetailPage.vue'
+import PostDetailPage from './pages/PostDetailPage.vue'
 import PostEditorPage from './pages/PostEditorPage.vue'
 
 /**
@@ -128,7 +128,7 @@ export const router = createRouter({
     },
     { path: '/posts', name: 'posts', component: PostsPage },
     { path: '/posts/new', name: 'post-editor', component: PostEditorPage },
-    { path: '/posts/:id', name: 'post-detail', component: PostDetailView, props: true },
+    { path: '/posts/:id', name: 'post-detail', component: PostDetailPage, props: true },
     {
       path: '/messages',
       name: 'messages',

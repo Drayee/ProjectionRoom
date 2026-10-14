@@ -71,6 +71,9 @@ curl -o part1.zip http://127.0.0.1:8080/api/v1/segment/jobs/<jobId>/parts/1
 产物保留 30 分钟（TTL 清理）。全部可用 `PR_SEGMENT_*` 覆盖，ffmpeg 路径用 `PR_FFMPEG`。
 不想上传也行：`docs/SEGMENT.md` 里有本地 ffmpeg / `cmd/segmenter` 的完整教程。
 
+> ⚠️ 前端重写（月夜故障 · B）本轮暂未重建服务端切片面板与切片工具下载入口（票 #17），
+> 下面描述的「主播页对应入口」在重建后的 UI 里暂不显示；服务端切片 API 与 `cmd/segmenter` CLI 仍照常可用。
+
 主播页有对应入口：选片区下方的「**本机没有 ffmpeg？交给服务器切片**」展开后可上传视频、
 看排队位次与切片进度，切完可以下载 zip，或者直接**写进一个本地目录并立即开播**
 （`showDirectoryPicker()` + File System Access API；浏览器不支持时退化为"下载 zip 手动解压后再选目录"）。

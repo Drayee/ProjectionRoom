@@ -262,7 +262,7 @@ WebSocket
 | 昵称/标题/消息/日志：字符白名单 + 去零宽/Bidi | §7.3 |
 | 管理端日志文本插值 + 字段白名单 + 分页 | §8 |
 | 链接仅 http(s)（同源口径） | 已实现（F-1/F-2 safeLink） |
-| 禁止 HTML 注入 API | 仓库规则 + **构建后 grep 门禁**（`v-html` / `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `eval(` / `new Function` 任一命中即失败），并列为代码评审固定检查项 |
+| 禁止 HTML 注入 API | 仓库规则 + **构建后 grep 门禁**（`innerHTML` / `outerHTML` / `insertAdjacentHTML` / `eval(` / `new Function` 任一命中即失败；`v-html` 仅允许 1 处——`ui/MarkdownView.vue` 经 DOMPurify 消毒的 Markdown 出口），并列为代码评审固定检查项 |
 | WS 必须鉴权、不信客户端 clientId | §6 ticket + 身份以账号为准 |
 | GORM 全参数化、禁拼接 SQL | §1 + 评审检查项 |
 | 限速（注册/登录/刷新/建房/join/私聊） | §5 |
