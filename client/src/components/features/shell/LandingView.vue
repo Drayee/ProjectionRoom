@@ -266,11 +266,20 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+/**
+ * morph 容器：按钮态与登录窗态在过渡中会**同时挂载**（`transitioning` 窗口内），
+ * 所以子节点必须**叠在同一格**里（`grid-row/column: 1`）。
+ *
+ * ⚠️ 只写 `display:grid` 不够：默认 `grid-auto-flow: row` 会让两个子节点各占一行，
+ * 容器尺寸被两者的组合撑大（实测过渡首帧宽 491px、`transitioning` 关闭后跳回 440px），
+ * 表现为「窗口在右侧生成 + 内容突然右移后又正常」。叠格后容器宽高只由窗口本身决定。
+ */
 .morph-target {
   position: relative; /* ::before 掠过亮带的定位上下文（no absolute 居中，改 flex 居中） */
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr;
   align-items: center;
-  justify-content: center;
+  justify-items: center;
   min-width: 168px;
   padding: 16px 52px;
   border-radius: var(--radius-pill);
@@ -292,6 +301,12 @@ onBeforeUnmount(() => {
     font-size var(--dur-morph) var(--ease),
     letter-spacing var(--dur-morph) var(--ease),
     font-weight var(--dur-morph) var(--ease);
+}
+
+/* 标签与登录窗叠在同一格：重叠而非并排/堆叠，容器尺寸只取窗口 */
+.morph-target > * {
+  grid-row: 1;
+  grid-column: 1;
 }
 
 /* 悬停：RGB 分离外发光 + 字距拉开（票 #13 效果 8） */
