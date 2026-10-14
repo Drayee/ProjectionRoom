@@ -6,6 +6,7 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import AppHeader from '../components/ui/AppHeader.vue'
+import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
 import type { Comment, Post } from '../types/posts'
 
@@ -53,7 +54,7 @@ onMounted(load)
       <template v-else-if="post">
         <h1 class="title">{{ post.title }}</h1>
         <p class="meta dim">{{ post.author.displayName }} · {{ post.createdAt }}</p>
-        <article class="content">{{ post.content }}</article>
+        <MarkdownView class="content" :source="post.content" label="帖子正文" />
         <div class="acts">
           <button :class="{ liked: post.liked }" type="button" @click="toggleLike">赞 {{ post.likeCount }}</button>
           <button type="button" @click="router.back()">返回</button>
@@ -80,7 +81,7 @@ onMounted(load)
 .body { flex: 1; width: min(760px, 100%); margin: 0 auto; padding: 32px 20px 64px; display: flex; flex-direction: column; gap: 14px; }
 .title { margin: 0; font-family: var(--font-glitch); font-size: clamp(26px, 5vw, 38px); }
 .meta { margin: 0; font-size: 12px; }
-.content { margin: 0; white-space: pre-wrap; font-size: 15px; line-height: 1.9; }
+.content { margin: 0; }
 .acts { display: flex; gap: 10px; }
 .acts button { padding: 8px 18px; border: 1px solid var(--line); color: var(--dim); }
 .acts button.liked { color: var(--glitch-p); border-color: var(--glitch-p); }
