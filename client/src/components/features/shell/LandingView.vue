@@ -10,11 +10,11 @@
  *   - 撕裂三片周期 2600/3100/3700ms **互质**，steps() 阶梯；
  *   - 抖动幅度按 em（原型 9–18px @ 132px 字号 ≈ .07–.14em）；
  *   - 拼合入场 460ms 错开 0/80/160ms，播完**摘类**；
- *   - morph 440ms FLIP，只动 transform/opacity/border-radius；
- *   - JS 侧 REDUCED 判死（WAAPI 不自动尊重媒体查询）。
+ *   - morph 440ms：按钮→登录窗走 CSS transition（min-width/padding/border-radius），
+ *     不再用 WAAPI FLIP——FLIP 的 transform keyframe 会覆盖居中 transform 且与
+ *     CSS transition 双重叠加，曾导致「突然变圆 / 窗口右移」。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { cssVars } from '../../../utils/cssVars'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import AuthPanel from '../auth/AuthPanel.vue'
 import JoinRoomCard from '../room/JoinRoomCard.vue'
 import type { AuthTab } from '../auth/useAuthForm'
@@ -30,9 +30,6 @@ const props = withDefaults(
   }>(),
   { initialStage: 'hero', initialTab: 'login', directEntry: true },
 )
-
-const REDUCED =
-  typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
 const stage = ref<'hero' | 'auth'>(props.initialStage)
 const showDirect = ref(false)
@@ -51,70 +48,27 @@ const displayName = ref(
   })(),
 )
 
-const morphRef = ref<HTMLElement | null>(null)
-const windowHeight = ref(0)
-let windowObserver: ResizeObserver | undefined
-const morphStyle = computed(() => cssVars({ '--aw-h': `${windowHeight.value}px` }))
-
-function measured() {
-  windowHeight.value = morphRef.value?.offsetHeight ?? 0
-}
-
 function finishTransition() {
   transitioning.value = false
 }
 
-/** FLIP：量源按钮矩形，让登录窗从它的位置/尺寸长出来。 */
-async function morphTo(fromEl: HTMLElement | null) {
-  if (REDUCED || !fromEl) return
-  const src = fromEl.getBoundingClientRect()
-  const win = morphRef.value
-  if (!win) return
-  const t = win.getBoundingClientRect()
-  if (!t.width || !t.height) return
-  const sx = src.width / t.width
-  const sy = src.height / t.height
-  const dx = src.left + src.width / 2 - (t.left + t.width / 2)
-  const dy = src.top + src.height / 2 - (t.top + t.height / 2)
-  win.animate(
-    [
-      { transform: `translate(${dx}px,${dy}px) scale(${sx},${sy})`, borderRadius: '999px', opacity: 0.7 },
-      { transform: 'none', borderRadius: getComputedStyle(win).borderRadius, opacity: 1 },
-    ],
-    { duration: 440, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'both' },
-  )
-}
-
-async function setStage(next: 'hero' | 'auth', fromEl?: HTMLElement | null) {
+function setStage(next: 'hero' | 'auth') {
   if (stage.value === next) return
-  const srcEl = fromEl ?? morphRef.value
-  const goingAuth = next === 'auth'
   stage.value = next
   transitioning.value = true
   if (transitionTimer !== undefined) clearTimeout(transitionTimer)
   transitionTimer = setTimeout(finishTransition, 800)
-  if (goingAuth) {
-    await nextTick()
-    requestAnimationFrame(measured)
-    await nextTick()
-    void morphTo(srcEl)
-  }
 }
 
-function startClicked(event: MouseEvent | KeyboardEvent) {
-  void setStage('auth', event.currentTarget as HTMLElement)
+function startClicked() {
+  setStage('auth')
 }
 
 function collapse() {
-  void setStage('hero', morphRef.value)
+  setStage('hero')
 }
 
 onMounted(() => {
-  measured()
-  if (typeof ResizeObserver !== 'undefined' && morphRef.value) {
-    windowObserver = new ResizeObserver(measured)
-    windowObserver.observe(morphRef.value)
-  }
   // 拼合入场播完摘类（460 + 160 延迟 + 余量）
   assembleTimer = setTimeout(() => (assembling.value = false), 1100)
 })
@@ -122,8 +76,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (transitionTimer !== undefined) clearTimeout(transitionTimer)
   if (assembleTimer !== undefined) clearTimeout(assembleTimer)
-  windowObserver?.disconnect()
-  windowObserver = undefined
 })
 </script>
 
@@ -141,17 +93,16 @@ onBeforeUnmount(() => {
       </header>
 
       <!-- 开始按钮 → 登录窗 morph 容器 -->
-      <div class="morph-box" :class="{ open: stage === 'auth' }" :style="morphStyle">
+      <div class="morph-box">
         <div
-          ref="morphRef"
           class="morph-target"
           :class="{ open: stage === 'auth' }"
           :role="stage === 'hero' ? 'button' : undefined"
           :tabindex="stage === 'hero' ? 0 : -1"
           :aria-label="stage === 'hero' ? '开始' : undefined"
-          @click="stage === 'hero' && startClicked($event)"
-          @keydown.enter.prevent="stage === 'hero' && startClicked($event)"
-          @keydown.space.prevent="stage === 'hero' && startClicked($event)"
+          @click="stage === 'hero' && startClicked()"
+          @keydown.enter.prevent="stage === 'hero' && startClicked()"
+          @keydown.space.prevent="stage === 'hero' && startClicked()"
         >
           <span v-if="stage === 'hero' || transitioning" class="start-label">开始</span>
 
@@ -308,24 +259,15 @@ onBeforeUnmount(() => {
   to { transform: none; opacity: 0.95 }
 }
 
-/* ---------- morph：按钮 → 登录窗 ---------- */
+/* ---------- morph：按钮 → 登录窗（纯 CSS transition，440ms） ---------- */
 .morph-box {
-  position: relative;
   display: flex;
   justify-content: center;
-  min-height: 56px;
   width: 100%;
-  transition: min-height var(--dur-morph) var(--ease);
-}
-
-.morph-box.open {
-  min-height: var(--aw-h, 440px);
 }
 
 .morph-target {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  position: relative; /* ::before 掠过亮带的定位上下文（no absolute 居中，改 flex 居中） */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -346,10 +288,10 @@ onBeforeUnmount(() => {
     border-radius var(--dur-morph) var(--ease),
     border-color var(--dur-morph) var(--ease),
     background var(--dur-morph) var(--ease),
-    color 500ms var(--ease),
-    font-size 500ms var(--ease),
-    letter-spacing 500ms var(--ease),
-    font-weight 500ms var(--ease);
+    color var(--dur-morph) var(--ease),
+    font-size var(--dur-morph) var(--ease),
+    letter-spacing var(--dur-morph) var(--ease),
+    font-weight var(--dur-morph) var(--ease);
 }
 
 /* 悬停：RGB 分离外发光 + 字距拉开（票 #13 效果 8） */
@@ -363,7 +305,7 @@ onBeforeUnmount(() => {
 }
 
 .morph-target:not(.open):active {
-  transform: translateX(-50%) scale(0.97);
+  transform: scale(0.97);
 }
 
 /* 掠过亮带（票 #13 效果 9） */

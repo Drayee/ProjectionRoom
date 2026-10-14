@@ -61,53 +61,61 @@ const TABS: { key: AuthTab; label: string }[] = [
       </button>
     </div>
 
-    <form @submit.prevent="f.submit()">
+    <form :class="{ 'two-col': f.tab.value === 'register' }" @submit.prevent="f.submit()">
       <template v-if="f.tab.value !== 'forgot'">
-        <label for="auth-username">账号</label>
-        <input
-          id="auth-username"
-          v-model="f.form.username"
-          name="username"
-          autocomplete="username"
-          placeholder="用户名"
-        />
+        <div class="field">
+          <label for="auth-username">账号</label>
+          <input
+            id="auth-username"
+            v-model="f.form.username"
+            name="username"
+            autocomplete="username"
+            placeholder="用户名"
+          />
+        </div>
       </template>
 
       <template v-if="f.tab.value === 'register'">
-        <label for="auth-display">昵称</label>
-        <input
-          id="auth-display"
-          v-model="f.form.displayName"
-          name="displayName"
-          autocomplete="nickname"
-          placeholder="留空则用账号名"
-        />
+        <div class="field">
+          <label for="auth-display">昵称</label>
+          <input
+            id="auth-display"
+            v-model="f.form.displayName"
+            name="displayName"
+            autocomplete="nickname"
+            placeholder="留空则用账号名"
+          />
+        </div>
       </template>
 
       <template v-if="f.tab.value === 'register' || f.tab.value === 'forgot'">
-        <label for="auth-email">邮箱</label>
-        <input
-          id="auth-email"
-          v-model="f.form.email"
-          name="email"
-          type="email"
-          autocomplete="email"
-          placeholder="用于找回密码"
-        />
-        <p v-if="f.emailProblem.value" class="hint">{{ f.emailProblem.value }}</p>
+        <div class="field">
+          <label for="auth-email">邮箱</label>
+          <input
+            id="auth-email"
+            v-model="f.form.email"
+            name="email"
+            type="email"
+            autocomplete="email"
+            placeholder="用于找回密码"
+          />
+          <p v-if="f.emailProblem.value" class="hint">{{ f.emailProblem.value }}</p>
+        </div>
       </template>
 
       <template v-if="f.tab.value !== 'forgot'">
-        <label for="auth-password">密码</label>
-        <input
-          id="auth-password"
-          v-model="f.form.password"
-          name="password"
-          type="password"
-          :autocomplete="f.tab.value === 'register' ? 'new-password' : 'current-password'"
-          placeholder="至少 8 位"
-        />
-        <p v-if="f.passwordProblem.value" class="hint">{{ f.passwordProblem.value }}</p>
+        <div class="field">
+          <label for="auth-password">密码</label>
+          <input
+            id="auth-password"
+            v-model="f.form.password"
+            name="password"
+            type="password"
+            :autocomplete="f.tab.value === 'register' ? 'new-password' : 'current-password'"
+            placeholder="至少 8 位"
+          />
+          <p v-if="f.passwordProblem.value" class="hint">{{ f.passwordProblem.value }}</p>
+        </div>
       </template>
 
       <p v-if="f.failed.value" class="alert" role="alert">{{ f.failed.value }}</p>
@@ -245,6 +253,26 @@ const TABS: { key: AuthTab; label: string }[] = [
 
 input {
   margin-bottom: 4px;
+}
+
+/* 字段组：label + input + 提示，作为 grid 单元整体换列 */
+.field {
+  min-width: 0;
+  margin-bottom: 4px;
+}
+
+/* 注册两列排布：4 个字段 2×2，避免单列过长撑出滚动条 */
+form.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 14px;
+  align-items: start;
+}
+
+form.two-col .alert,
+form.two-col .ok,
+form.two-col .row {
+  grid-column: 1 / -1;
 }
 
 /* 聚焦时分离描边（RGB 分离语言） */
