@@ -1,4 +1,3 @@
-<script setup lang="ts">
 /**
  * 展示层 composable：进房凭据装配与房间会话建立 / 拆除。
  * 不含协议实现（信令/WebRTC 在 stores/room.ts，逻辑层）。

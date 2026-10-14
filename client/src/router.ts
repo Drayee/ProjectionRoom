@@ -1,82 +1,87 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import HomeView from './views/HomeView.vue'
-import RoomView from './views/RoomView.vue'
-import LoginView from './views/LoginView.vue'
-import RegisterView from './views/RegisterView.vue'
-import HelpView from './views/HelpView.vue'
-import PublicRoomsView from './views/PublicRoomsView.vue'
-import AdminView from './views/AdminView.vue'
-import AboutView from './views/AboutView.vue'
-import UserView from './views/UserView.vue'
-import ResetPasswordView from './views/ResetPasswordView.vue'
-import VerifyEmailView from './views/VerifyEmailView.vue'
-import ComingSoonView from './views/ComingSoonView.vue'
-import PostsView from './views/PostsView.vue'
-import PostDetailView from './views/PostDetailView.vue'
-import PostEditorView from './views/PostEditorView.vue'
+import HomePage from './pages/HomePage.vue'
+import RoomPage from './pages/RoomPage.vue'
+import LoginPage from './pages/LoginPage.vue'
+import RegisterPage from './pages/RegisterPage.vue'
+import HelpPage from './pages/HelpPage.vue'
+import PublicRoomsPage from './pages/PublicRoomsPage.vue'
+import UserPage from './pages/UserPage.vue'
+import ResetPasswordPage from './pages/ResetPasswordPage.vue'
+import VerifyEmailPage from './pages/VerifyEmailPage.vue'
+import ComingSoonPage from './pages/ComingSoonPage.vue'
+import PostsPage from './pages/PostsPage.vue'
+import PostDetailView from './pages/PostDetailPage.vue'
+import PostEditorPage from './pages/PostEditorPage.vue'
 
 /**
- * 路由表。
+ * 路由表（月夜故障重建 · 票 #18 骨架）。
  *
- * **刻意不加全局守卫**（规格 §11：授权 100% 在服务端）：
- *   1. 守卫只能控"看到什么"，挡不住任何请求；把授权判断写在客户端等于把安全边界搬到前端；
- *   2. 观众按房间码进房**本来就不需要登录**，一个"未登录一律跳登录"的守卫会顺手把这扇门关上；
- *   3. 需要登录的是**具体动作**（建房），由动作入口就地拦截：`useAuthStore().ensureLoggedIn()`
- *      跳转时带上 `?redirect=<当前路径>`，登录成功后回到发起处。
+ * **刻意不加全局守卫**（铁律 I3：授权 100% 在服务端）：
+ *   1. 守卫只能控"看到什么"，挡不住任何请求；
+ *   2. 观众按房间码进房**本来就不需要登录**；
+ *   3. 需要登录的是**具体动作**（建房），由动作入口就地拦截：
+ *      `useAuthStore().ensureLoggedIn()`，跳转带 `?redirect=<当前路径>`。
  *
- * 未登录访问 `/` 不再"跳登录页"，而是由 `HomeView` 自己按登录态换渲染内容
- *（未登录：落地页 → 点「开始」展开登录窗口；已登录：标题栏 + 核心功能页）—— 仍然只需要这一条路由。
- *
- * 本批新增的路由分两类：
- *   - **真的有内容**：`/about`（作者介绍，最小占位并标注"待补充"）、`/user/:id`（自己的账号资料，
- *     本轮最小页）；
- *   - **占位（建设中）**：房间室的好友/官方、番剧论坛、帖子、消息 —— 六条路由先注册好，
- *     入口在首页标题栏的分区里，页面本体是 `ComingSoonView`（写清"建设中 + 预期形态 + 依赖"，
- *     不发任何请求）。后端与数据模型随后另行实现。
- *
- * 注：房间室的「公开」**不新增路由** —— 直接复用既有的 `/rooms`（`PublicRoomsView`，真实数据、
- * 免登录），因为"发现公开房间"本来就与"按房间码进房"并列，而不是登录后的特权。
+ * 18 条 path/name 与旧表逐字一致（票 #12 契约平移：`/room/:roomId`、
+ * `/login`（负向判据）、`/reset`、`/verify`（邮件链接写死）不可改）。
+ * 做/占位的分配来自票 #16：
+ *   - 真做：/ /room /login /register /reset /verify /help /rooms /user /posts×3
+ *   - 占位（ComingSoonPage，props 驱动）：/friends /official /forum /messages /about /admin
  */
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', name: 'home', component: HomeView },
-    { path: '/room/:roomId', name: 'room', component: RoomView, props: true },
-    { path: '/login', name: 'login', component: LoginView },
-    { path: '/register', name: 'register', component: RegisterView },
-    /*
-     * 邮件链接的两条落点（`/reset` 与 `/verify`）——**免登录**页面。
-     *
-     * 为什么这里**必须**自己解析 fragment：邮件里的链接形态是
-     * `<域名>/reset#token=<一次性串>`，token 刻意放在 fragment（不进 nginx 访问日志），
-     * 而本路由用的是 `createWebHistory()` —— vue-router **不消费 fragment**，
-     * 所以路由只匹配到 `/reset`，`#token=…` 得由页面挂载时自己读（见
-     * `utils/fragmentToken.ts`：读到的同时立刻把 hash 抹掉）。
-     *
-     * 为什么不做成"路由参数"（`/reset/:token`）：那样 token 会进 URL 路径 —— 进 nginx
-     * 访问日志、进 Referer、进浏览历史，与"刻意放 fragment"的初衷正好相反。
-     */
-    { path: '/reset', name: 'reset', component: ResetPasswordView },
-    { path: '/verify', name: 'verify', component: VerifyEmailView },
-    // 说明页：所有长篇解释集中在这里，核心页面只留一句话 + 图标入口。
-    { path: '/help', name: 'help', component: HelpView },
-    // 公开房间列表（二期 T5）：**免登录**，与落地页的「直接进入放映室」是同一条路径 ——
-    // 因此这里同样不设守卫，未登录的人照样能看到并点进任何一个公开房。
-    { path: '/rooms', name: 'public-rooms', component: PublicRoomsView },
-    // 管理端（二期 T7）：**不设守卫**。页面的"能不能进"由服务端响应决定（403 → 无权限 +
-    // 返回首页），本地守卫既拦不住请求、又会把"权限不足"说成"没登录"。
-    { path: '/admin', name: 'admin', component: AdminView },
-    // 作者介绍页：内容待补充，入口在落地页右上角与顶栏（同一个路由）。
-    { path: '/about', name: 'about', component: AboutView },
-    // 用户详情页：本轮只支持本人（公开档案接口尚未实现，页面里直说）。
-    { path: '/user/:id', name: 'user', component: UserView, props: true },
+    { path: '/', name: 'home', component: HomePage },
+    { path: '/room/:roomId', name: 'room', component: RoomPage, props: true },
+    { path: '/login', name: 'login', component: LoginPage },
+    { path: '/register', name: 'register', component: RegisterPage },
+    // 邮件链接落点：token 在 fragment（不进服务端日志），页面挂载时自己读
+    // 并立刻抹掉 hash（utils/fragmentToken.ts）。不做成路由参数：那会让 token 进 URL 路径。
+    { path: '/reset', name: 'reset', component: ResetPasswordPage },
+    { path: '/verify', name: 'verify', component: VerifyEmailPage },
+    // 帮助页：7 个锚点（#why-login #source #room-code #playback #diagnostics #privacy #faq）
+    // 被多处深链引用，scrollBehavior 消费 to.hash —— 锚点 id 必须保留（票 #16）。
+    { path: '/help', name: 'help', component: HelpPage },
+    // 公开房列表：免登录，与落地页「直接进入放映室」同一条发现路径
+    { path: '/rooms', name: 'public-rooms', component: PublicRoomsPage },
+    // 管理端：本轮不重建，走建设中占位（票 #16；不造能进但无功能的空壳）
+    {
+      path: '/admin',
+      name: 'admin',
+      component: ComingSoonPage,
+      props: {
+        title: '管理端',
+        icon: 'settings',
+        summary: '用户/房间管理、指标与审计。本轮前端重写暂不覆盖，建设中。',
+        bullets: [
+          '用户：封禁/解封、角色调整、邮箱绑定。',
+          '房间：强关、下架、指标观测。',
+          '审计与运行日志。',
+        ],
+        depends: ['下一轮前端重建计划（管理端视图）'],
+      },
+    },
+    // 作者介绍：内容形态属独立后续页（旧图 Out of scope），本轮占位
+    {
+      path: '/about',
+      name: 'about',
+      component: ComingSoonPage,
+      props: {
+        title: '关于作者',
+        icon: 'star',
+        summary: '作者介绍与项目缘起，内容待补充。',
+        bullets: ['月喵：主播播放本地视频，观众经 WebRTC 同步观看。'],
+        depends: ['作者提供介绍内容（独立后续页）'],
+      },
+    },
+    // 用户详情页：本轮只支持本人（公开档案接口尚未实现）
+    { path: '/user/:id', name: 'user', component: UserPage, props: true },
 
-    // ---------- 分区占位页（建设中）----------
-    // 内容写在路由的 props 里：一份渲染逻辑，六份说明，避免复制粘贴后各自漂移。
+    // ---------- 分区占位页（建设中；props 驱动，零请求） ----------
     {
       path: '/friends',
       name: 'friends',
-      component: ComingSoonView,
+      component: ComingSoonPage,
       props: {
         title: '房间室 · 好友',
         icon: 'users-group',
@@ -92,7 +97,7 @@ export const router = createRouter({
     {
       path: '/official',
       name: 'official',
-      component: ComingSoonView,
+      component: ComingSoonPage,
       props: {
         title: '房间室 · 官方',
         icon: 'shield-done',
@@ -108,7 +113,7 @@ export const router = createRouter({
     {
       path: '/forum',
       name: 'forum',
-      component: ComingSoonView,
+      component: ComingSoonPage,
       props: {
         title: '番剧论坛',
         icon: 'chat',
@@ -121,29 +126,16 @@ export const router = createRouter({
         depends: ['番剧目录（anime 条目）的数据模型', '帖子/主题表（与 /posts 共用）'],
       },
     },
-    {
-      path: '/posts',
-      name: 'posts',
-      component: PostsView,
-    },
-    {
-      path: '/posts/new',
-      name: 'post-editor',
-      component: PostEditorView,
-    },
-    {
-      path: '/posts/:id',
-      name: 'post-detail',
-      component: PostDetailView,
-      props: true,
-    },
+    { path: '/posts', name: 'posts', component: PostsPage },
+    { path: '/posts/new', name: 'post-editor', component: PostEditorPage },
+    { path: '/posts/:id', name: 'post-detail', component: PostDetailView, props: true },
     {
       path: '/messages',
       name: 'messages',
-      component: ComingSoonView,
+      component: ComingSoonPage,
       props: {
         title: '消息',
-        icon: 'share',
+        icon: 'msg',
         summary: '私聊与系统通知：会话列表、未读计数、进房邀请。',
         bullets: [
           '会话列表 + 未读计数（账号档案里的 unread 字段早就预留好了，现在恒为 0）。',
@@ -155,9 +147,8 @@ export const router = createRouter({
     },
   ],
   /**
-   * 滚动行为：`/help#source` 这类深链（首页的「片源准备」、建房/进房卡片里的"为什么？"）
-   * 必须真的滚到那一节，否则用户点了图标会以为"没反应"。
-   * 这里只做滚动，不做任何跳转判断，因此与"不加守卫"的约定不冲突。
+   * 滚动行为：`/help#source` 这类锚点深链必须真的滚到那一节。
+   * 只做滚动，不做任何跳转判断，与"不加守卫"的约定不冲突。
    */
   scrollBehavior(to, _from, savedPosition) {
     if (savedPosition) return savedPosition

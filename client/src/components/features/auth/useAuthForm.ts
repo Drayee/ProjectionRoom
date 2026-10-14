@@ -1,4 +1,3 @@
-<script setup lang="ts">
 /**
  * 展示层 composable：登录 / 注册 / 找回密码三页签表单的交互逻辑。
  * 不含协议实现（协议在 api/auth.ts，逻辑层）。
