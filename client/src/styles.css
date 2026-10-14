@@ -235,17 +235,6 @@ button.icon-only:hover:not(:disabled) {
   opacity: 0;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  body {
-    background: var(--bg);
-  }
-
-  * {
-    transition: none !important;
-    animation: none !important;
-  }
-}
-
 @media (max-width: 460px) {
   .page-glass {
     padding: 14px 12px 32px;

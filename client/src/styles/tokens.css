@@ -1,0 +1,95 @@
+/**
+ * 月喵 design tokens —— 「月夜故障 · B（数字切片）」。
+ *
+ * 真源：docs/reports/2026-10-14-glitch-motion-spec.md（动效）+ 地图 #8 Notes（色彩）。
+ * 视觉一手来源：docs/prototypes/glitch-direction.html（B 变体）。
+ *
+ * 三条硬约束（来自票 #13，违反即回归）：
+ *   1. 单屏常驻循环动画 ≤ 5；只动 transform / opacity；
+ *   2. 状态不得只靠描边颜色表达（描边仅 1.45:1，不达 WCAG AA）；
+ *   3. --dim 是 4.5:1 下限，不得再调暗。
+ */
+
+:root {
+  /* ---------- 色彩 ---------- */
+  --bg: #0a0710;
+  --bg-mid: #12091e;
+  --surface: #150e22;
+  --line: rgba(200, 120, 255, 0.2);
+  --line-strong: rgba(200, 120, 255, 0.45);
+
+  --text: #f0e6ff;
+  --dim: #8b7aa8; /* 4.5:1 下限，不得再暗 */
+  --accent: #b46cff;
+  --accent-hover: #c98dff;
+  --accent-ink: #12091e;
+
+  /* 故障三色（标题撕裂 / 分离发光） */
+  --glitch-g: #3dffa8;
+  --glitch-p: #ff6ec7;
+  --glitch-r: #ff3d6e;
+
+  --ok: #3ddc97;
+  --danger: #ff5c5c;
+
+  /* ---------- 形状 ---------- */
+  --radius: 0; /* B 全直角 */
+  --radius-sm: 0;
+  --radius-pill: 999px;
+  --gap: 20px;
+  --gap-sm: 12px;
+
+  /* ---------- 动效：三档时长 + 统一缓动 ---------- */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-micro: 160ms;
+  --dur-comp: 240ms;
+  --dur-morph: 440ms;
+
+  /* ---------- 故障节奏（独立成组，不并入三档） ---------- */
+  /* 三个撕裂周期必须互质：否则三片同时归位，看起来像"一次整齐的闪" */
+  --glitch-slice-1: 2600ms;
+  --glitch-slice-2: 3100ms;
+  --glitch-slice-3: 3700ms;
+  --glitch-barline: 5000ms;
+  --glitch-scan: 700ms;
+  --glitch-title-jit: 420ms;
+  --glitch-icon-jit: 260ms;
+  --glitch-sheen: 720ms;
+
+  /* ---------- 字体 ---------- */
+  --font-ui: 'ChillDuanSans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  --font-glitch: 'MaokenGlitchSans', 'ChillDuanSans', sans-serif;
+  --font-mono: 'Cascadia Mono', Consolas, monospace;
+
+  color-scheme: dark;
+}
+
+/* ---------- 字体声明（本地托管；CSP 严格模式禁外链） ---------- */
+@font-face {
+  font-family: 'ChillDuanSans';
+  src: url('/fonts/chillduan-sans-black.woff2') format('woff2');
+  font-display: swap;
+  font-weight: 400 900;
+}
+
+@font-face {
+  font-family: 'MaokenGlitchSans';
+  src: url('/fonts/maoken-glitch-sans.woff2') format('woff2');
+  font-display: swap;
+  font-weight: 400 900;
+}
+
+/**
+ * 降级：prefers-reduced-motion 下故障动画一律判死。
+ *
+ * ⚠️ 必须显式列出 ::before / ::after —— 通配选择器选不中伪元素。
+ * 实测踩过：漏了这条，FAB 呼吸环与顶栏故障线在降级下仍在动。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

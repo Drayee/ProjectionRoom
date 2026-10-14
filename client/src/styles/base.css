@@ -1,0 +1,101 @@
+/**
+ * 元素基线。
+ *
+ * 只放元素级样式（body / button / input / a / 焦点环）。
+ * 旧 styles.css 的公共类（.card / .glass / .badge / .icon-btn / .page-glass …）
+ * 一律不保留 —— 它们是旧视觉「月夜玻璃」的具身，按零残留应删；
+ * 各组件用 scoped 样式 + tokens 自持。
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
+  background: linear-gradient(180deg, var(--bg), var(--bg-mid) 60%, var(--bg));
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px;
+  width: 100%;
+  transition: border-color var(--dur-micro) var(--ease);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+/* 焦点环：全站统一，键盘可达性的基础 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 屏幕阅读器专用文本（可访问名来源，视觉隐藏） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 等宽（诊断/命令行类文本） */
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* 次要文本 */
+.dim {
+  color: var(--dim);
+}
