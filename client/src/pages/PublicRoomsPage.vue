@@ -30,7 +30,12 @@ onMounted(() => {
           <BrandIcon name="video" decorative :size="15" />
           <span class="name">{{ room.title || '未命名房间' }}</span>
           <span class="dim mono">{{ room.roomId }}</span>
-          <RouterLink class="enter" :to="{ name: 'public-rooms' }" style="display:none" />
+          <span v-if="room.hasPassword" class="lock" aria-label="有密码">
+            <BrandIcon name="shield-done" decorative :size="13" />
+          </span>
+          <RouterLink class="enter" :to="{ name: 'room', params: { roomId: room.roomId } }">
+            进房
+          </RouterLink>
         </li>
       </ul>
       <button v-if="store.hasMore && !store.loadingMore" class="more" type="button" @click="store.loadMore()">
@@ -47,6 +52,9 @@ onMounted(() => {
 .list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
 .list li { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--surface); padding: 10px 12px; font-size: 13px; }
 .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lock { color: var(--dim); display: inline-flex; }
+.enter { flex: none; padding: 5px 12px; border: 1px solid var(--line); color: var(--dim); font-size: 12px; }
+.enter:hover { color: var(--text); border-color: var(--accent); text-decoration: none; }
 .alert { color: var(--danger); }
 .more { align-self: center; padding: 8px 20px; border: 1px solid var(--line); color: var(--dim); }
 .more:hover { color: var(--text); border-color: var(--accent); }
