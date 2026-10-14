@@ -1,34 +1,11 @@
 <script setup lang="ts">
-/** /register 壳：同登录页，初始页签不同。 */
-import AppHeader from '../components/ui/AppHeader.vue'
-import AuthPanel from '../components/features/auth/AuthPanel.vue'
+/**
+ * /register —— 同 /login：不是独立注册页，是落地页形态 + 登录窗展开 + 「注册」页签。
+ * 路由保留是契约（AuthPanel 的注册深链、旧回跳路径都指它）。
+ */
+import LandingView from '../components/features/shell/LandingView.vue'
 </script>
 
 <template>
-  <div class="page">
-    <AppHeader variant="bare" />
-    <main class="body">
-      <AuthPanel initial-tab="register" />
-    </main>
-  </div>
+  <LandingView initial-stage="auth" initial-tab="register" :direct-entry="false" />
 </template>
-
-<style scoped>
-.page {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.body {
-  flex: 1;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 40px 20px;
-}
-
-.body > :deep(.panel) {
-  width: min(440px, 100%);
-}
-</style>

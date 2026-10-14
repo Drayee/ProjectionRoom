@@ -8,8 +8,6 @@
  * 视觉：B 的「数字切片」——故障黑体标题、四角直角标记、上下 RGB 分离装饰线、
  * 聚焦时分离描边、矩形按钮。
  */
-import { ref } from 'vue'
-import { RouterLink } from 'vue-router'
 import BrandIcon from '../../ui/BrandIcon.vue'
 import { useAuthForm, type AuthTab } from './useAuthForm'
 
@@ -34,8 +32,6 @@ const TABS: { key: AuthTab; label: string }[] = [
   { key: 'register', label: '注册' },
   { key: 'forgot', label: '找回密码' },
 ]
-
-const pwd = ref<HTMLInputElement | null>(null)
 </script>
 
 <template>
@@ -74,7 +70,6 @@ const pwd = ref<HTMLInputElement | null>(null)
           name="username"
           autocomplete="username"
           placeholder="用户名"
-          data-testid="login-username"
         />
       </template>
 
@@ -106,19 +101,17 @@ const pwd = ref<HTMLInputElement | null>(null)
         <label for="auth-password">密码</label>
         <input
           id="auth-password"
-          ref="pwd"
           v-model="f.form.password"
           name="password"
           type="password"
           :autocomplete="f.tab.value === 'register' ? 'new-password' : 'current-password'"
           placeholder="至少 8 位"
-          data-testid="login-password"
         />
         <p v-if="f.passwordProblem.value" class="hint">{{ f.passwordProblem.value }}</p>
       </template>
 
-      <p v-if="f.failed.value" class="alert" role="alert" data-testid="login-error">{{ f.failed.value }}</p>
-      <p v-if="f.notice.value" class="ok" role="status" data-testid="login-notice">{{ f.notice.value }}</p>
+      <p v-if="f.failed.value" class="alert" role="alert">{{ f.failed.value }}</p>
+      <p v-if="f.notice.value" class="ok" role="status">{{ f.notice.value }}</p>
 
       <div class="row">
         <button class="primary" type="submit" :disabled="!f.canSubmit.value || f.busy.value">
@@ -134,10 +127,10 @@ const pwd = ref<HTMLInputElement | null>(null)
       <button v-if="props.directEntry" class="ghost" type="button" @click="emit('direct')">
         直接进放映室
       </button>
-      <RouterLink v-if="f.tab.value !== 'register'" class="ghost" :to="{ name: 'register' }">
+      <button v-if="f.tab.value !== 'register'" class="ghost" type="button" @click="f.switchTab('register')">
         还没有账号？
-      </RouterLink>
-      <RouterLink v-else class="ghost" :to="{ name: 'login' }">已有账号？去登录</RouterLink>
+      </button>
+      <button v-else class="ghost" type="button" @click="f.switchTab('login')">已有账号？去登录</button>
     </div>
   </div>
 </template>
