@@ -3,7 +3,7 @@
 > **这是 AI 会话进入本项目后的唯一入口。默认只读本文件**，需要动某处时再按下面的路径精确打开那几个文件，不要重新遍历整棵树。
 >
 > **维护约定（必须遵守）**：目录结构、关键约定、命令、部署事实一旦变化，**同步更新本文件**。过时地图比没有地图更危险——后续会话会按它行动。
-> 最近一次同步：新增 `test/script/verify-connection.mjs`（协议层连通性探针，不依赖 Chrome，覆盖 REST/静态托管/Vite 代理/WS 升级/Origin 白名单四态）之后。
+> 最近一次同步：修复两处用户可见缺陷（单端口默认部署 `/ws` 被 Origin 白名单 403；auth 阶段不可见标题撑出整页滚动条）+ 账号能力关闭时前端不再显示裸 `请求失败（HTTP 404）` 之后。
 
 ---
 
@@ -50,7 +50,7 @@
 - **protobuf 是唯一真源**：`proto/projection_room.proto` → 生成 `internal/pb/*.go` 与 `client/src/gen/*.ts`（`scripts/gen-proto.ps1`）。
 - **WS 信封**：1 字节类型前缀 + protobuf 体；room 信令走 `/ws?roomId=<码>&clientId=<id>[&ticket=<票据>]`。
   - **无 `ticket` = 游客**（观众免登录进房是产品决定，别加拦截）；带票据则绑定账号；票据单次使用 + 30s 过期。
-  - **Origin 白名单**：`PR_ALLOWED_ORIGINS` 是**唯一**判据（不再"同源隐式放行"；DNS rebinding 曾据此绕过）。
+  - **Origin 白名单**：`PR_ALLOWED_ORIGINS` 是**唯一**判据（不再"同源隐式放行"；DNS rebinding 曾据此绕过）。默认值覆盖两种**本机**入口：开发态 `5173` 与单端口态 `8080`（后者是 `go run ./cmd` 的默认形态，漏了它会让默认部署开箱即坏：页面能开、`/ws` 一律 403）。**公网/隧道部署必须显式加域名**。
 - **DataChannel**：negotiated id=0，1 字节 kind 前缀（`0x01` 控制/`0x02` init/`0x03` 媒体/`0x04` tail）+ 7 字节媒体头；64 KiB 分片 + `bufferedAmount` 背压。
 - **房间码**：`^[A-Z0-9]{4,12}$`；建房**必须登录**且响应下发一次性 **`hostToken`**（主播断线宽限期内接回主播位必须携带）。
 - **主播宽限期**：`PR_ROOM_HOST_GRACE`（默认 60s）内房间保留，宽限期内**永不回收**；客户端用同一房间码自动重建。
@@ -65,7 +65,7 @@
 - **邮箱与找回**：注册**必须**填邮箱（不填会被拒）→ 发验证邮件 → **只有验证过的邮箱能用于找回**；管理员 `PATCH /api/admin/users/:id {email}` 绑定邮箱时会**同时标记已验证**（管理端 UI 已有该入口）。重置邮件里是一次性链接 `<PR_PUBLIC_BASE_URL>/reset#token=…`（token 在 **fragment** 里，故不进服务端访问日志）；验证链接同理走 `/verify#token=…`。
 - **迁移**：内嵌有序 DDL，启动自动补齐，**只做加法**；`schema_migrations` 记版本。
 - **API 速查**：`/api/auth/{register,login,refresh,logout,logout-all,me,ws-ticket}`、**`/api/auth/forgot`**（恒定 200，不泄露账号是否存在）、**`/api/auth/reset`**、**`/api/auth/verify-email`**（注意是 `verify-email` 而不是 `verify`）、`/api/rooms`(POST 建房，需登录)、`/api/rooms/:roomId`(信息)、`/api/rooms/:roomId/meta`(GET 仅房主读回 / PATCH 房主改)、`/api/public-rooms`(免登录)、`/api/ice`、`/api/v1/segment/*`、`/api/admin/{users,rooms,metrics,logs,audit}` + `/api/admin/rooms/:roomId/{close,unpublish}`。
-- **账号能力开关**：`PR_DB_DSN` 为空 = 账号关闭（不连库、不注册 `/api/auth/*` 与 `/api/admin/*`，游客照常进房）。这是刻意的**两步部署**路径。
+- **账号能力开关**：`PR_DB_DSN` 为空 = 账号关闭（不连库、不注册 `/api/auth/*` 与 `/api/admin/*`，游客照常进房）。这是刻意的**两步部署**路径。**注意它的用户可见形态**：此时 `/api/auth/*` 返回 404（路由未注册，有测试钉住），前端**必须**把这个 404 解释成"账号能力未启用（游客模式）"而不是裸的 `请求失败（HTTP 404）`（见 `useAuthForm.ts` 的分诊）——否则看起来像整个后端挂了。
 
 ## 5. 配置（环境变量）
 

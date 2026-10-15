@@ -508,10 +508,27 @@ func Default() *Config {
 			MaxMessageBytes: 4 * 1024 * 1024,
 			MaxChatLen:      500,
 			SendQueueSize:   32,
-			// 本机开发时页面在 Vite 5173、/ws 在 Go 8080（跨源）；
-			// 单端口部署与隧道域名不再"自动同源"（S-5 删掉了请求 Host 兜底），
-			// 所以部署到隧道时要把那个域名显式加进 PR_ALLOWED_ORIGINS。
-			AllowedOrigins: []string{"127.0.0.1:5173", "localhost:5173"},
+			// 默认白名单覆盖**两种本机入口**，缺一个就会让默认部署开箱即坏：
+			//   - 5173：开发态（Vite 出页面，/api 与 /ws 代理到 Go）；
+			//   - 8080：单端口态（Go 自己托管 client/dist，页面与 /ws 同端口）。
+			//
+			// 为什么必须把 8080 也列上（实测复现）：单端口是 README「单端口部署」与
+			// `go run ./cmd` 的**默认形态**（PR_ADDR 默认 127.0.0.1:8080、
+			// PR_SERVE_STATIC 默认 true），此时浏览器发出的 Origin 是
+			// `http://127.0.0.1:8080`。S-5 删掉"同源隐式放行"之后它不在白名单里，
+			// 于是 /ws 一律 403：页面能打开、房间却永远连不上
+			//（症状是"一直显示已断开/正在重连"，而服务端只留一行 403 日志）。
+			// 这是默认值自身的矛盾，不是使用者的配置错误。
+			//
+			// 为什么加它不削弱 S-5：S-5 挡的是"请求方自证同源"（Origin 与 Host 都由
+			// 请求方控制，DNS rebinding 据此绕过）。回环地址 127.0.0.1 / localhost
+			// 是**显式枚举**的常量，与请求头无关，伪造 Origin 依然进不来
+			//（见 internal/handler/ws.go 的 checkOrigin：判据只有"Origin 是否命中白名单"）。
+			// 它也只覆盖本机——公网部署必须自己配域名，这一点未变。
+			AllowedOrigins: []string{
+				"127.0.0.1:5173", "localhost:5173",
+				"127.0.0.1:8080", "localhost:8080",
+			},
 
 			MaxRepeatedElements:  DefaultSignalMaxRepeatedElements,
 			MaxMembersPerMessage: DefaultSignalMaxMembers,

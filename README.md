@@ -237,6 +237,7 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 | `PR_ICE_TTL` | `300s` | `/api/ice` 与建房间响应里 ICE 载荷的有效期（允许范围 `(0, 1h]`） |
 | `PR_STATIC_DIR` | `client/dist` | 前端构建产物目录（相对**进程工作目录**解析，请在仓库根目录启动） |
 | `PR_SERVE_STATIC` | `true` | 是否由 Go 服务端托管前端页面（单端口部署的总开关） |
+| `PR_ALLOWED_ORIGINS` | `127.0.0.1:5173,localhost:5173,127.0.0.1:8080,localhost:8080` | 允许连 `/ws` 的浏览器来源（逗号分隔，支持 `*.example.com`）。**S-5 之后这是唯一判据**：同源不再隐式放行（那条兜底可被伪造的 `Host` 满足，是 DNS rebinding 的绕过路径）。默认值覆盖两种**本机**入口：开发态（Vite 5173）与单端口态（Go 8080）。**公网/隧道部署必须把对外域名加进来**，否则症状是"页面能打开、但一直显示『已断开，正在自动重连』"，服务端只留一行 403 日志 |
 
 ### 账号层（ACCOUNTS 一期）
 

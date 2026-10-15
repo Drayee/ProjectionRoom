@@ -74,6 +74,48 @@ func TestWSOriginAllowsNonBrowserClient(t *testing.T) {
 	}
 }
 
+// TestWSOriginDefaultCoversBothLocalEntries 锁定 config.Default() 的白名单
+// 同时覆盖**开发态（Vite 5173）与单端口态（Go 8080）**两个本机入口。
+//
+// 为什么这是一条必须钉住的回归：单端口是 README「单端口部署」与 `go run ./cmd`
+// 的**默认形态**（PR_ADDR 默认 127.0.0.1:8080、PR_SERVE_STATIC 默认 true）。
+// 只列 5173 时，默认形态下浏览器发出的 Origin `http://127.0.0.1:8080` 不在白名单，
+// /ws 一律 403 —— 表现为"页面能打开、房间永远连不上（一直显示已断开/正在重连）"，
+// 而根因是默认值自相矛盾，不是使用者的配置错误（实测复现过）。
+//
+// 同时它必须**不**削弱 S-5：下面的负向判据确认伪造来源仍然 403。
+func TestWSOriginDefaultCoversBothLocalEntries(t *testing.T) {
+	// 刻意用 config.Default() 而不是手工构造：本用例要钉的正是**默认值**。
+	cfg := config.Default()
+
+	srv, _, _ := startTestServerWithManager(t, cfg)
+
+	allowed := []string{
+		"http://127.0.0.1:5173", // 开发态：Vite 出页面
+		"http://localhost:5173", // 开发态：另一种本机写法
+		"http://127.0.0.1:8080", // 单端口态：Go 自己托管 client/dist
+		"http://localhost:8080", // 单端口态：另一种本机写法
+	}
+	for i, origin := range allowed {
+		status, line := rawWSDial(t, srv,
+			fmt.Sprintf("/ws?roomId=ABCD12&clientId=def%d", i),
+			map[string]string{"Origin": origin})
+		if status != http.StatusSwitchingProtocols {
+			t.Fatalf("默认白名单应放行 %s（这是默认部署形态），实际 %d（%s）", origin, status, line)
+		}
+	}
+
+	// 负向判据：S-5 没有被这条默认值放宽 —— 非本机来源仍然必须 403。
+	for i, origin := range []string{"http://evil.example", "http://127.0.0.1:9999"} {
+		status, line := rawWSDial(t, srv,
+			fmt.Sprintf("/ws?roomId=ABCD12&clientId=evil%d", i),
+			map[string]string{"Origin": origin})
+		if status != http.StatusForbidden {
+			t.Fatalf("非白名单来源 %s 必须 403（S-5），实际 %d（%s）", origin, status, line)
+		}
+	}
+}
+
 // rawWSDial 发一次原始 WebSocket 握手，返回 HTTP 状态码与状态行。
 // 用裸 socket 而不是 websocket.Dial：只有这样才能自由构造 Origin/Host 头
 // （coder/websocket 会覆盖 Host）。

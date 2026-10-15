@@ -144,6 +144,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .landing {
+  /* position:relative 是 .hero-head.lifted 绝对定位的包含块（见该规则）。 */
+  position: relative;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -170,6 +172,27 @@ onBeforeUnmount(() => {
 .hero-head.lifted {
   transform: translateY(-clamp(40px, 14vh, 160px)) scale(0.4);
   opacity: 0;
+  /*
+   * auth 阶段标题虽然 opacity:0，但 opacity / transform **都不影响布局占位** ——
+   * 它仍实占 132px（clamp(60px,14vw,132px) 的字号 + line-height:1）。
+   * 于是"标题 + 28px 间距 + 455px 登录窗 + 间距 + 页脚 + 上下内边距" = 733px，
+   * 视口低于约 733px 时整页出现滚动条，而滚动的那一段**全是看不见的东西**
+   * （实测：700px 视口下 scrollHeight=733、窗口底部 633 未被裁切，
+   *   即滚动条没有任何可见收益，纯粹是误触）。
+   *
+   * 修法：auth 阶段把它移出布局流，位置锚在 .landing 的内边距处。
+   * 这样内容总高只剩登录窗本身，视口不够时由居中容器自然吸收。
+   *
+   * 关于过渡观感（rAF 实测，视口 800px）：两种写法下标题都是"先跳一下再淡出"，
+   * 因为它本来就靠父容器重新居中而位移，而窗口是一瞬间变高的（内容走 v-if）。
+   * 差别只在落点：修复前停在 top≈50，修复后停在 top≈18（贴住容器上内边距）。
+   * 两者都在 500ms 内淡到 opacity 0，且标题此刻已不可见，
+   * 因此这点落点差异不构成可见回归 —— 但也**不要**据此说"过渡完全没变"。
+   */
+  position: absolute;
+  top: 18px;
+  left: 20px;
+  right: 20px;
 }
 
 .brand {

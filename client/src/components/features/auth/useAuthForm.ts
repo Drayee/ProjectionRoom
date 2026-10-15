@@ -89,9 +89,16 @@ export function useAuthForm(initialTab: AuthTab = 'login') {
       notice.value = '如果这个邮箱注册过，重置链接已经发出。请查收（含垃圾箱）。'
     } catch (err) {
       const e = toAuthError(err)
-      // 分诊：网络不可达 / 429 太频繁 / 503 邮件不可用 / 凭据错，处置各不相同
+      // 分诊：网络不可达 / 账号能力未启用 / 429 太频繁 / 503 邮件不可用 / 凭据错，处置各不相同
       if (e.offline) failed.value = e.message
-      else if (e.status === 429) failed.value = '操作太频繁，请稍后再试。'
+      else if (e.status === 404) {
+        // 404 在这组端点上只有一个含义：**服务端没注册 /api/auth/***
+        //（账号能力关闭，即 PR_DB_DSN 为空，见 CLAUDE §5 的"两步部署"）。
+        // 它不是"地址写错了"，所以绝不能把裸的「请求失败（HTTP 404）」丢给用户 ——
+        // 那句话既解释不了状态，也指不出出路，看起来就像整个后端都挂了。
+        // 这里如实说明当前形态，并给出仍然可用的那条路（游客进房）。
+        failed.value = '服务端当前未启用账号能力（游客模式）：看片不需要账号，有房间码即可进房。'
+      } else if (e.status === 429) failed.value = '操作太频繁，请稍后再试。'
       else if (e.status === 503) failed.value = '邮件服务暂不可用，请稍后再试或联系管理员。'
       else failed.value = e.message || '操作失败，请重试。'
     } finally {
