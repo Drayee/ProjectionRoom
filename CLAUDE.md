@@ -3,7 +3,7 @@
 > **这是 AI 会话进入本项目后的唯一入口。默认只读本文件**，需要动某处时再按下面的路径精确打开那几个文件，不要重新遍历整棵树。
 >
 > **维护约定（必须遵守）**：目录结构、关键约定、命令、部署事实一旦变化，**同步更新本文件**。过时地图比没有地图更危险——后续会话会按它行动。
-> 最近一次同步：前端展示层按「月夜故障 · B」从零重建（`views/` 与根级 `components/` 删除、新结构 `pages/` + `components/{ui,features}/` + `styles/{tokens,base}.css`，票 #8/#19/#20 收尾）之后。
+> 最近一次同步：新增 `test/script/verify-connection.mjs`（协议层连通性探针，不依赖 Chrome，覆盖 REST/静态托管/Vite 代理/WS 升级/Origin 白名单四态）之后。
 
 ---
 
@@ -109,6 +109,7 @@ go test ./internal/store/ -count=1
 | `verify-ice` | ICE 下发/刷新/重启 | 实例需 `PR_ICE_TTL=30s` |
 | `verify-health` | 卡顿换父与健康度 | 素材用 `mkw_cut`（短素材会假失败） |
 | `verify-auth` | 账号 **34** 判据（重放撤销、封禁断连、游客进房、**`forgot` 不泄露账号存在性**） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉。**换环境时**：`forgot` 的期望值取决于实例是否配了 SMTP（未配=两条路径都 503，已配=都 200），脚本会先探测并打印它选了哪条 |
+| `verify-connection` | **协议层连通性**：后端 `/healthz`·`/api/ice`·`/api/public-rooms`·静态页面、Vite 页面与 `/api` 代理（识破 SPA 回退成 HTML）、`/ws` 直连与经代理升级、**Origin 白名单四态**（白名单内放行/白名单外 403/同主机异端口 403/无 Origin 放行） | **不依赖 Chrome**，几十毫秒出结论——"页面连不上后端"应先跑它再起浏览器。环境变量 `PR_BACKEND`/`PR_VITE`（`PR_VITE=''` 跳过代理层）/`PR_ALLOWED_ORIGIN`。**Origin 必须用原始 Upgrade 握手验证**：Node 内置 WebSocket 的第二参数只收子协议，传 `{headers:{Origin}}` 会被判非法子协议 → 1006，于是"被拒"与"不支持"同形 |
 | （待补）`verify-public-rooms` / `verify-admin` | 公开房列表与管理端强关/下架/审计 | **尚未在仓库里**（计划 T8 的产出，因故未落地）；需要时按 §6 起实例 + 管理员凭据自建 |
 | `lib/browser.mjs` | 公共库：`startChrome/openTarget/waitFor/createRoom/seedAndEnter/ensureAccount/lastAccount/newCookieJar/findChrome/argOf/percentile` | `createRoom` 会自动取测试账号（账号能力关闭时退化为匿名）；`seedAndEnter` 可传第 7 参 account 给主播窗口播种会话 |
 
