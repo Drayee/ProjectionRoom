@@ -50,7 +50,7 @@
 - **protobuf 是唯一真源**：`proto/projection_room.proto` → 生成 `internal/pb/*.go` 与 `client/src/gen/*.ts`（`scripts/gen-proto.ps1`）。
 - **WS 信封**：1 字节类型前缀 + protobuf 体；room 信令走 `/ws?roomId=<码>&clientId=<id>[&ticket=<票据>]`。
   - **无 `ticket` = 游客**（观众免登录进房是产品决定，别加拦截）；带票据则绑定账号；票据单次使用 + 30s 过期。
-  - **Origin 白名单**：`PR_ALLOWED_ORIGINS` 是**唯一**判据（不再"同源隐式放行"；DNS rebinding 曾据此绕过）。默认值覆盖两种**本机**入口：开发态 `5173` 与单端口态 `8080`（后者是 `go run ./cmd` 的默认形态，漏了它会让默认部署开箱即坏：页面能开、`/ws` 一律 403）。**公网/隧道部署必须显式加域名**。
+  - **Origin 白名单**：`PR_ALLOWED_ORIGINS` 是**唯一**判据（不再"同源隐式放行"；DNS rebinding 曾据此绕过）。默认值覆盖两种**本机**入口：开发态 `5173` 与单端口态 `8888`（后者是 `go run ./cmd` 的默认形态，漏了它会让默认部署开箱即坏：页面能开、`/ws` 一律 403）。**公网/隧道部署必须显式加域名**。
 - **DataChannel**：negotiated id=0，1 字节 kind 前缀（`0x01` 控制/`0x02` init/`0x03` 媒体/`0x04` tail）+ 7 字节媒体头；64 KiB 分片 + `bufferedAmount` 背压。
 - **房间码**：`^[A-Z0-9]{4,12}$`；建房**必须登录**且响应下发一次性 **`hostToken`**（主播断线宽限期内接回主播位必须携带）。
 - **主播宽限期**：`PR_ROOM_HOST_GRACE`（默认 60s）内房间保留，宽限期内**永不回收**；客户端用同一房间码自动重建。
@@ -106,11 +106,11 @@ go test ./internal/store/ -count=1
 
 ```powershell
 powershell -File scripts/setup-local-db.ps1    # 建 pr_app + 两个库，生成 .env.local（幂等）
-powershell -File scripts/run-local.ps1         # 读 .env.local 起服务（默认 127.0.0.1:8080）
+powershell -File scripts/run-local.ps1         # 读 .env.local 起服务（默认 127.0.0.1:8888）
 powershell -File scripts/run-local.ps1 -Port 8090   # 换端口（自动补 Origin 白名单）
 ```
 
-⚠️ **`PR_ALLOWED_ORIGINS` 在换端口时必须跟着改**：`run-local.ps1` 会自动补，但手工起实例时忘了它就是"页面能开、`/ws` 一律 403"（默认白名单只含 5173 与 8080）。
+⚠️ **`PR_ALLOWED_ORIGINS` 在换端口时必须跟着改**：`run-local.ps1` 会自动补，但手工起实例时忘了它就是"页面能开、`/ws` 一律 403"（默认白名单只含 5173 与 8888）。
 
 ⚠️ **两个坑**：① 测试库与生产库是**两个库**，DSN 的 `dbname` 必须含 `_test`（用例里有护栏）；② **`internal/store` 的真库用例会 TRUNCATE 表**，所以任何手工 fixture（如验收用的管理员账号）在跑过它们之后就不在了——需要重新注册并提权（`UPDATE users SET role='admin' WHERE username='…'`）。
 ⚠️ **测试实例收尾必须停进程**：曾有一个后台实例直连测试库、绕过了用例的跨进程隔离锁，导致 store 用例随机红。

@@ -5,8 +5,9 @@
  * 逻辑在 useAuthForm（展示层 composable）；本组件只渲染。
  * 归 features/auth/：它 import api/auth，有业务能力。
  *
- * 视觉：B 的「数字切片」——故障黑体标题、四角直角标记、上下 RGB 分离装饰线、
- * 聚焦时分离描边、矩形按钮。
+ * 视觉（B「数字切片」）：四角直角标记、上下 RGB 分离装饰线、
+ * 聚焦分离描边、会抖的故障分割线、矩形主按钮。
+ * 窗内标题不在此组件——由外层 LandingView 的 win-bar 承担。
  */
 import BrandIcon from '../../ui/BrandIcon.vue'
 import { useAuthForm, type AuthTab } from './useAuthForm'
@@ -17,10 +18,8 @@ const props = withDefaults(
     initialTab?: AuthTab
     /** 是否显示「直接进放映室」入口（落地页形态要，独立 /login 页不要）。 */
     directEntry?: boolean
-    /** 是否把标题隐藏（落地页已有大标题时）。 */
-    plain?: boolean
   }>(),
-  { initialTab: 'login', directEntry: false, plain: false },
+  { initialTab: 'login', directEntry: false },
 )
 
 const emit = defineEmits<{ (e: 'direct'): void }>()
@@ -36,16 +35,11 @@ const TABS: { key: AuthTab; label: string }[] = [
 
 <template>
   <div class="panel">
-    <!-- 四角直角标记：把"窗口"框出来（纯装饰） -->
+    <!-- 四角直角标记：把“窗口”框出来（纯装饰） -->
     <span class="corner c-tl" aria-hidden="true" />
     <span class="corner c-tr" aria-hidden="true" />
     <span class="corner c-bl" aria-hidden="true" />
     <span class="corner c-br" aria-hidden="true" />
-
-    <template v-if="!props.plain">
-      <h3 class="title">登录月喵</h3>
-      <p class="sub mono">// 账号只用于建房与社交；看片免登录</p>
-    </template>
 
     <div class="tabs" role="tablist">
       <button
@@ -211,20 +205,6 @@ const TABS: { key: AuthTab; label: string }[] = [
   border-top: 0;
 }
 
-/* 标题用故障黑体（B 的字形承担故障美学） */
-.title {
-  margin: 0 0 4px;
-  font-family: var(--font-glitch);
-  font-size: 22px;
-  letter-spacing: 0.06em;
-}
-
-.sub {
-  margin: 0 0 16px;
-  font-size: 12px;
-  color: var(--dim);
-}
-
 .tabs {
   display: flex;
   gap: 2px;
@@ -255,6 +235,13 @@ input {
   margin-bottom: 4px;
 }
 
+/* 聚焦时分离描边（RGB 分离语言） */
+input:focus {
+  box-shadow:
+    2px 0 0 var(--glitch-r),
+    -2px 0 0 var(--accent);
+}
+
 /* 字段组：label + input + 提示，作为 grid 单元整体换列 */
 .field {
   min-width: 0;
@@ -273,13 +260,6 @@ form.two-col .alert,
 form.two-col .ok,
 form.two-col .row {
   grid-column: 1 / -1;
-}
-
-/* 聚焦时分离描边（RGB 分离语言） */
-input:focus {
-  box-shadow:
-    2px 0 0 var(--glitch-r),
-    -2px 0 0 var(--accent);
 }
 
 .hint {

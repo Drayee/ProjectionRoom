@@ -57,14 +57,14 @@ WebRTC DataChannel 直接分发给其他节点（P2P 树状分发 + 多父条带
 
 ```bash
 # 上传并切片（multipart 字段名固定为 file）
-curl -F "file=@movie.mp4" http://127.0.0.1:8080/api/v1/segment/jobs
+curl -F "file=@movie.mp4" http://127.0.0.1:8888/api/v1/segment/jobs
 # → {"jobId":"...","state":"queued","queuePosition":0}
 
 # 查状态；done 之后 result 里带分片数与交付形态
-curl http://127.0.0.1:8080/api/v1/segment/jobs/<jobId>
+curl http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>
 # ≤1GiB：单次流式 zip；>1GiB：JSON manifest（含 parts 列表）
-curl -o out.zip http://127.0.0.1:8080/api/v1/segment/jobs/<jobId>/result
-curl -o part1.zip http://127.0.0.1:8080/api/v1/segment/jobs/<jobId>/parts/1
+curl -o out.zip http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>/result
+curl -o part1.zip http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>/parts/1
 ```
 
 配额：并发 2、排队 8、令牌桶 3 作业/分钟（超限 429 + `Retry-After`）、单作业 ≤60 分钟、源文件 ≤16GiB、
@@ -181,7 +181,7 @@ node test/script/verify-segment-ui.mjs
 前置：Go 1.26+、Node 20+；`ffmpeg` **可选**（本地切片工具会自己下载一份，服务端切片才需要它）。
 
 ```bash
-# 终端 1：服务端（默认 127.0.0.1:8080）
+# 终端 1：服务端（默认 127.0.0.1:8888）
 go run ./cmd
 
 # 终端 2：前端（默认 127.0.0.1:5173，/api 与 /ws 自动代理到服务端）
@@ -228,7 +228,7 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 
 | 变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `PR_ADDR` | `127.0.0.1:8080` | 监听地址 |
+| `PR_ADDR` | `127.0.0.1:8888` | 监听地址 |
 | `PR_MAX_MEMBERS` | `16` | 房间成员硬上限（真实上限由实测上行算出的 `1+K0` 决定） |
 | `PR_DEFAULT_STREAM_BPS` | `2000000` | 尚未拿到 mediaIndex 时的码率估计 |
 | `PR_STUN_URLS` | 7 条（见下表） | 逗号分隔的 STUN 候选列表，整体覆盖默认值 |
@@ -237,7 +237,7 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 | `PR_ICE_TTL` | `300s` | `/api/ice` 与建房间响应里 ICE 载荷的有效期（允许范围 `(0, 1h]`） |
 | `PR_STATIC_DIR` | `client/dist` | 前端构建产物目录（相对**进程工作目录**解析，请在仓库根目录启动） |
 | `PR_SERVE_STATIC` | `true` | 是否由 Go 服务端托管前端页面（单端口部署的总开关） |
-| `PR_ALLOWED_ORIGINS` | `127.0.0.1:5173,localhost:5173,127.0.0.1:8080,localhost:8080` | 允许连 `/ws` 的浏览器来源（逗号分隔，支持 `*.example.com`）。**S-5 之后这是唯一判据**：同源不再隐式放行（那条兜底可被伪造的 `Host` 满足，是 DNS rebinding 的绕过路径）。默认值覆盖两种**本机**入口：开发态（Vite 5173）与单端口态（Go 8080）。**公网/隧道部署必须把对外域名加进来**，否则症状是"页面能打开、但一直显示『已断开，正在自动重连』"，服务端只留一行 403 日志 |
+| `PR_ALLOWED_ORIGINS` | `127.0.0.1:5173,localhost:5173,127.0.0.1:8888,localhost:8888` | 允许连 `/ws` 的浏览器来源（逗号分隔，支持 `*.example.com`）。**S-5 之后这是唯一判据**：同源不再隐式放行（那条兜底可被伪造的 `Host` 满足，是 DNS rebinding 的绕过路径）。默认值覆盖两种**本机**入口：开发态（Vite 5173）与单端口态（Go 8888）。**公网/隧道部署必须把对外域名加进来**，否则症状是"页面能打开、但一直显示『已断开，正在自动重连』"，服务端只留一行 403 日志 |
 
 ### 账号层（ACCOUNTS 一期）
 
@@ -300,7 +300,7 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 
 ## 单端口部署 / 内网穿透
 
-开发态是两个端口（Vite 5173 + Go 8080）。要在局域网或公网给外部用，就把前端构建产物交给 Go 托管：
+开发态是两个端口（Vite 5173 + Go 8888）。要在局域网或公网给外部用，就把前端构建产物交给 Go 托管：
 **API、`/ws`、页面全部在同一个端口上**，于是一条隧道指向这一个端口就够了。
 
 前端只使用相对路径 `/api` 与 `/ws`，WebSocket 地址按页面协议推导
@@ -313,30 +313,30 @@ npm --prefix client install     # 首次
 npm --prefix client run build
 
 # 2. 起服务：默认就会托管 client/dist
-go run ./cmd                    # → http://127.0.0.1:8080 同时是页面、API 与 /ws
+go run ./cmd                    # → http://127.0.0.1:8888 同时是页面、API 与 /ws
 
 # 3. 需要局域网/公网可访问时，监听所有网卡
-PR_ADDR=0.0.0.0:8080 go run ./cmd
+PR_ADDR=0.0.0.0:8888 go run ./cmd
 ```
 
 Windows PowerShell 里等价写法：
 
 ```powershell
-$env:PR_ADDR = '0.0.0.0:8080'; go run ./cmd
+$env:PR_ADDR = '0.0.0.0:8888'; go run ./cmd
 ```
 
 然后用任意内网穿透工具把隧道指向这个端口，例如：
 
 ```bash
 # frp（服务端 frps + 本地 frpc）
-frpc tcp --server_addr <frps 地址> --server_port 7000 --local_ip 127.0.0.1 --local_port 8080 --remote_port 8080
+frpc tcp --server_addr <frps 地址> --server_port 7000 --local_ip 127.0.0.1 --local_port 8888 --remote_port 8888
 
 # ngrok / cloudflared（直接指本地端口）
-ngrok http 8080
-cloudflared tunnel --url http://127.0.0.1:8080
+ngrok http 8888
+cloudflared tunnel --url http://127.0.0.1:8888
 ```
 
-隧道把外部请求转给本机 `8080`，页面、`/api`、`/ws` 一起可达。路由优先级固定为
+隧道把外部请求转给本机 `8888`，页面、`/api`、`/ws` 一起可达。路由优先级固定为
 **`/healthz` → `/api/*` → `/ws` → `/assets/*` → 其它真实文件 → SPA 回退 `index.html`**，
 所以页面永远不会顶掉业务路由。
 

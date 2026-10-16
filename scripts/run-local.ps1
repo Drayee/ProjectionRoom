@@ -40,7 +40,7 @@ if ($Port -gt 0) {
     if ($env:PR_ALLOWED_ORIGINS) {
         $env:PR_ALLOWED_ORIGINS = "$needed,$($env:PR_ALLOWED_ORIGINS)"
     } else {
-        # 默认值已含 5173 与 8080，这里只补新端口（重复项无害）。
+        # 默认值已含 5173 与 8888，这里只补新端口（重复项无害）。
         $env:PR_ALLOWED_ORIGINS = "$needed,127.0.0.1:5173,localhost:5173"
     }
     Write-Host "[run-local] 端口覆盖为 $Port，已把该来源加入 PR_ALLOWED_ORIGINS" -ForegroundColor Yellow

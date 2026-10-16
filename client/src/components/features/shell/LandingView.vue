@@ -1,233 +1,194 @@
 <script setup lang="ts">
 /**
- * 落地页外壳（票 #10 B 定稿 · 票 #13 动效规格）。
+ * 落地页（票 #10 B 定稿 · 票 #13 动效规格）——morph 单状态机重写。
  *
- * 三态：hero（月喵标题 + 开始按钮）↔ auth（登录窗）。
- * /login、/register 复用本组件：initialStage='auth' + 对应页签，
- * 不再是"另一张表单页"（YG 裁决：注册没有单独界面）。
+ * 两态：hero（月喵标题 + 「开始」按钮）↔ auth（登录窗）。
+ * /login、/register 复用本组件：initial-stage='auth' 直接以展开态挂载。
  *
- * 动效硬约束（票 #13）：
- *   - 撕裂三片周期 2600/3100/3700ms **互质**，steps() 阶梯；
- *   - 抖动幅度按 em（原型 9–18px @ 132px 字号 ≈ .07–.14em）；
- *   - 拼合入场 460ms 错开 0/80/160ms，播完**摘类**；
- *   - morph 440ms：按钮→登录窗走 CSS transition（min-width/padding/border-radius），
- *     不再用 WAAPI FLIP——FLIP 的 transform keyframe 会覆盖居中 transform 且与
- *     CSS transition 双重叠加，曾导致「突然变圆 / 窗口右移」。
+ * 设计要点（全部由 .open 一个 class 驱动，无任何过渡编排 timer）：
+ *   1. 卡片布局恒为窗口尺寸 —— morph 全程零布局变化，滚动条永不跳动；
+ *   2. hero 态把卡片整体 scale(0.4, 0.16) 缩成按钮。「开始」标签用恒定反比
+ *      scale(2.5, 6.25) 抵消，起点文字尺寸精确等于原字号（160ms 内淡出，膨胀不可察觉）；
+ *   3. 按钮与窗口同为直角矩形（B 全直角语言）——morph 期间 border-radius 恒为 0，
+ *      矩形直接连续长成窗口，无需任何圆角切换；
+ *   4. 窗口内容不做反比缩放——它只在卡片接近终态时才淡入（压扁 ≤15% 且半透明），
+ *      展开方向「内容随窗口成型浮现」、收起方向「内容压入按钮」，双向对称自然；
+ *      （反比缩放与卡片缩放缓动不同步，中段会把内容鼓胀到 2 倍高，已实测排除）
+ *   5. 「开始」标签与窗口内容始终共存于 DOM，只切 opacity，无“消失再出现”；
+ *   6. 标题只走 transform 缩小上移，不参与布局。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AuthPanel from '../auth/AuthPanel.vue'
 import JoinRoomCard from '../room/JoinRoomCard.vue'
 import type { AuthTab } from '../auth/useAuthForm'
 
 const props = withDefaults(
   defineProps<{
-    /** 初始形态：落地页 / 登录窗展开。 */
     initialStage?: 'hero' | 'auth'
-    /** 登录窗初始页签。 */
     initialTab?: AuthTab
-    /** 是否显示「直接进放映室」入口（落地页形态要）。 */
     directEntry?: boolean
   }>(),
   { initialStage: 'hero', initialTab: 'login', directEntry: true },
 )
 
+/** 页面唯一形态开关：hero（按钮）↔ auth（窗口）。 */
 const stage = ref<'hero' | 'auth'>(props.initialStage)
-const showDirect = ref(false)
-const transitioning = ref(false)
+/** 窗口内的面板：登录表单 ↔ 直接进房。 */
+const panel = ref<'auth' | 'direct'>('auth')
+/** 标题拼合入场态（组装完成后摘除，避免常驻 animation 列表超标）。 */
 const assembling = ref(true)
-/** 标题折叠：过渡结束后才折叠掉布局占位（避免 absolute 瞬间跳移）。 */
-const titleCollapsed = ref(false)
-let transitionTimer: ReturnType<typeof setTimeout> | undefined
-let collapseTimer: ReturnType<typeof setTimeout> | undefined
+
+const open = computed(() => stage.value === 'auth')
+/** 直接以 auth 挂载的页面（/login、/register）没有可回退的 hero 形态，不可收起。 */
+const canCollapse = props.initialStage === 'hero'
+const windowTitle = computed(() => (panel.value === 'auth' ? '登录月喵' : '进入放映室'))
+
+const cardEl = ref<HTMLElement | null>(null)
+
+const displayName = (() => {
+  try {
+    return localStorage.getItem('pr:name') || ''
+  } catch {
+    return ''
+  }
+})()
+
 let assembleTimer: ReturnType<typeof setTimeout> | undefined
 
-const displayName = ref(
-  (() => {
-    try {
-      return localStorage.getItem('pr:name') || ''
-    } catch {
-      return ''
-    }
-  })(),
-)
+function start(): void {
+  stage.value = 'auth'
+}
 
-function finishTransition() {
-  transitioning.value = false
-  if (stage.value === 'auth') {
-    titleCollapsed.value = true
+function collapse(): void {
+  if (canCollapse) stage.value = 'hero'
+}
+
+/** 触发键只处理 hero 态：auth 态绝不 preventDefault，保证表单回车可提交。 */
+function onTriggerKey(e: KeyboardEvent): void {
+  if (stage.value !== 'hero') return
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault()
+    start()
   }
 }
 
-function setStage(next: 'hero' | 'auth') {
-  if (stage.value === next) return
-  stage.value = next
-  transitioning.value = true
-  if (transitionTimer !== undefined) clearTimeout(transitionTimer)
-  transitionTimer = setTimeout(finishTransition, 700)
-  if (next === 'hero') {
-    // 收起：先摘掉折叠回到布局流，再淡入显示
-    titleCollapsed.value = false
+function onWindowKey(e: KeyboardEvent): void {
+  if (e.key === 'Escape') collapse()
+}
+
+watch(stage, async (s) => {
+  await nextTick()
+  if (s === 'auth') {
+    document.getElementById('auth-username')?.focus()
+  } else {
+    cardEl.value?.focus()
   }
-}
-
-function startClicked() {
-  setStage('auth')
-}
-
-function collapse() {
-  setStage('hero')
-}
+})
 
 onMounted(() => {
-  // 拼合入场播完摘类（460 + 160 延迟 + 余量）
   assembleTimer = setTimeout(() => (assembling.value = false), 1100)
+  window.addEventListener('keydown', onWindowKey)
 })
 
 onBeforeUnmount(() => {
-  if (transitionTimer !== undefined) clearTimeout(transitionTimer)
   if (assembleTimer !== undefined) clearTimeout(assembleTimer)
+  window.removeEventListener('keydown', onWindowKey)
 })
 </script>
 
 <template>
-  <div class="landing" :class="{ 'is-auth': stage === 'auth' }">
-    <div class="stage-area">
-      <!-- 标题：故障黑体 + 三片撕裂（纯装饰切片 aria-hidden，票 #13 §6.1） -->
-      <header class="hero-head" :class="{ lifted: stage === 'auth' && titleCollapsed, leaving: transitioning, assembling }">
-        <h1 class="brand">
-          <span class="sr">月喵</span>
-          <span class="sl sl1" aria-hidden="true">月喵</span>
-          <span class="sl sl2" aria-hidden="true">月喵</span>
-          <span class="sl sl3" aria-hidden="true">月喵</span>
+  <div class="landing" :class="{ open }">
+    <main class="stage">
+      <header class="hero" :class="{ assembling }">
+        <h1 class="brand" aria-label="月喵">
+          <span class="base" aria-hidden="true">月喵</span>
+          <span class="sl s1" aria-hidden="true">月喵</span>
+          <span class="sl s2" aria-hidden="true">月喵</span>
+          <span class="sl s3" aria-hidden="true">月喵</span>
         </h1>
       </header>
 
-      <!-- 开始按钮 → 登录窗 morph 容器 -->
-      <div class="morph-box">
-        <div
-          class="morph-target"
-          :class="{ open: stage === 'auth' }"
-          :role="stage === 'hero' ? 'button' : undefined"
-          :tabindex="stage === 'hero' ? 0 : -1"
-          :aria-label="stage === 'hero' ? '开始' : undefined"
-          @click="stage === 'hero' && startClicked()"
-          @keydown.enter.prevent="stage === 'hero' && startClicked()"
-          @keydown.space.prevent="stage === 'hero' && startClicked()"
-        >
-          <span v-if="stage === 'hero' || transitioning" class="start-label">开始</span>
+      <!-- morph 卡片：布局恒为窗口尺寸，hero 态整体缩成一个胶囊按钮 -->
+      <div
+        ref="cardEl"
+        class="card"
+        :class="{ open }"
+        :role="open ? undefined : 'button'"
+        :tabindex="open ? -1 : 0"
+        :aria-label="open ? undefined : '开始'"
+        :aria-expanded="open ? undefined : 'false'"
+        aria-controls="landing-window"
+        @click="stage === 'hero' && start()"
+        @keydown="onTriggerKey"
+      >
+        <span class="start-label" aria-hidden="true">开始</span>
 
-          <div v-if="stage === 'auth' || transitioning" class="auth-inner">
-            <div class="window-bar">
-              <span class="window-title">登录月喵</span>
-              <button
-                v-if="props.initialStage !== 'auth'"
-                type="button"
-                class="collapse"
-                aria-label="收起登录窗"
-                v-tip="'收起'"
-                @click.stop="collapse"
-              >
-                ✕
-              </button>
-            </div>
+        <div id="landing-window" class="window">
+          <div class="win-bar">
+            <span class="win-title">{{ windowTitle }}</span>
+            <button
+              v-if="canCollapse"
+              type="button"
+              class="win-close"
+              aria-label="收起登录窗"
+              @click.stop="collapse"
+            >
+              ✕
+            </button>
+          </div>
+
+          <Transition name="win" mode="out-in">
             <AuthPanel
-              v-if="!showDirect"
-              plain
+              v-if="panel === 'auth'"
+              key="auth"
               :initial-tab="props.initialTab"
               :direct-entry="props.directEntry"
-              @direct="showDirect = true"
+              @direct="panel = 'direct'"
             />
-            <template v-else>
+            <div v-else key="direct" class="direct">
               <JoinRoomCard :name="() => displayName || '观众'" />
-              <button class="back-auth" type="button" @click="showDirect = false">
+              <button class="back-auth" type="button" @click="panel = 'auth'">
                 ← 返回登录
               </button>
-            </template>
-          </div>
+            </div>
+          </Transition>
         </div>
       </div>
 
       <p class="foot dim">看片不需要账号 · 有房间码就能进</p>
-    </div>
+    </main>
   </div>
 </template>
 
 <style scoped>
+/* ---------- 布局（morph 期间无任何布局属性变化 → 滚动条永不动） ---------- */
 .landing {
-  /* position:relative 是 .hero-head.lifted 绝对定位的包含块（见该规则）。 */
-  position: relative;
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  padding: 18px 20px 28px;
+  padding: 24px 20px 28px;
 }
 
-.stage-area {
+.stage {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 28px;
+  justify-content: safe center;
+  gap: 40px;
 }
 
-/* ---------- 标题：三片撕裂 ---------- */
-.hero-head {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  /*
-   * 标题的过渡：淡出用 opacity/transform，折叠布局用 position（不参与 transition）。
-   * 
-   * 分为两阶段：
-   *   ① 过渡期（leaving）：留在布局流里淡出上移，CSS transition 自动过渡。
-   *   ② 过渡结束（lifted）：absolute 折叠占位，此时标题已不可见，无跳动。
-   * 收起时反向：先摘掉 folded 回到布局流（opacity 0），CSS transition 自动淡入。
-   */
-  transition:
-    transform var(--dur-morph) var(--ease),
-    opacity 500ms var(--ease);
+/* ---------- 标题：故障黑体 + 三片撕裂（票 #13 规格，周期互质） ---------- */
+.hero {
+  transform-origin: 50% 100%;
+  transition: transform var(--dur-morph) var(--ease);
 }
 
-/*
- * 阶段①：过渡期间在布局流中淡出上移。
- * 初始值与 .lifted 一致，确保从 leaving → lifted 不跳变。
- */
-.hero-head.leaving {
-  transform: translateY(-clamp(40px, 14vh, 160px)) scale(0.4);
-  opacity: 0;
-}
-
-/*
- * 阶段②：过渡结束后折叠占位。
- * 此时标题 opacity=0 已不可见，移动到 absolute 用户感知不到。
- * 上一轮用 absolute 直接生效导致"标题闪一下就不见了"，
- * 就是因为没有 leaving 阶段做布局流中的平滑淡出。
- */
-.hero-head.lifted {
-  transform: translateY(-clamp(40px, 14vh, 160px)) scale(0.4);
-  opacity: 0;
-  /*
-   * auth 阶段标题虽然 opacity:0，但 opacity / transform **都不影响布局占位** ——
-   * 它仍实占 132px（clamp(60px,14vw,132px) 的字号 + line-height:1）。
-   * 于是"标题 + 28px 间距 + 455px 登录窗 + 间距 + 页脚 + 上下内边距" = 733px，
-   * 视口低于约 733px 时整页出现滚动条，而滚动的那一段**全是看不见的东西**
-   * （实测：700px 视口下 scrollHeight=733、窗口底部 633 未被裁切，
-   *   即滚动条没有任何可见收益，纯粹是误触）。
-   *
-   * 修法：auth 阶段把它移出布局流，位置锚在 .landing 的内边距处。
-   * 这样内容总高只剩登录窗本身，视口不够时由居中容器自然吸收。
-   *
-   * 关于过渡观感（rAF 实测，视口 800px）：两种写法下标题都是"先跳一下再淡出"，
-   * 因为它本来就靠父容器重新居中而位移，而窗口是一瞬间变高的（内容走 v-if）。
-   * 差别只在落点：修复前停在 top≈50，修复后停在 top≈18（贴住容器上内边距）。
-   * 两者都在 500ms 内淡到 opacity 0，且标题此刻已不可见，
-   * 因此这点落点差异不构成可见回归 —— 但也**不要**据此说"过渡完全没变"。
-   */
-  position: absolute;
-  top: 18px;
-  left: 20px;
-  right: 20px;
+/* 展开时缩小上移：纯 transform，不参与布局 */
+.landing.open .hero {
+  transform: translateY(-44px) scale(0.52);
 }
 
 .brand {
@@ -240,7 +201,8 @@ onBeforeUnmount(() => {
   color: var(--text);
 }
 
-.brand .sr {
+/* 基准层：只占位不上色，为 h1 提供尺寸（可访问名由 h1 的 aria-label 承担） */
+.brand .base {
   visibility: hidden;
 }
 
@@ -249,140 +211,115 @@ onBeforeUnmount(() => {
   left: 0;
   top: 0;
   width: 100%;
-  visibility: visible;
 }
 
-.brand .sl1 {
+.brand .s1 {
   clip-path: inset(0 0 66% 0);
   color: var(--accent);
   animation: slB1 var(--glitch-slice-1) steps(3, end) infinite;
 }
 
-.brand .sl2 {
+.brand .s2 {
   clip-path: inset(33% 0 33% 0);
   color: var(--glitch-p);
   animation: slB2 var(--glitch-slice-2) steps(2, end) infinite;
 }
 
-.brand .sl3 {
+.brand .s3 {
   clip-path: inset(66% 0 0 0);
   color: var(--glitch-r);
   animation: slB3 var(--glitch-slice-3) steps(3, end) infinite;
 }
 
-/* 抖动幅度按 em（票 #13：原型 9–18px @ 132px ≈ .07–.14em） */
 @keyframes slB1 {
-  0%, 80% { transform: none; opacity: 0.9 }
-  84% { transform: translateX(-0.14em); opacity: 1 }
-  88%, 100% { transform: none; opacity: 0.9 }
+  0%, 80% { transform: none; opacity: 0.9; }
+  84% { transform: translateX(-0.14em); opacity: 1; }
+  88%, 100% { transform: none; opacity: 0.9; }
 }
 
 @keyframes slB2 {
-  0%, 86% { transform: none; opacity: 0.85 }
-  90% { transform: translateX(0.11em) }
-  94%, 100% { transform: none; opacity: 0.85 }
+  0%, 86% { transform: none; opacity: 0.85; }
+  90% { transform: translateX(0.11em); }
+  94%, 100% { transform: none; opacity: 0.85; }
 }
 
 @keyframes slB3 {
-  0%, 90% { transform: none; opacity: 0.95 }
-  93% { transform: translateX(-0.07em) skewX(-6deg) }
-  96%, 100% { transform: none; opacity: 0.95 }
+  0%, 90% { transform: none; opacity: 0.95; }
+  93% { transform: translateX(-0.07em) skewX(-6deg); }
+  96%, 100% { transform: none; opacity: 0.95; }
 }
 
-/* 拼合入场：三片从不同方向飞入，错开 0/80/160ms；播完父级摘类 */
-.assembling .sl1 {
-  animation: asmIn1 var(--dur-morph) var(--ease) both, slB1 var(--glitch-slice-1) steps(3, end) 460ms infinite;
-}
-
-.assembling .sl2 {
-  animation: asmIn2 var(--dur-morph) var(--ease) 80ms both, slB2 var(--glitch-slice-2) steps(2, end) 540ms infinite;
-}
-
-.assembling .sl3 {
-  animation: asmIn3 var(--dur-morph) var(--ease) 160ms both, slB3 var(--glitch-slice-3) steps(3, end) 620ms infinite;
-}
+/* 拼合入场：三片错峰 0/80/160ms，结束后摘类回到常驻撕裂 */
+.assembling .s1 { animation: asmIn1 440ms var(--ease) both, slB1 var(--glitch-slice-1) steps(3, end) 460ms infinite; }
+.assembling .s2 { animation: asmIn2 440ms var(--ease) 80ms both, slB2 var(--glitch-slice-2) steps(2, end) 540ms infinite; }
+.assembling .s3 { animation: asmIn3 440ms var(--ease) 160ms both, slB3 var(--glitch-slice-3) steps(3, end) 620ms infinite; }
 
 @keyframes asmIn1 {
-  from { transform: translateX(-0.55em); opacity: 0 }
-  to { transform: none; opacity: 0.9 }
+  from { transform: translateX(-0.55em); opacity: 0; }
+  to { transform: none; opacity: 0.9; }
 }
 
 @keyframes asmIn2 {
-  from { transform: translateX(0.55em); opacity: 0 }
-  to { transform: none; opacity: 0.85 }
+  from { transform: translateX(0.55em); opacity: 0; }
+  to { transform: none; opacity: 0.85; }
 }
 
 @keyframes asmIn3 {
-  from { transform: translateY(0.24em); opacity: 0 }
-  to { transform: none; opacity: 0.95 }
+  from { transform: translateY(0.24em); opacity: 0; }
+  to { transform: none; opacity: 0.95; }
 }
 
-/* ---------- morph：按钮 → 登录窗（纯 CSS transition，440ms） ---------- */
-.morph-box {
-  display: flex;
-  justify-content: center;
-  width: 100%;
-}
-
-/**
- * morph 容器：按钮态与登录窗态在过渡中会**同时挂载**（`transitioning` 窗口内），
- * 所以子节点必须**叠在同一格**里（`grid-row/column: 1`）。
- *
- * ⚠️ 只写 `display:grid` 不够：默认 `grid-auto-flow: row` 会让两个子节点各占一行，
- * 容器尺寸被两者的组合撑大（实测过渡首帧宽 491px、`transitioning` 关闭后跳回 440px），
- * 表现为「窗口在右侧生成 + 内容突然右移后又正常」。叠格后容器宽高只由窗口本身决定。
- */
-.morph-target {
-  position: relative; /* ::before 掠过亮带的定位上下文（no absolute 居中，改 flex 居中） */
-  display: grid;
-  grid-template-columns: 1fr;
-  align-items: center;
-  justify-items: center;
-  min-width: 168px;
-  padding: 16px 52px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  cursor: pointer;
+/* ---------- morph 卡片 ---------- */
+.card {
+  position: relative;
+  width: min(440px, 92vw);
+  padding: 16px;
   overflow: hidden;
+  border: 1px solid var(--accent);
+  /* 按钮与窗口同为直角矩形：morph 期间圆角不变，矩形直接长成窗口 */
+  border-radius: var(--radius);
+  background-color: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+  /* 按钮尺寸：卡片恒为窗口尺寸，hero 态整体缩成一个矩形按钮 */
+  transform: scale(0.4, 0.16);
   transition:
-    min-width var(--dur-morph) var(--ease),
-    padding var(--dur-morph) var(--ease),
-    border-radius var(--dur-morph) var(--ease),
+    transform var(--dur-morph) var(--ease),
+    background-color var(--dur-morph) var(--ease),
     border-color var(--dur-morph) var(--ease),
-    background var(--dur-morph) var(--ease),
-    color var(--dur-morph) var(--ease),
-    font-size var(--dur-morph) var(--ease),
-    letter-spacing var(--dur-morph) var(--ease),
-    font-weight var(--dur-morph) var(--ease);
+    box-shadow var(--dur-morph) var(--ease);
 }
 
-/* 标签与登录窗叠在同一格：重叠而非并排/堆叠，容器尺寸只取窗口 */
-.morph-target > * {
-  grid-row: 1;
-  grid-column: 1;
+.card.open {
+  transform: none;
+  border-color: var(--line);
+  background-color: var(--surface);
+  color: var(--text);
+  cursor: default;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
 }
 
-/* 悬停：RGB 分离外发光 + 字距拉开（票 #13 效果 8） */
-.morph-target:not(.open):hover {
-  background: var(--accent-hover);
-  letter-spacing: 0.2em;
+/* 悬停光晕：独立伪元素走微时长透明度，不与 morph 的 transition 互相干扰 */
+.card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   box-shadow:
     5px 0 0 var(--glitch-r),
     -5px 0 0 var(--accent),
     0 10px 30px rgba(180, 108, 255, 0.35);
+  opacity: 0;
+  transition: opacity var(--dur-micro) var(--ease);
+  pointer-events: none;
 }
 
-.morph-target:not(.open):active {
-  transform: scale(0.97);
+.card:not(.open):hover::after {
+  opacity: 1;
 }
 
-/* 掠过亮带（票 #13 效果 9） */
-.morph-target:not(.open)::before {
+/* 扫光 */
+.card::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -391,55 +328,56 @@ onBeforeUnmount(() => {
   transform: translateX(-120%);
 }
 
-.morph-target:not(.open):hover::before {
+.card:not(.open):hover::before {
   animation: sheen var(--glitch-sheen) var(--ease);
 }
 
 @keyframes sheen {
-  from { transform: translateX(-120%) }
-  to { transform: translateX(120%) }
+  from { transform: translateX(-120%); }
+  to { transform: translateX(120%); }
 }
 
-/* auth 阶段：放大为登录窗（直角，B 语言） */
-.morph-target.open {
-  min-width: min(440px, 86vw);
-  padding: 16px;
-  border-radius: var(--radius);
-  border-color: var(--line);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 400;
-  letter-spacing: 0;
-  cursor: default;
-}
-
+/* 开始标签：与窗口内容共存，只切 opacity。
+   反比缩放抵消卡片缩放，文字任何时刻都是原尺寸。 */
 .start-label {
-  transition: opacity 250ms var(--ease);
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-glitch);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  transform: scale(2.5, 6.25);
+  opacity: 1;
   pointer-events: none;
+  /* 展开立即淡出；收起延迟到后半段淡入（等卡片接近按钮形态） */
+  transition: opacity 160ms var(--ease) 260ms;
 }
 
-.morph-target.open .start-label {
+.card.open .start-label {
   opacity: 0;
+  transition: opacity 160ms var(--ease);
 }
 
-.auth-inner {
+/* 窗口内容：随卡片一起缩放（不做反比——反比会与卡片缓动不同步，中段鼓胀）。
+   展开延后到 240ms 才淡入（卡片已近终态，压扁 ≤15%），收起立即淡出。 */
+.window {
+  position: relative;
+  z-index: 1;
   width: 100%;
-  /*
-   * 延迟从 180ms 改为 0ms：否则按钮文字已经淡出（start-label opacity 0 约 250ms）
-   * 到变成透明，窗口内容却还没出现——用户看到的就是"按钮突然消失、空白一阵、
-   * 然后窗口弹出来"。实测 morph 440ms 内按钮是持续形变的，窗口内容随 morph
-   * 同时出现不会有"突然跳出一整张窗口"的感觉。
-   */
-  animation: fade-in 350ms var(--ease) 0ms both;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms var(--ease);
 }
 
-@keyframes fade-in {
-  from { opacity: 0; transform: translateY(4px) }
-  to { opacity: 1; transform: none }
+.card.open .window {
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity 200ms var(--ease) 240ms;
 }
 
-.window-bar {
+.win-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -447,13 +385,13 @@ onBeforeUnmount(() => {
   margin-bottom: 12px;
 }
 
-.window-title {
+.win-title {
   font-family: var(--font-glitch);
   font-size: 17px;
   letter-spacing: 0.06em;
 }
 
-.collapse {
+.win-close {
   width: 30px;
   height: 30px;
   color: var(--dim);
@@ -461,21 +399,37 @@ onBeforeUnmount(() => {
   transition: color var(--dur-micro) var(--ease), transform var(--dur-micro) var(--ease);
 }
 
-.collapse:hover {
+.win-close:hover {
   color: var(--text);
 }
 
-.collapse:active {
+.win-close:active {
   transform: scale(0.9);
 }
 
-.foot {
-  font-size: 12px;
-  text-align: center;
+/* 窗口内面板切换（登录 ↔ 直接进房）：out-in 交叉淡入，160ms */
+.win-enter-active,
+.win-leave-active {
+  transition: opacity 160ms var(--ease), transform 160ms var(--ease);
+}
+
+.win-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.win-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.direct {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .back-auth {
-  margin-top: 10px;
   align-self: flex-start;
   padding: 6px 2px;
   color: var(--dim);
@@ -487,13 +441,18 @@ onBeforeUnmount(() => {
   color: var(--text);
 }
 
-/* ---------- 降级：动画判死（含伪元素） ---------- */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation: none !important;
-    transition: none !important;
+.foot {
+  font-size: 12px;
+  text-align: center;
+}
+
+@media (max-height: 720px) {
+  .stage {
+    gap: 24px;
+  }
+
+  .landing.open .hero {
+    transform: translateY(-28px) scale(0.5);
   }
 }
 </style>

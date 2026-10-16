@@ -19,7 +19,13 @@ function back(): void {
 <template>
   <form class="join" @submit.prevent="j.join()">
     <label for="join-code">房间码</label>
-    <input id="join-code" v-model="j.code" maxlength="12" placeholder="4–12 位字母数字" autocapitalize="characters" />
+    <input
+      id="join-code"
+      v-model="j.code"
+      maxlength="12"
+      placeholder="4–12 位字母数字"
+      autocapitalize="characters"
+    />
     <label for="join-pwd">房间密码（没有就留空）</label>
     <input id="join-pwd" v-model="j.password" type="password" autocomplete="off" />
     <p v-if="j.error.value" class="alert" role="alert">{{ j.error.value }}</p>
