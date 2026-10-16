@@ -35,6 +35,13 @@ pnpm-debug.log*
 # ---- 本地配置与日志 ----
 *.local.toml
 *.log
+# 本机实例的环境文件（含 PR_DB_DSN / PR_JWT_SECRET 等凭据）：**绝不能入库**。
+# 生产那份在 /opt/projectionroom/.env（root:600），形态与这里一致。
+# 用 `.env*` 通配而不是逐个列举：漏掉一个变体（.env.production / .env.dev.local …）
+# 就等于凭据进了版本库，而这类错误在提交时完全看不出来。
+# 例外：.env.example（只有键名、没有值的模板）需要入库，见下一行。
+.env*
+!.env.example
 
 # ---- 本地工具产物 ----
 # 视觉/验收工具的运行期产物与截图，不入库
