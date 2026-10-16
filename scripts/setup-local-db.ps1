@@ -1,4 +1,4 @@
-# 在本机**非 docker** 的 PostgreSQL 上建月喵所需的角色与两个库，并生成 .env.local。
+﻿# 在本机**非 docker** 的 PostgreSQL 上建月喵所需的角色与两个库，并生成 .env.local。
 #
 # 形态对齐 CLAUDE.md §8 的部署事实：
 #   - 角色 pr_app（最小权限：不是 superuser、不能建库）
