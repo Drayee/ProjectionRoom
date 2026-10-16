@@ -3,7 +3,7 @@
 > **这是 AI 会话进入本项目后的唯一入口。默认只读本文件**，需要动某处时再按下面的路径精确打开那几个文件，不要重新遍历整棵树。
 >
 > **维护约定（必须遵守）**：目录结构、关键约定、命令、部署事实一旦变化，**同步更新本文件**。过时地图比没有地图更危险——后续会话会按它行动。
-> 最近一次同步：修复两处用户可见缺陷（单端口默认部署 `/ws` 被 Origin 白名单 403；auth 阶段不可见标题撑出整页滚动条）+ 账号能力关闭时前端不再显示裸 `请求失败（HTTP 404）` 之后。
+> 最近一次同步：本机非 docker PostgreSQL 的建库/启动脚本（`scripts/setup-local-db.ps1`、`scripts/run-local.ps1`）+ `.env*` 忽略规则；另记下 `TestWriterSubmitNeverBlocksWhenQueueFull` 的 Windows 假红之后。
 
 ---
 
@@ -90,14 +90,32 @@ go test -race ./internal/service/ ./internal/handler/ -count=1
 npm --prefix client run build              # 含 vue-tsc；产物必须 0 个 window.__pr；grep "v-html" client/src ≤1（仅 MarkdownView）、innerHTML=0
 ```
 
-**真库测试**（`internal/store` 的用例依赖它，否则 Skip）：
+**真库测试**（`internal/store` 的用例依赖它，否则 Skip）。两条路，任选一条：
+
 ```powershell
-$env:PR_TEST_DB_DSN = (Get-Content "$env:TEMP\pr-deploy\test-dsn-5433.txt" -Raw).Trim()   # 经 SSH 隧道到服务器上的测试库
+# ① 服务器上的测试库（经 SSH 隧道）
+$env:PR_TEST_DB_DSN = (Get-Content "$env:TEMP\pr-deploy\test-dsn-5433.txt" -Raw).Trim()
+go test ./internal/store/ -count=1
+
+# ② 本机 PostgreSQL（非 docker；见下面的 scripts/setup-local-db.ps1）
+$env:PR_TEST_DB_DSN = 'host=127.0.0.1 port=5432 user=pr_app password=<见 .env.local> dbname=projectionroom_test sslmode=disable'
 go test ./internal/store/ -count=1
 ```
+
+**本机非 docker PostgreSQL 的起法**（带账号能力的完整实例，不用隧道）：
+
+```powershell
+powershell -File scripts/setup-local-db.ps1    # 建 pr_app + 两个库，生成 .env.local（幂等）
+powershell -File scripts/run-local.ps1         # 读 .env.local 起服务（默认 127.0.0.1:8080）
+powershell -File scripts/run-local.ps1 -Port 8090   # 换端口（自动补 Origin 白名单）
+```
+
+⚠️ **`PR_ALLOWED_ORIGINS` 在换端口时必须跟着改**：`run-local.ps1` 会自动补，但手工起实例时忘了它就是"页面能开、`/ws` 一律 403"（默认白名单只含 5173 与 8080）。
+
 ⚠️ **两个坑**：① 测试库与生产库是**两个库**，DSN 的 `dbname` 必须含 `_test`（用例里有护栏）；② **`internal/store` 的真库用例会 TRUNCATE 表**，所以任何手工 fixture（如验收用的管理员账号）在跑过它们之后就不在了——需要重新注册并提权（`UPDATE users SET role='admin' WHERE username='…'`）。
 ⚠️ **测试实例收尾必须停进程**：曾有一个后台实例直连测试库、绕过了用例的跨进程隔离锁，导致 store 用例随机红。
 ⚠️ **并存会话的 fixture 会被清掉**：`public.users` 被 store 用例 TRUNCATE ⇒ 刚 seed 的管理员可能在几分钟后消失、`verify-auth` 因此假红。规避办法是**在同一个 `projectionroom_test` 里建隔离 schema**（DSN 追加 `search_path=pr_xxx`），在其中造 fixture、跑完 `DROP SCHEMA`；`public` 侧不留痕。
+⚠️ **`TestWriterSubmitNeverBlocksWhenQueueFull` 在 Windows 上会假红**（既有缺陷，与本机库无关）：它断言 `LastLatency > 0`，而 `noopJob` 跑得比系统时钟分辨率还快 —— 实测 `Transaction(noop)` 500 次里有 415 次 `time.Since` 恰好为 0。修法要么把断言放宽到 `>= 0`，要么让夹具作业带一次真实往返。Linux CI 上通常不出现。
 ⚠️ 起实例做真机验收需要调试钩子（既有脚本依赖 `window.__pr`，而**生产构建刻意没有**）：`$env:VITE_DEBUG_HOOKS='1'; npx vite build --outDir dist-debug` + `PR_STATIC_DIR=client/dist-debug`，跑完删掉并重建干净 `dist`。
 
 ## 7. 验收脚本（`test/script/*.mjs`，真机 headless Chrome）
