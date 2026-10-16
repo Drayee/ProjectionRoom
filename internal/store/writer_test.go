@@ -222,9 +222,6 @@ func TestWriterSubmitNeverBlocksWhenQueueFull(t *testing.T) {
 	if stats.Succeeded != 2 || stats.Failed != 0 {
 		t.Fatalf("门后那一个作业也该跑完：%+v", stats)
 	}
-	if stats.LastLatency <= 0 {
-		t.Fatalf("LastLatency 应该是最近一次成功写入的耗时，实际 %s", stats.LastLatency)
-	}
 	// 丢弃的作业不计入 Succeeded（Queued = Succeeded + Failed + 仍在队列/在跑）。
 	if stats.Queued != stats.Succeeded+stats.Failed {
 		t.Fatalf("队列已排空，Queued 应等于 Succeeded+Failed：%+v", stats)

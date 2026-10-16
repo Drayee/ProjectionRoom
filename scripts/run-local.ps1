@@ -1,10 +1,10 @@
-﻿# 用本机非 docker 的 PostgreSQL 18 启动月喵后端。
+# 用本机非 docker 的 PostgreSQL 18 启动月喵后端。
 #
 # 为什么不直接 `go run ./cmd`：服务端只认**进程环境变量**（仓库里没有 .env 加载器，
 # go.mod 里没有 godotenv），所以 .env.local 必须由谁来读并塞进环境。这个脚本就是那个入口。
 #
 # 用法：
-#   powershell -File scripts/run-local.ps1              # 默认 127.0.0.1:8080
+#   powershell -File scripts/run-local.ps1              # 默认 127.0.0.1:8888
 #   powershell -File scripts/run-local.ps1 -Port 8090   # 换端口（会自动补 Origin 白名单）
 #
 # 前置：先跑一次 scripts/setup-local-db.ps1 建库建角色并生成 .env.local。

@@ -13,7 +13,7 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() 不应失败: %v", err)
 	}
-	if cfg.Addr != "127.0.0.1:8080" {
+	if cfg.Addr != "127.0.0.1:8888" {
 		t.Fatalf("默认地址错误: %q", cfg.Addr)
 	}
 	if cfg.Room.SafetyFactor != 0.8 {

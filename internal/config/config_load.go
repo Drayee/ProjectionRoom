@@ -428,7 +428,7 @@ const (
 // 注意：服务端不传输任何视频字节，这里的 DefaultStreamBps 只用于容量预判。
 func Default() *Config {
 	return &Config{
-		Addr: "127.0.0.1:8080",
+		Addr: "127.0.0.1:8888",
 		Room: RoomConfig{
 			MaxMembers:       16,
 			DefaultStreamBps: 2_000_000,
@@ -510,12 +510,12 @@ func Default() *Config {
 			SendQueueSize:   32,
 			// 默认白名单覆盖**两种本机入口**，缺一个就会让默认部署开箱即坏：
 			//   - 5173：开发态（Vite 出页面，/api 与 /ws 代理到 Go）；
-			//   - 8080：单端口态（Go 自己托管 client/dist，页面与 /ws 同端口）。
+			//   - 8888：单端口态（Go 自己托管 client/dist，页面与 /ws 同端口）。
 			//
-			// 为什么必须把 8080 也列上（实测复现）：单端口是 README「单端口部署」与
-			// `go run ./cmd` 的**默认形态**（PR_ADDR 默认 127.0.0.1:8080、
+			// 为什么必须把 8888 也列上（实测复现）：单端口是 README「单端口部署」与
+			// `go run ./cmd` 的**默认形态**（PR_ADDR 默认 127.0.0.1:8888、
 			// PR_SERVE_STATIC 默认 true），此时浏览器发出的 Origin 是
-			// `http://127.0.0.1:8080`。S-5 删掉"同源隐式放行"之后它不在白名单里，
+			// `http://127.0.0.1:8888`。S-5 删掉"同源隐式放行"之后它不在白名单里，
 			// 于是 /ws 一律 403：页面能打开、房间却永远连不上
 			//（症状是"一直显示已断开/正在重连"，而服务端只留一行 403 日志）。
 			// 这是默认值自身的矛盾，不是使用者的配置错误。
@@ -527,7 +527,7 @@ func Default() *Config {
 			// 它也只覆盖本机——公网部署必须自己配域名，这一点未变。
 			AllowedOrigins: []string{
 				"127.0.0.1:5173", "localhost:5173",
-				"127.0.0.1:8080", "localhost:8080",
+				"127.0.0.1:8888", "localhost:8888",
 			},
 
 			MaxRepeatedElements:  DefaultSignalMaxRepeatedElements,

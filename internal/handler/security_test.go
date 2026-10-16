@@ -75,11 +75,11 @@ func TestWSOriginAllowsNonBrowserClient(t *testing.T) {
 }
 
 // TestWSOriginDefaultCoversBothLocalEntries 锁定 config.Default() 的白名单
-// 同时覆盖**开发态（Vite 5173）与单端口态（Go 8080）**两个本机入口。
+// 同时覆盖**开发态（Vite 5173）与单端口态（Go 8888）**两个本机入口。
 //
 // 为什么这是一条必须钉住的回归：单端口是 README「单端口部署」与 `go run ./cmd`
-// 的**默认形态**（PR_ADDR 默认 127.0.0.1:8080、PR_SERVE_STATIC 默认 true）。
-// 只列 5173 时，默认形态下浏览器发出的 Origin `http://127.0.0.1:8080` 不在白名单，
+// 的**默认形态**（PR_ADDR 默认 127.0.0.1:8888、PR_SERVE_STATIC 默认 true）。
+// 只列 5173 时，默认形态下浏览器发出的 Origin `http://127.0.0.1:8888` 不在白名单，
 // /ws 一律 403 —— 表现为"页面能打开、房间永远连不上（一直显示已断开/正在重连）"，
 // 而根因是默认值自相矛盾，不是使用者的配置错误（实测复现过）。
 //
@@ -93,8 +93,8 @@ func TestWSOriginDefaultCoversBothLocalEntries(t *testing.T) {
 	allowed := []string{
 		"http://127.0.0.1:5173", // 开发态：Vite 出页面
 		"http://localhost:5173", // 开发态：另一种本机写法
-		"http://127.0.0.1:8080", // 单端口态：Go 自己托管 client/dist
-		"http://localhost:8080", // 单端口态：另一种本机写法
+		"http://127.0.0.1:8888", // 单端口态：Go 自己托管 client/dist
+		"http://localhost:8888", // 单端口态：另一种本机写法
 	}
 	for i, origin := range allowed {
 		status, line := rawWSDial(t, srv,

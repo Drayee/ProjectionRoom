@@ -148,7 +148,7 @@ func newRouterForTest(t *testing.T, cfg *config.Config) *gin.Engine {
 // TestIsLoopbackAddr 锁定"启动警告"的触发条件：
 // 只有回环监听才算"限速边界完整"，其余形态都要打印警告。
 func TestIsLoopbackAddr(t *testing.T) {
-	loopback := []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080", "127.0.0.1", "::1", "[::1]"}
+	loopback := []string{"127.0.0.1:8888", "localhost:8888", "[::1]:8888", "127.0.0.1", "::1", "[::1]"}
 	for _, addr := range loopback {
 		if !isLoopbackAddr(addr) {
 			t.Fatalf("%q 应被判定为回环监听", addr)
