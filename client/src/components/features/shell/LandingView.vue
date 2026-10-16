@@ -35,7 +35,10 @@ const stage = ref<'hero' | 'auth'>(props.initialStage)
 const showDirect = ref(false)
 const transitioning = ref(false)
 const assembling = ref(true)
+/** 标题折叠：过渡结束后才折叠掉布局占位（避免 absolute 瞬间跳移）。 */
+const titleCollapsed = ref(false)
 let transitionTimer: ReturnType<typeof setTimeout> | undefined
+let collapseTimer: ReturnType<typeof setTimeout> | undefined
 let assembleTimer: ReturnType<typeof setTimeout> | undefined
 
 const displayName = ref(
@@ -50,6 +53,9 @@ const displayName = ref(
 
 function finishTransition() {
   transitioning.value = false
+  if (stage.value === 'auth') {
+    titleCollapsed.value = true
+  }
 }
 
 function setStage(next: 'hero' | 'auth') {
@@ -57,7 +63,11 @@ function setStage(next: 'hero' | 'auth') {
   stage.value = next
   transitioning.value = true
   if (transitionTimer !== undefined) clearTimeout(transitionTimer)
-  transitionTimer = setTimeout(finishTransition, 800)
+  transitionTimer = setTimeout(finishTransition, 700)
+  if (next === 'hero') {
+    // 收起：先摘掉折叠回到布局流，再淡入显示
+    titleCollapsed.value = false
+  }
 }
 
 function startClicked() {
@@ -83,7 +93,7 @@ onBeforeUnmount(() => {
   <div class="landing" :class="{ 'is-auth': stage === 'auth' }">
     <div class="stage-area">
       <!-- 标题：故障黑体 + 三片撕裂（纯装饰切片 aria-hidden，票 #13 §6.1） -->
-      <header class="hero-head" :class="{ lifted: stage === 'auth', assembling }">
+      <header class="hero-head" :class="{ lifted: stage === 'auth' && titleCollapsed, leaving: transitioning, assembling }">
         <h1 class="brand">
           <span class="sr">月喵</span>
           <span class="sl sl1" aria-hidden="true">月喵</span>
@@ -166,9 +176,34 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  transition: transform var(--dur-morph) var(--ease), opacity 500ms var(--ease);
+  /*
+   * 标题的过渡：淡出用 opacity/transform，折叠布局用 position（不参与 transition）。
+   * 
+   * 分为两阶段：
+   *   ① 过渡期（leaving）：留在布局流里淡出上移，CSS transition 自动过渡。
+   *   ② 过渡结束（lifted）：absolute 折叠占位，此时标题已不可见，无跳动。
+   * 收起时反向：先摘掉 folded 回到布局流（opacity 0），CSS transition 自动淡入。
+   */
+  transition:
+    transform var(--dur-morph) var(--ease),
+    opacity 500ms var(--ease);
 }
 
+/*
+ * 阶段①：过渡期间在布局流中淡出上移。
+ * 初始值与 .lifted 一致，确保从 leaving → lifted 不跳变。
+ */
+.hero-head.leaving {
+  transform: translateY(-clamp(40px, 14vh, 160px)) scale(0.4);
+  opacity: 0;
+}
+
+/*
+ * 阶段②：过渡结束后折叠占位。
+ * 此时标题 opacity=0 已不可见，移动到 absolute 用户感知不到。
+ * 上一轮用 absolute 直接生效导致"标题闪一下就不见了"，
+ * 就是因为没有 leaving 阶段做布局流中的平滑淡出。
+ */
 .hero-head.lifted {
   transform: translateY(-clamp(40px, 14vh, 160px)) scale(0.4);
   opacity: 0;
@@ -390,7 +425,13 @@ onBeforeUnmount(() => {
 
 .auth-inner {
   width: 100%;
-  animation: fade-in 350ms var(--ease) 180ms both;
+  /*
+   * 延迟从 180ms 改为 0ms：否则按钮文字已经淡出（start-label opacity 0 约 250ms）
+   * 到变成透明，窗口内容却还没出现——用户看到的就是"按钮突然消失、空白一阵、
+   * 然后窗口弹出来"。实测 morph 440ms 内按钮是持续形变的，窗口内容随 morph
+   * 同时出现不会有"突然跳出一整张窗口"的感觉。
+   */
+  animation: fade-in 350ms var(--ease) 0ms both;
 }
 
 @keyframes fade-in {
