@@ -6,8 +6,10 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
+import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
+import { isCapabilityUnavailable } from '../api/mode'
 import type { Comment, Post } from '../types/posts'
 
 const props = defineProps<{ id: string }>()
@@ -17,30 +19,48 @@ const post = ref<Post | null>(null)
 const comments = ref<Comment[]>([])
 const draft = ref('')
 const failed = ref('')
+/** 该分区后端未上线：渲染降级空态，而不是「帖子不存在」。 */
+const capabilityMissing = ref(false)
 
 async function load() {
+  capabilityMissing.value = false
+  failed.value = ''
   try {
     post.value = await postsApi.getPost(Number(props.id))
     comments.value = await postsApi.listComments(Number(props.id))
   } catch (err) {
-    failed.value = err instanceof Error ? err.message : '帖子不存在'
+    if (isCapabilityUnavailable(err)) {
+      capabilityMissing.value = true
+    } else {
+      failed.value = err instanceof Error ? err.message : '帖子不存在'
+    }
   }
 }
 
 async function toggleLike() {
   if (!post.value) return
-  const r = await postsApi.toggleLike(post.value.id)
-  post.value.liked = r.liked
-  post.value.likeCount = r.likeCount
+  try {
+    const r = await postsApi.toggleLike(post.value.id)
+    post.value.liked = r.liked
+    post.value.likeCount = r.likeCount
+  } catch (err) {
+    if (isCapabilityUnavailable(err)) capabilityMissing.value = true
+    else failed.value = err instanceof Error ? err.message : '操作失败'
+  }
 }
 
 async function addComment() {
   const c = draft.value.trim()
   if (!c || !post.value) return
-  const made = await postsApi.addComment({ postId: post.value.id, content: c })
-  comments.value.push(made)
-  post.value.commentCount += 1
-  draft.value = ''
+  try {
+    const made = await postsApi.addComment({ postId: post.value.id, content: c })
+    comments.value.push(made)
+    post.value.commentCount += 1
+    draft.value = ''
+  } catch (err) {
+    if (isCapabilityUnavailable(err)) capabilityMissing.value = true
+    else failed.value = err instanceof Error ? err.message : '评论失败'
+  }
 }
 
 onMounted(load)
@@ -49,7 +69,14 @@ onMounted(load)
 <template>
   <div class="page">
     <main class="body">
-      <p v-if="failed" class="alert">{{ failed }}</p>
+      <p v-if="failed" class="alert" role="alert">{{ failed }}</p>
+      <CapabilityNotice
+        v-else-if="capabilityMissing"
+        domain="posts"
+        hint="上线后这里是单篇帖子：正文、点赞与扁平评论。"
+        retryable
+        @retry="load"
+      />
       <template v-else-if="post">
         <h1 class="title">{{ post.title }}</h1>
         <p class="meta dim">{{ post.author.displayName }} · {{ post.createdAt }}</p>
@@ -93,4 +120,5 @@ onMounted(load)
 .add button { flex: none; padding: 8px 18px; background: var(--accent); color: var(--accent-ink); font-weight: 700; }
 .add button:disabled { opacity: 0.5; }
 .alert { color: var(--danger); }
+.alert[role='alert'] { margin: 0; padding: 8px 10px; border: 1px solid var(--danger); background: rgba(255, 92, 92, 0.12); font-size: 12px; color: #ffdada; }
 </style>

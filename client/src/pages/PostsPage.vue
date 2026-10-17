@@ -6,7 +6,9 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
+import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import * as postsApi from '../api/posts'
+import { isCapabilityUnavailable } from '../api/mode'
 import type { Post } from '../types/posts'
 
 const posts = ref<Post[]>([])
@@ -15,6 +17,12 @@ const busy = ref(false)
 const loadingMore = ref(false)
 const page = ref(1)
 const hasMore = ref(false)
+/**
+ * 后端该域未上线（`VITE_MOCK_POSTS` 翻成真实实现、而 `/api/posts/*` 还没注册）。
+ * 与「加载失败」分开：前者是能力未上线，后者才是错误。
+ */
+const capabilityMissing = ref(false)
+const failed = ref('')
 
 const sentinel = ref<HTMLElement | null>(null)
 let observer: IntersectionObserver | undefined
@@ -32,11 +40,22 @@ function excerpt(content: string, max = 72): string {
 async function load() {
   if (busy.value) return
   busy.value = true
+  failed.value = ''
   try {
     const r = await postsApi.listPosts({ sort: sort.value, page: 1 })
     posts.value = r.items
     page.value = 1
     hasMore.value = r.hasMore
+    capabilityMissing.value = false
+  } catch (err) {
+    // 整域 404 → 降级空态；其余才是真错误（服务端拒绝 / 网络不可达）。
+    if (isCapabilityUnavailable(err)) {
+      capabilityMissing.value = true
+      posts.value = []
+      hasMore.value = false
+    } else {
+      failed.value = err instanceof Error ? err.message : '加载失败'
+    }
   } finally {
     busy.value = false
   }
@@ -51,6 +70,13 @@ async function loadMore() {
     posts.value = posts.value.concat(r.items)
     page.value = next
     hasMore.value = r.hasMore
+  } catch (err) {
+    if (isCapabilityUnavailable(err)) {
+      capabilityMissing.value = true
+      hasMore.value = false
+    } else {
+      failed.value = err instanceof Error ? err.message : '加载失败'
+    }
   } finally {
     loadingMore.value = false
   }
@@ -96,6 +122,14 @@ onBeforeUnmount(() => {
         <button role="tab" :aria-selected="sort === 'hot'" :class="{ on: sort === 'hot' }" @click="switchSort('hot')">热门</button>
       </div>
       <p v-if="busy" class="dim">加载中…</p>
+      <CapabilityNotice
+        v-else-if="capabilityMissing"
+        domain="posts"
+        hint="上线后这里是瀑布流帖子列表：最新 / 热门排序、封面与评论计数。"
+        retryable
+        @retry="load"
+      />
+      <p v-else-if="failed" class="alert" role="alert">{{ failed }}</p>
       <p v-else-if="posts.length === 0" class="dim">还没有帖子。</p>
       <div v-else class="masonry">
         <RouterLink v-for="p in posts" :key="p.id" class="card" :to="{ name: 'post-detail', params: { id: String(p.id) } }">
@@ -147,4 +181,5 @@ onBeforeUnmount(() => {
 .meta { margin: 0; font-size: 12px; }
 .sentinel { height: 1px; }
 .end { text-align: center; }
+.alert { margin: 0; padding: 8px 10px; border: 1px solid var(--danger); background: rgba(255, 92, 92, 0.12); font-size: 12px; color: #ffdada; }
 </style>

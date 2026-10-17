@@ -261,6 +261,37 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 **无 TLS 的已知缺口**：当前部署是明文 http，因此 refresh Cookie **不带 `Secure`**（有一条测试断言
 把它钉住：上 TLS 之前不该加，否则浏览器会直接丢弃它）。上 TLS 后应立即补 `Secure` 并收紧 `SameSite`。
 
+### 前端 mock / real 适配层（分区逐个翻真）
+
+部分分区（帖子、好友、消息、番剧论坛、官方、用户公开档案）的后端接口按域分批上线，
+前端因此分成两层：**门面 + 两份同形状实现**，由环境变量在构建期二选一。
+
+```
+client/src/api/<域>.ts          门面：页面唯一 import 的出口，导出形状固定
+        ├── api/mock/<域>.ts    本地 mock（内存数据）
+        └── api/real/<域>.ts    真实 HTTP 实现
+```
+
+| 环境变量 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `VITE_MOCK_POSTS` | mock | 帖子域（`/posts` ×3） |
+| `VITE_MOCK_FRIENDS` | mock | 好友域（`/friends`） |
+| `VITE_MOCK_MESSAGES` | mock | 消息域（`/messages`） |
+| `VITE_MOCK_FORUM` | mock | 番剧论坛（`/forum`） |
+| `VITE_MOCK_OFFICIAL` | mock | 官方分区（`/official`） |
+| `VITE_MOCK_USERS` | mock | 用户公开档案（`/user/:id`） |
+
+语义是**默认 mock**：只有显式写成 `0` / `false` / `off` / `no` 才翻成真实实现；
+留空、不写、写成别的值一律按 mock 处理 —— 配错退化成"还是 mock"，而不是退化成整片分区 404。
+
+翻成真实实现后，若该域的服务端路由还没注册（返回 404），页面渲染
+「该分区后端尚未上线」空态（`client/src/components/ui/CapabilityNotice.vue`），
+**不是**裸的「请求失败（HTTP 404）」—— 后者看起来像整个后端挂了。这与
+`useAuthForm.ts` 把 `/api/auth/*` 的 404 解释成「账号能力未启用（游客模式）」是同一条约定。
+
+这些变量是**构建期常量**（Vite `import.meta.env` 静态替换）：改完要重启 dev server 或重新构建。
+模板见 [`client/.env.example`](client/.env.example)。
+
 默认 STUN 列表（顺序即默认优先级，2026-02 本机实测 UDP Binding Request 往返）：
 
 | STUN | 实测 RTT | 说明 |

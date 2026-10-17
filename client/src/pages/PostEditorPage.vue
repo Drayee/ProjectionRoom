@@ -7,8 +7,10 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
+import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
+import { isCapabilityUnavailable } from '../api/mode'
 
 const DRAFT_KEY = 'pr:post-draft'
 
@@ -21,6 +23,8 @@ const mode = ref<'edit' | 'preview'>('edit')
 const busy = ref(false)
 const saved = ref(false)
 const error = ref('')
+/** 该分区后端未上线：整个表单降级成空态（没有可提交的目标，留着表单只会让人白填一遍）。 */
+const capabilityMissing = ref(false)
 
 onMounted(() => {
   try {
@@ -83,7 +87,12 @@ async function submit() {
     saved.value = true
     await router.push({ name: 'posts' })
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '发布失败'
+    if (isCapabilityUnavailable(err)) {
+      // 后端该域未上线：表单已经没有意义，直接换成降级空态。
+      capabilityMissing.value = true
+    } else {
+      error.value = err instanceof Error ? err.message : '发布失败'
+    }
   } finally {
     busy.value = false
   }
@@ -99,7 +108,12 @@ function discard() {
   <div class="page">
     <main class="body">
       <h1 class="title">发帖</h1>
-      <form @submit.prevent="submit">
+      <CapabilityNotice
+        v-if="capabilityMissing"
+        domain="posts"
+        hint="上线后这里支持标题 + 封面外链 + Markdown 正文，草稿仍会本地保存。"
+      />
+      <form v-else @submit.prevent="submit">
         <label for="post-title">标题</label>
         <input id="post-title" v-model="title" placeholder="一句话说清楚" />
 
