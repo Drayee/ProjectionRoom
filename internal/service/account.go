@@ -205,6 +205,9 @@ type AccountStore interface {
 	SetUserEmail(ctx context.Context, id int64, email string, verifiedAt *time.Time) error
 	SetUserStatus(ctx context.Context, id int64, status, reason string) error
 	SetUserRole(ctx context.Context, id int64, role string) error
+	// SetPasswordHash 直接换口令哈希（OTP 改密路径用；链接令牌那条走
+	// ConsumePasswordReset，它在同一个事务里连撤销会话一起做）。
+	SetPasswordHash(ctx context.Context, id int64, hash string) error
 	BumpTokenVersion(ctx context.Context, id int64) (int, error)
 	TouchLastSeen(ctx context.Context, id int64, at time.Time) error
 
@@ -221,6 +224,26 @@ type AccountStore interface {
 	InsertPasswordReset(ctx context.Context, t *store.PasswordReset) error
 	ConsumePasswordReset(ctx context.Context, tokenHash, newPasswordHash string) (int64, bool, error)
 	ConsumeEmailVerify(ctx context.Context, tokenHash string) (int64, bool, error)
+
+	// —— 邮箱验证码（OTP：注册两段式 + 改密码）
+	//
+	// 与上面两条链路的区别只在形态：OTP 短（6 位）、要人肉输入、因此需要错误计数。
+	// 计数落库（见 store/otp.go）：放内存的话重启就清零，6 位数字就变成可爆破的。
+	InsertEmailOTP(ctx context.Context, t *store.PasswordReset) error
+	ConsumeEmailOTP(ctx context.Context, userID int64, otpHash string, maxAttempts int) (bool, error)
+	CountRecentEmailOTP(ctx context.Context, userID int64, since time.Time) (int64, error)
+	LastEmailOTPSentAt(ctx context.Context, userID int64) (time.Time, error)
+
+	// —— 注册草稿（两段式注册的中间态）
+	InsertRegisterDraft(ctx context.Context, d *store.RegisterDraft) error
+	DraftByTicket(ctx context.Context, ticketHash string) (*store.RegisterDraft, error)
+	AttachDraftOTP(ctx context.Context, ticketHash, email, otpHash string, expiresAt time.Time) error
+	ConsumeDraftOTP(ctx context.Context, ticketHash, otpHash string, maxAttempts int) (*store.RegisterDraft, bool, error)
+
+	// —— 幂等键（写操作的重放保护）
+	ReserveIdempotencyKey(ctx context.Context, scope, key, requestHash string, ttl time.Duration) (*store.IdempotencyRecord, error)
+	CompleteIdempotencyKey(ctx context.Context, scope, key string, status int, response []byte) error
+	ReleaseIdempotencyKey(ctx context.Context, scope, key string) error
 
 	// —— 审计
 	InsertAudit(ctx context.Context, a *store.AdminAudit) error
@@ -265,6 +288,14 @@ type AccountService struct {
 	//（PR_RESET_TTL / PR_EMAIL_VERIFY_TTL，由装配层注入）。
 	resetTTL       time.Duration
 	emailVerifyTTL time.Duration
+	// otpTTL 是邮箱验证码的有效期（分钟级）。比链接令牌短得多，
+	// 因为 6 位数字的猜测空间只有 100 万，时间越短越安全。
+	otpTTL time.Duration
+	// otpDevEcho = true 时，发码接口的响应里会带上明文验证码（**仅本机开发**）。
+	//
+	// 它存在的唯一理由：本机通常没有 SMTP，而"注册 → 验证码 → 建号"这条链路
+	// 必须能被端到端验证一次。生产必须关（装配层会拒绝"开着且配了 SMTP"的组合）。
+	otpDevEcho bool
 	// publicBaseURL 是拼链接用的对外基地址（PR_PUBLIC_BASE_URL）。
 	// **绝不从请求头推导** —— 理由见 config.AuthConfig.PublicBaseURL 的说明。
 	publicBaseURL string
@@ -303,6 +334,15 @@ type AccountOptions struct {
 	// PublicBaseURL 是对外链接的基地址；为空报错（没有它拼不出可用的链接，
 	// 而"用户收到一封点了没用的信"比启动失败晚得多、也难查得多）。
 	PublicBaseURL string
+	// OTPTTL 是邮箱验证码的有效期；<= 0 报错。
+	//
+	// 它比 ResetTTL / EmailVerifyTTL 短得多（分钟级）：验证码只有 6 位数字，
+	// 时间窗口是它抵御爆破的主要维度之一（另外两道是错误次数与冷却期）。
+	OTPTTL time.Duration
+	// OTPDevEcho 打开后，发码接口会把明文验证码一并返回（**仅本机开发**）。
+	//
+	// ⚠ 它废掉"证明邮箱归属"这件事。装配层会拒绝"开着它且 SMTP 已配置"的组合。
+	OTPDevEcho bool
 }
 
 // NewAccountService 组装账号用例。
@@ -334,6 +374,9 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 	if strings.TrimSpace(opts.PublicBaseURL) == "" {
 		return nil, errors.New("account: 缺少 PR_PUBLIC_BASE_URL（没有它拼不出可用的邮件链接）")
 	}
+	if opts.OTPTTL <= 0 {
+		return nil, fmt.Errorf("account: 验证码 TTL 必须为正，当前 %s", opts.OTPTTL)
+	}
 
 	cost := opts.BcryptCost
 	if cost == 0 {
@@ -363,6 +406,8 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 		refreshTTL:     opts.RefreshTTL,
 		resetTTL:       opts.ResetTTL,
 		emailVerifyTTL: opts.EmailVerifyTTL,
+		otpTTL:         opts.OTPTTL,
+		otpDevEcho:     opts.OTPDevEcho,
 		publicBaseURL:  strings.TrimRight(strings.TrimSpace(opts.PublicBaseURL), "/"),
 		hashing:        make(chan struct{}, conc),
 		now:            now,

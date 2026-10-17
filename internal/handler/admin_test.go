@@ -383,6 +383,69 @@ func (s *fakeAdminStore) InsertAudit(ctx context.Context, a *store.AdminAudit) e
 // 于是审计仍然是**异步**投递的（这正是要验的形态），只是不经过写队列。
 func (s *fakeAdminStore) EventWriter() *store.Writer { return nil }
 
+// —— 邮箱验证码 / 注册草稿 / 幂等键（handler 层的用例不走这些路径，
+// 但 AccountStore 接口要求它们存在；语义与真 store 对齐的部分写在 service 的 fake 里）。 ——
+
+func (s *fakeAdminStore) InsertEmailOTP(ctx context.Context, t *store.PasswordReset) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	t.ID = s.nextID
+	s.resets = append(s.resets, t)
+	return nil
+}
+
+func (s *fakeAdminStore) ConsumeEmailOTP(_ context.Context, _ int64, _ string, _ int) (bool, error) {
+	return false, store.ErrOTPNotFound
+}
+
+func (s *fakeAdminStore) CountRecentEmailOTP(_ context.Context, _ int64, _ time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *fakeAdminStore) LastEmailOTPSentAt(_ context.Context, _ int64) (time.Time, error) {
+	return time.Time{}, nil
+}
+
+func (s *fakeAdminStore) InsertRegisterDraft(_ context.Context, _ *store.RegisterDraft) error {
+	return nil
+}
+
+func (s *fakeAdminStore) DraftByTicket(_ context.Context, _ string) (*store.RegisterDraft, error) {
+	return nil, store.ErrDraftNotFound
+}
+
+func (s *fakeAdminStore) AttachDraftOTP(_ context.Context, _, _, _ string, _ time.Time) error {
+	return store.ErrDraftNotFound
+}
+
+func (s *fakeAdminStore) ConsumeDraftOTP(_ context.Context, _, _ string, _ int) (*store.RegisterDraft, bool, error) {
+	return nil, false, store.ErrOTPNotFound
+}
+
+func (s *fakeAdminStore) ReserveIdempotencyKey(_ context.Context, _, _, _ string, _ time.Duration) (*store.IdempotencyRecord, error) {
+	return nil, nil
+}
+
+func (s *fakeAdminStore) CompleteIdempotencyKey(_ context.Context, _, _ string, _ int, _ []byte) error {
+	return nil
+}
+
+func (s *fakeAdminStore) ReleaseIdempotencyKey(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (s *fakeAdminStore) SetPasswordHash(_ context.Context, id int64, hash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.PasswordHash = hash
+	return nil
+}
+
 // ProfileNameByID 让这张内存用户表也满足 handler.PublicRoomProfileStore
 // （公开房列表的房主昵称出口）。
 func (s *fakeAdminStore) ProfileNameByID(ctx context.Context, id int64) (string, error) {
@@ -730,6 +793,11 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 		mutate(cfg)
 	}
 	cfg.Auth.DBDSN = "host=127.0.0.1 dbname=fixture sslmode=disable"
+	// PR_PUBLIC_BASE_URL 现在没有默认值（必填）：拼邮件链接必须有一个显式地址，
+	// 否则 AccountService 拒绝构造。测试给一个固定的占位域名即可。
+	if cfg.Auth.PublicBaseURL == "" {
+		cfg.Auth.PublicBaseURL = "https://pr.test"
+	}
 
 	signer, err := auth.NewSigner(handlerTestSecret, 15*time.Minute)
 	if err != nil {
@@ -745,6 +813,7 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 		// 邮件链路的三项（config.Default() 已经给好了生产默认值，这里直接沿用）。
 		ResetTTL:       cfg.Auth.ResetTTL,
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
+		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
 	})
 	if err != nil {

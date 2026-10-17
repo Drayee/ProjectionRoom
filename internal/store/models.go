@@ -9,6 +9,8 @@ const (
 	tableRoomsMeta        = "rooms_meta"
 	tableAdminAudit       = "admin_audit"
 	tablePasswordResets   = "password_resets"
+	tableRegisterDrafts   = "register_drafts"
+	tableIdempotencyKeys  = "idempotency_keys"
 	tableSchemaMigrations = "schema_migrations"
 )
 
@@ -27,10 +29,18 @@ const (
 // 用途必须进 WHERE 条件：否则一封"验证邮箱"的信可以被拿去当"重置密码"的凭据用
 // （两串 token 的生成方式、存储形态、消费路径全都一样，唯一的区分就是它）。
 const (
-	// PurposeEmailVerify 证明"这个邮箱属于这个账号"。
+	// PurposeEmailVerify 证明"这个邮箱属于这个账号"（邮件里的一次性**链接**）。
 	PurposeEmailVerify = "email_verify"
-	// PurposePasswordReset 授权"改这个账号的口令"。
+	// PurposePasswordReset 授权"改这个账号的口令"（邮件里的一次性**链接**）。
 	PurposePasswordReset = "password_reset"
+	// PurposeEmailOTP 是**验证码**形态的邮箱归属证明（注册与改密码共用）。
+	//
+	// 与 PurposeEmailVerify 的区别只在形态与使用场景，不在语义：
+	//   - 链接是"点一下就用掉"，OTP 是"人要读出来再手输" —— 所以它短（6 位数字）、
+	//     TTL 更短（分钟级）、且需要**错误尝试计数**（人也会打错，攻击者更会）；
+	//   - 链接发给已存在的账号（补验证 / 找回），OTP 还要覆盖"账号尚未创建"的注册场景 ——
+	//     那种情况下行挂在**注册草稿**上而不是 users 上，见 register_drafts。
+	PurposeEmailOTP = "email_otp"
 )
 
 // 列长度上限（与 DDL 的 varchar 长度一致）。用于写入前的快速失败：
@@ -159,10 +169,39 @@ type PasswordReset struct {
 	CreatedAt time.Time  `gorm:"column:created_at"`
 	ExpiresAt time.Time  `gorm:"column:expires_at"`
 	UsedAt    *time.Time `gorm:"column:used_at"`
+	// Attempts 是**错误尝试**计数（当前用于 email_otp）。
+	//
+	// 为什么落库而不放内存：6 位数字的爆破空间只有 100 万，而进程重启会清掉
+	// 任何内存计数器 —— 那等于让"重启一下就能再试 5 次"成为攻击手段。
+	Attempts int `gorm:"column:attempts"`
 }
 
 // TableName 见 User.TableName 的说明。
 func (PasswordReset) TableName() string { return tablePasswordResets }
+
+// RegisterDraft 是两段式注册的中间态（见 store/draft.go 的说明）。
+//
+// 它**不是**账号：这里没有 role / status / last_seen，只有"建号所需的原料"。
+// 账号一旦建好，草稿立刻被标记消费；草稿过期则整套原料作废，用户重新起草。
+type RegisterDraft struct {
+	ID           int64   `gorm:"column:id;primaryKey"`
+	TicketHash   string  `gorm:"column:ticket_hash"`
+	Username     string  `gorm:"column:username"`
+	DisplayName  string  `gorm:"column:display_name"`
+	PasswordHash string  `gorm:"column:password_hash"`
+	Email        *string `gorm:"column:email"`
+	// EmailOTPHash 是当前这条验证码的 sha256（NULL = 还没发过 / 已被消费）。
+	EmailOTPHash *string    `gorm:"column:email_otp_hash"`
+	IP           *string    `gorm:"column:ip"`
+	UserAgent    *string    `gorm:"column:user_agent"`
+	Attempts     int        `gorm:"column:attempts"`
+	CreatedAt    time.Time  `gorm:"column:created_at"`
+	ExpiresAt    time.Time  `gorm:"column:expires_at"`
+	ConsumedAt   *time.Time `gorm:"column:consumed_at"`
+}
+
+// TableName 见 User.TableName 的说明。
+func (RegisterDraft) TableName() string { return tableRegisterDrafts }
 
 // UserQuery 是用户列表的查询条件（管理端：分页 + 搜索，§8）。
 type UserQuery struct {

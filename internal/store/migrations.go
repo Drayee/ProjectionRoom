@@ -167,4 +167,131 @@ var migrations = []migration{
 		// 过期清理协程按 expires_at 扫，走这个索引（照 sessions_expires_at_idx 的先例）。
 		`CREATE INDEX IF NOT EXISTS password_resets_expires_at_idx ON password_resets (expires_at)`,
 	}},
+
+	// 0008：邮箱验证码（OTP）+ 注册两段式 + 写操作幂等键。
+	//
+	// 三件事合成一步，因为它们互相依赖、且都只做加法：
+	//
+	//  ① **OTP 复用 password_resets 表**（新增 purpose `email_otp`）。
+	//     理由与 0007 把 email_verify 塞进同一张表逐字相同：生命周期语义一样
+	//     （随机串、库里只存 sha256、单次使用、到期即废），合成一张表让"单次使用"
+	//     只有一份实现。OTP 只是**短、数字、会输错**的令牌，额外需要 `attempts`
+	//     计数（见 ②）—— 它放在这张表上比另立一张表更省一次事务。
+	//
+	//  ② `attempts`：错误尝试计数。**必须落库**而不是放内存：
+	//     放内存的话，攻击者重启进程（或换一个实例）就重置了计数，6 位数字的
+	//     爆破空间只有 100 万，去掉内存计数等于把它变成可爆破的。
+	//
+	//  ③ **注册草稿表**（`register_drafts`）：两段式注册的中间态。
+	//     第一段（username+password）校验通过后写一行，返回一个不透明 `ticket`；
+	//     第二段凭 ticket + 邮箱验证码完成建号。草稿有 TTL，且**不含明文口令**
+	//     （存的是 bcrypt 哈希 —— 它本来就要落进 users，提前算好可以省掉第二段的一次 bcrypt）。
+	//
+	//  ④ **幂等键表**（`idempotency_keys`）：写操作的重放保护。
+	//     同一个键 + 同一个操作重放时直接返回首次的结果，不重复建号、不重复发信。
+	//     键的作用域是 `(scope, key)`：scope 区分端点（`register.start` /
+	//     `register.verify` / `otp.send`），key 是客户端生成的 UUID。
+	{version: "0008_otp_and_drafts", statements: []string{
+		// ① purpose 的 CHECK 要扩容：DROP + ADD 是"改约束"而非"删数据"，
+		//    但它**不可重复执行**（第二次 DROP 会报"不存在"）。
+		//    因此用 DO 块先探测再改，保证这一步幂等（迁移规则第 2 条）。
+		`DO $$
+DECLARE
+  conname_found text;
+BEGIN
+  SELECT con.conname INTO conname_found
+    FROM pg_constraint con
+    JOIN pg_class rel ON rel.oid = con.conrelid
+   WHERE rel.relname = 'password_resets'
+     AND con.contype = 'c'
+     AND pg_get_constraintdef(con.oid) LIKE '%email_verify%';
+  IF conname_found IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE password_resets DROP CONSTRAINT %I', conname_found);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+     WHERE rel.relname = 'password_resets'
+       AND con.contype = 'c'
+       AND pg_get_constraintdef(con.oid) LIKE '%email_otp%'
+  ) THEN
+    ALTER TABLE password_resets ADD CONSTRAINT password_resets_purpose_check
+      CHECK (purpose IN ('email_verify', 'password_reset', 'email_otp'));
+  END IF;
+END $$`,
+
+		// ② 错误尝试计数（默认 0；老行自动获得默认值）。
+		`ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0`,
+
+		// 说明：**不**把 user_id 改成可空。迁移规则第 1 条（只做加法）与
+		// schema 契约测试（password_resets.user_id NOT NULL）都钉住了这一点，
+		// 而它们是对的：这张表的每一行都必须属于某个账号，否则"按用户撤销令牌"
+		// 会漏掉一批无主的行。
+		//
+		// 因此注册两段式里"账号还没建"的那一步，验证码行挂在**草稿**上而不是这里 ——
+		// 见下面的 register_drafts.email_otp_hash：草稿本身就是"待建账号"的载体，
+		// 它的验证码跟着草稿走，账号建好后草稿即被消费。好处是这张表的
+		// "单次使用 + 按用户归属"两条语义完全不用变。
+
+		// OTP 按 (user_id, purpose) 查"最近一条"来判冷却与作废旧码。
+		`CREATE INDEX IF NOT EXISTS password_resets_otp_lookup_idx
+		   ON password_resets (user_id, purpose, created_at DESC)`,
+
+		// ③ 注册草稿。
+		//
+		// `ticket_hash` 只存 sha256（与 token_hash 同一条纪律：原文只在下发那一次存在）。
+		// `password_hash` 是**已经算好的 bcrypt**：第二段建号时直接搬进 users，
+		// 于是整个注册流程只跑一次 bcrypt（那是最贵的一步）。
+		//
+		// `consumed_at` 而不是删除行：消费后保留一小段时间，让"同 ticket 重放"
+		// 能给出确定的错误（"这次注册已完成"），而不是含糊的"ticket 无效"。
+		`CREATE TABLE IF NOT EXISTS register_drafts (
+	id            bigserial PRIMARY KEY,
+	ticket_hash   char(64) NOT NULL UNIQUE,
+	username      varchar(20) NOT NULL,
+	display_name  varchar(64) NOT NULL,
+	password_hash varchar(255) NOT NULL,
+	email         varchar(254) NULL,
+	email_otp_hash char(64) NULL,
+	ip            varchar(45) NULL,
+	user_agent    varchar(255) NULL,
+	attempts      integer NOT NULL DEFAULT 0,
+	created_at    timestamptz NOT NULL DEFAULT now(),
+	expires_at    timestamptz NOT NULL,
+	consumed_at   timestamptz NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS register_drafts_expires_at_idx ON register_drafts (expires_at)`,
+		// ⚠ 上面两条 CREATE 只对"新库"生效：`CREATE TABLE IF NOT EXISTS` 在表已存在时
+		// **什么都不做**，包括不会补列。因此凡是在建表语句之后又加过的列，都必须在这里
+		// 再写一条 ADD COLUMN IF NOT EXISTS —— 否则"先跑过一次旧版迁移的库"会永远缺列，
+		// 而缺列只会在运行期报错（这个坑真的踩过一次：email_otp_hash 缺失，
+		// 表结构测试先抓到了它）。
+		`ALTER TABLE register_drafts ADD COLUMN IF NOT EXISTS email varchar(254) NULL`,
+		`ALTER TABLE register_drafts ADD COLUMN IF NOT EXISTS email_otp_hash char(64) NULL`,
+		`ALTER TABLE register_drafts ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0`,
+		// 同一用户名不并发起草两份：唯一索引挡不住（草稿会过期），
+		// 所以这里只做普通索引，真正的唯一性仍由 users.username 保证。
+		`CREATE INDEX IF NOT EXISTS register_drafts_username_idx ON register_drafts (username)`,
+
+		// ④ 幂等键。
+		//
+		// 键是 `(scope, key)`：scope 是端点名，key 是客户端生成的 UUID。
+		// `response` 存首次成功的响应体（jsonb），重放时原样返回 —— 这样"重试"
+		// 与"第一次"对客户端完全不可区分，包括 ticket / 会话这类一次性内容。
+		//
+		// ⚠ 存响应体意味着**它不能含长期凭据**：注册两段式的响应里只有 ticket
+		//（草稿凭据，本身有 TTL 且单次消费）与用户档案，没有 refresh token
+		//（那个只走 HttpOnly Cookie，重放时无法也无需重发）。
+		`CREATE TABLE IF NOT EXISTS idempotency_keys (
+	scope       varchar(32) NOT NULL,
+	key         varchar(64) NOT NULL,
+	request_hash char(64) NOT NULL,
+	status      integer NOT NULL,
+	response    jsonb NOT NULL,
+	created_at  timestamptz NOT NULL DEFAULT now(),
+	expires_at  timestamptz NOT NULL,
+	PRIMARY KEY (scope, key)
+)`,
+		`CREATE INDEX IF NOT EXISTS idempotency_keys_expires_at_idx ON idempotency_keys (expires_at)`,
+	}},
 }

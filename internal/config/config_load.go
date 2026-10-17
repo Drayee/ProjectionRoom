@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -128,9 +130,16 @@ const (
 	envPublicBaseURL  = "PR_PUBLIC_BASE_URL"
 	envResetTTL       = "PR_RESET_TTL"
 	envEmailVerifyTTL = "PR_EMAIL_VERIFY_TTL"
-	envMailPerEmail   = "PR_MAIL_PER_EMAIL_PER_HOUR"
-	envMailPerIP      = "PR_MAIL_PER_IP_PER_HOUR"
-	envMailResetPerIP = "PR_MAIL_RESET_PER_IP_PER_HOUR"
+	envOTPTTL         = "PR_OTP_TTL"
+	envOTPDevEcho     = "PR_OTP_DEV_ECHO"
+	// envRequireComplete 是"必需配置必须齐全"这条启动闸的逃生开关（默认开启校验）。
+	//
+	// 只有显式写 `0` / `false` 才跳过：漏配与刻意跳过在日志里长得一样，
+	// 而这两件事的后果完全不同。
+	envRequireComplete = "PR_REQUIRE_COMPLETE"
+	envMailPerEmail    = "PR_MAIL_PER_EMAIL_PER_HOUR"
+	envMailPerIP       = "PR_MAIL_PER_IP_PER_HOUR"
+	envMailResetPerIP  = "PR_MAIL_RESET_PER_IP_PER_HOUR"
 )
 
 // —— 账号层（ACCOUNTS §5）的默认值与允许范围。
@@ -192,12 +201,13 @@ const (
 	MaxSMTPTimeout = time.Minute
 	// DefaultSMTPFromName = "月喵"（站点名，见 README 的品牌名）。
 	DefaultSMTPFromName = "月喵"
-	// DefaultPublicBaseURL = 生产入口（见 CLAUDE §8 的部署事实）。
+	// 注意：`PR_PUBLIC_BASE_URL` **没有默认值**（早先默认指到生产入口）。
 	//
-	// 之所以给一个**具体**的默认值而不是留空：留空时链接无法拼装，而"忘了配"
-	// 的表现是用户收到一封点了没用的信 —— 比启动失败更晚、更难发现。
-	// 默认指到当前生产入口，至少让"没配也对"。
-	DefaultPublicBaseURL = "http://60.205.212.25"
+	// 为什么去掉那个默认值：它是"漏配也看起来正常"的典型 —— 部署到一台新机器上
+	// 忘了配，邮件里的链接会指向**另一个环境**，而这件事直到用户点开链接才暴露，
+	// 且症状是"链接点不开/点到了别人的站点"，极难归因到自己少配了一个变量。
+	// 新策略要求功能完整，因此它改成必填（缺了就在启动期报出来）。
+	//
 	// DefaultResetTTL = 30m（需求口径）：一封邮件里的链接，暴露面比 access token 大。
 	DefaultResetTTL = 30 * time.Minute
 	// MinResetTTL / MaxResetTTL：太短（<1m）会让"收到信 → 点开"来不及；
@@ -209,6 +219,13 @@ const (
 	DefaultEmailVerifyTTL = 24 * time.Hour
 	// MaxEmailVerifyTTL = 30 天：再长就等于"永久有效的验证链接"。
 	MaxEmailVerifyTTL = 30 * 24 * time.Hour
+	// DefaultOTPTTL = 5m：验证码只有 6 位数字，时间窗口是它抵御爆破的主要维度。
+	// 5 分钟够用户切到邮箱、读码、切回来输入，又短到暴力尝试无从展开。
+	DefaultOTPTTL = 5 * time.Minute
+	// MinOTPTTL / MaxOTPTTL：低于 1 分钟用户来不及输；高于 30 分钟等于把一个
+	// 6 位数字的凭据长期挂在邮箱里（而它不像链接那样有 256 bit 的熵兜底）。
+	MinOTPTTL = time.Minute
+	MaxOTPTTL = 30 * time.Minute
 
 	// 邮件入口的三条闸门（单位：每小时次数，见 IPCConfig 的说明）。
 	DefaultMailPerEmailPerHour   = 5
@@ -487,13 +504,14 @@ func Default() *Config {
 
 			// 邮件能力**默认关闭**（SMTPHost 为空），与"账号能力默认关闭"同一套
 			// 渐进上线路径：先部署代码，再逐步开启。
-			SMTPPort:       DefaultSMTPPort,
-			SMTPFromName:   DefaultSMTPFromName,
-			SMTPTLS:        DefaultSMTPTLS,
-			SMTPTimeout:    DefaultSMTPTimeout,
-			PublicBaseURL:  DefaultPublicBaseURL,
+			SMTPPort:     DefaultSMTPPort,
+			SMTPFromName: DefaultSMTPFromName,
+			SMTPTLS:      DefaultSMTPTLS,
+			SMTPTimeout:  DefaultSMTPTimeout,
+			// PublicBaseURL 故意留空（必填，见 DefaultPublicBaseURL 处的说明）。
 			ResetTTL:       DefaultResetTTL,
 			EmailVerifyTTL: DefaultEmailVerifyTTL,
+			OTPTTL:         DefaultOTPTTL,
 		},
 		MemoryLimitBytes: DefaultMemoryLimitBytes,
 		Signal: SignalConfig{
@@ -663,7 +681,116 @@ func Load() (*Config, error) {
 		cfg.Downloads.Dir = v
 	}
 
+	// 最后一道闸：**必需配置必须齐全**，缺任何一项都拒绝启动。
+	//
+	// 为什么放在最后而不是各自的位置：它要检查的是"跨配置项的完整性"
+	//（例如"账号开着就必须有邮件通道"），那些判据只有在全部字段都载入之后才成立。
+	if err := requireComplete(cfg); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// requireComplete 断言"本实例功能完整"：缺任何一项必需配置都拒绝启动。
+//
+// # 这条策略是什么，为什么改
+//
+// 早先的设计允许若干**显式降级**：不配 `PR_DB_DSN` 就关掉整个账号能力、
+// 不配 SMTP 就让找回密码返回 503、静态目录缺失就退化成 404 提示页。
+// 那些降级在"两步部署"和"还没构建前端"的阶段是有用的，代价是**运行期才知道**
+// 功能不全：页面能开、点下去才发现某个分区是 503/404。
+//
+// 现在的要求是：**启动即完整，缺配置就拒绝启动**。收益是把"功能缺失"从运行期
+// 症状（用户先撞上）提前成启动期事实（部署者当场看到），代价是部署必须一次配齐。
+//
+// # 五条必需项
+//
+//  1. `PR_DB_DSN`：账号能力的根。缺了就没有注册/登录/管理端。
+//  2. `PR_JWT_SECRET`（>= 32 字节）：缺了所有人随机掉线，症状像网络故障。
+//  3. `PR_SMTP_HOST` / `_USER` / `_PASS`：注册与改密码都靠邮箱验证码，
+//     没有发信通道等于注册直接不可用。**除非**显式打开 `PR_OTP_DEV_ECHO`
+//     （仅本机开发：验证码回显在响应里）。
+//  4. `PR_PUBLIC_BASE_URL`：拼邮件里的链接。
+//  5. 静态目录**必须存在**：没有前端产物就没有页面可开。
+//
+// 每一项的错误信息都写清"缺什么、怎么补"，而不是笼统的"配置不完整" ——
+// 拒绝启动的价值全在这句话里。
+func requireComplete(cfg *Config) error {
+	if cfg == nil {
+		return errors.New("config: 配置为空")
+	}
+	// 逃生开关：显式声明"这次我就要一个功能不全的实例"。
+	//
+	// 为什么仍然保留它：本仓库有两类**正当**的窄实例 ——
+	//   · 只跑信令/房间，不托管页面（开发时前端在 Vite 5173 上）；
+	//   · 单测与 CI（不连真库、不发信）。
+	// 但它必须被**显式写出来**：漏配与刻意跳过在日志里长得一样，
+	// 而这两件事的后果完全不同。
+	if v := strings.TrimSpace(os.Getenv(envRequireComplete)); v == "0" || strings.EqualFold(v, "false") {
+		log.Printf("[WARN] PR_REQUIRE_COMPLETE=0：跳过必需配置校验，" +
+			"本实例可能功能不全（缺项会在运行期表现为 503/404）")
+		return nil
+	}
+
+	ac := &cfg.Auth
+
+	var missing []string
+
+	if strings.TrimSpace(ac.DBDSN) == "" {
+		missing = append(missing,
+			"PR_DB_DSN 为空（账号能力必需：注册/登录/管理端都依赖数据库）")
+	}
+	if len(ac.JWTSecret) < MinJWTSecretBytes {
+		missing = append(missing, fmt.Sprintf(
+			"PR_JWT_SECRET 缺失或过短（当前 %d 字节，至少 %d；生成：`openssl rand -hex 32`）",
+			len(ac.JWTSecret), MinJWTSecretBytes))
+	}
+	if strings.TrimSpace(ac.PublicBaseURL) == "" {
+		missing = append(missing,
+			"PR_PUBLIC_BASE_URL 为空（拼不出邮件里的验证链接）")
+	}
+	// 邮件通道：除非显式声明"本机开发、验证码回显"。
+	if !ac.MailEnabled() && !ac.OTPDevEcho {
+		missing = append(missing,
+			"PR_SMTP_HOST / PR_SMTP_USER / PR_SMTP_PASS 未配齐（注册与改密码都靠邮箱验证码发送；"+
+				"仅本机开发可用 PR_OTP_DEV_ECHO=1 改为回显验证码）")
+	}
+	// 静态产物：只在**开启托管**时才要求产物存在。
+	//
+	// `PR_SERVE_STATIC=false` 是正当配置（前端另找地方托管、或只跑信令），
+	// 它不属于"漏配"。真正要拦的是"说要托管、产物却不在" —— 那才会让用户
+	// 打开页面看到 404。
+	if cfg.Static.Serve {
+		if _, err := os.Stat(cfg.Static.Dir); err != nil {
+			// 目录不存在 = 前端没构建。早先这是运行期降级（页面 404 + 提示），
+			// 现在按"功能缺失"处理：没有产物就没有页面可开，那正是本闸要拦的东西。
+			missing = append(missing, fmt.Sprintf(
+				"前端产物目录 %q 不存在（先执行 `npm --prefix client run build`，或设置 PR_STATIC_DIR 指向正确位置）",
+				cfg.Static.Dir))
+		} else if _, err := os.Stat(filepath.Join(cfg.Static.Dir, "index.html")); err != nil {
+			// 目录在但缺 index.html：多半是构建中断或 prune 脚本删过头。
+			missing = append(missing, fmt.Sprintf(
+				"前端产物目录 %q 里没有 index.html（构建不完整，请重新执行 `npm --prefix client run build`）",
+				cfg.Static.Dir))
+		}
+	}
+
+	if len(missing) == 0 {
+		return nil
+	}
+
+	var b strings.Builder
+	b.WriteString("config: 必需配置不完整，拒绝启动（本实例要求功能完整，不做运行期降级）。缺失项：")
+	for i, m := range missing {
+		b.WriteString("\n  ")
+		b.WriteString(strconv.Itoa(i + 1))
+		b.WriteString(". ")
+		b.WriteString(m)
+	}
+	b.WriteString("\n如果这次启动本来就只想要一个功能不全的实例（例如只跑信令），" +
+		"显式设置 PR_REQUIRE_COMPLETE=0 跳过本校验 —— 但那应当是刻意的选择，而不是漏配的结果。")
+	return errors.New(b.String())
 }
 
 // DownloadsDir 返回切片器二进制的实际发布目录。
@@ -1251,6 +1378,22 @@ func applyAuthEnv(ac *AuthConfig) error {
 				envEmailVerifyTTL, MaxEmailVerifyTTL, v)
 		}
 		ac.EmailVerifyTTL = d
+	}
+	if v := os.Getenv(envOTPTTL); v != "" {
+		d, err := positiveDuration(envOTPTTL, v)
+		if err != nil {
+			return err
+		}
+		if d < MinOTPTTL || d > MaxOTPTTL {
+			return fmt.Errorf("config: %s 必须落在 [%s, %s] 区间, got %q",
+				envOTPTTL, MinOTPTTL, MaxOTPTTL, v)
+		}
+		ac.OTPTTL = d
+	}
+	// 开发态验证码回显：只接受 1 / true（与 VITE_DEBUG_HOOKS 同一套口径）。
+	if v := strings.TrimSpace(os.Getenv(envOTPDevEcho)); v != "" {
+		on := v == "1" || strings.EqualFold(v, "true")
+		ac.OTPDevEcho = on
 	}
 	return nil
 }

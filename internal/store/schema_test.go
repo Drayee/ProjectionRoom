@@ -85,6 +85,34 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			"created_at": {"timestamp with time zone", 0, false},
 			"expires_at": {"timestamp with time zone", 0, false},
 			"used_at":    {"timestamp with time zone", 0, true},
+			// 0008 新增：OTP 的错误尝试计数（必须落库，见 store/otp.go 的说明）。
+			"attempts": {"integer", 0, false},
+		},
+		// 0008 新增：两段式注册的中间态。
+		"register_drafts": {
+			"id":             {"bigint", 0, false},
+			"ticket_hash":    {"character", 64, false},
+			"username":       {"character varying", 20, false},
+			"display_name":   {"character varying", 64, false},
+			"password_hash":  {"character varying", 255, false},
+			"email":          {"character varying", 254, true},
+			"email_otp_hash": {"character", 64, true},
+			"ip":             {"character varying", 45, true},
+			"user_agent":     {"character varying", 255, true},
+			"attempts":       {"integer", 0, false},
+			"created_at":     {"timestamp with time zone", 0, false},
+			"expires_at":     {"timestamp with time zone", 0, false},
+			"consumed_at":    {"timestamp with time zone", 0, true},
+		},
+		// 0008 新增：写操作幂等键。
+		"idempotency_keys": {
+			"scope":        {"character varying", 32, false},
+			"key":          {"character varying", 64, false},
+			"request_hash": {"character", 64, false},
+			"status":       {"integer", 0, false},
+			"response":     {"jsonb", 0, false},
+			"created_at":   {"timestamp with time zone", 0, false},
+			"expires_at":   {"timestamp with time zone", 0, false},
 		},
 	}
 
@@ -129,6 +157,14 @@ func TestSchemaConstraintsMatchSpec(t *testing.T) {
 			{"PRIMARY KEY", "id"},
 			{"UNIQUE", "token_hash"},
 			{"FOREIGN KEY", "user_id"},
+		},
+		// 0008：草稿凭据唯一；幂等键是复合主键（scope+key）。
+		"register_drafts": {
+			{"PRIMARY KEY", "id"},
+			{"UNIQUE", "ticket_hash"},
+		},
+		"idempotency_keys": {
+			{"PRIMARY KEY", "scope"},
 		},
 	}
 

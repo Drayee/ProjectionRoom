@@ -194,6 +194,11 @@ const (
 	forgotRateLimitWhat = "找回密码"
 	// tokenRateLimitWhat 用于 /api/auth/reset 与 /api/auth/verify-email（两者共用一条桶）。
 	tokenRateLimitWhat = "链接处理"
+	// otpRateLimitWhat 用于验证码的每邮箱闸门。
+	//
+	// 与 forgotRateLimitWhat 分开：两者是不同的动作，而"撞了验证码闸门"
+	// 与"撞了找回闸门"对用户来说意味着不同的等待对象。
+	otpRateLimitWhat = "验证码"
 )
 
 // newHourlyEmailLimiter 构造"每小时 N 次"的**每 IP** 限速中间件。

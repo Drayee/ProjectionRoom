@@ -214,6 +214,13 @@ interface RequestOptions {
   body?: unknown
   /** 只在需要的端点上带（`me` / `ws-ticket`）。 */
   token?: string
+  /**
+   * 幂等键（写操作的重放保护）。
+   *
+   * 同一份请求体 + 同一个键 = 服务端只执行一次，重试直接拿到首次的结果。
+   * 由调用方生成并**在重试期间保持不变**（见 utils/idempotency.ts）。
+   */
+  idempotencyKey?: string
 }
 
 async function request(path: string, options: RequestOptions = {}): Promise<unknown> {
@@ -225,6 +232,9 @@ async function request(path: string, options: RequestOptions = {}): Promise<unkn
   }
   if (options.token) {
     headers.Authorization = `Bearer ${options.token}`
+  }
+  if (options.idempotencyKey) {
+    headers['Idempotency-Key'] = options.idempotencyKey
   }
 
   let resp: Response
@@ -353,4 +363,82 @@ export async function reset(input: ResetInput): Promise<void> {
  */
 export async function verifyEmail(input: VerifyEmailInput): Promise<void> {
   await request('verify-email', { method: 'POST', body: input })
+}
+
+// ---------- 两段式注册（先用户名口令，再邮箱验证码）----------
+//
+// 三个端点对应界面上"翻一页"的三步。它们的**共同前提**是同一个 `ticket`
+//（第一段拿到，后两段带上），而 ticket 只在第一段的响应里出现一次。
+//
+// 三段都接受幂等键：双击"注册"不该建出两个账号，双击"发送验证码"不该让
+// 第一封码立刻作废（那会让用户拿着已经死掉的码反复重试）。
+
+/** 注册第一段的请求体。 */
+export interface RegisterStartInput {
+  username: string
+  displayName: string
+  password: string
+}
+
+/** 注册第一段的产出。 */
+export interface RegisterStartResult {
+  /** 后续两段的凭据（15 分钟内有效）。 */
+  ticket: string
+  /** 草稿剩余有效期（秒）。 */
+  expiresIn: number
+}
+
+/** POST /api/auth/register/start —— 校验用户名/口令，返回 ticket（**不建号**）。 */
+export async function registerStart(input: RegisterStartInput, idempotencyKey?: string): Promise<RegisterStartResult> {
+  const body = (await request('register/start', { method: 'POST', body: input, idempotencyKey })) as
+    | { ticket?: unknown; expiresIn?: unknown }
+    | null
+  const ticket = asString(body?.ticket)
+  if (ticket === '') {
+    throw new AuthApiError({ status: 0, code: 'AUTH_BAD_RESPONSE', message: '服务端响应缺少 ticket' })
+  }
+  return { ticket, expiresIn: typeof body?.expiresIn === 'number' ? body.expiresIn : 0 }
+}
+
+/**
+ * POST /api/auth/register/email —— 给草稿挂邮箱并发出验证码。
+ *
+ * 返回值是**本机开发**的验证码回显（`PR_OTP_DEV_ECHO=1` 时服务端才给）：
+ * 没有 SMTP 的机器上，这是唯一能把"注册 → 收码 → 建号"走通的途径。
+ * 生产环境服务端不返回该字段，因此这里恒为空串 —— 界面据此决定要不要显示。
+ */
+export async function registerEmail(ticket: string, email: string, idempotencyKey?: string): Promise<string> {
+  const body = (await request('register/email', {
+    method: 'POST',
+    body: { ticket, email },
+    idempotencyKey,
+  })) as { devCode?: unknown } | null
+  return asString(body?.devCode)
+}
+
+/** POST /api/auth/register/verify —— 凭 ticket + 验证码建号并登录（201）。 */
+export async function registerVerify(ticket: string, code: string, idempotencyKey?: string): Promise<AuthSession> {
+  return normalizeSession(await request('register/verify', { method: 'POST', body: { ticket, code }, idempotencyKey }))
+}
+
+// ---------- 改密码走邮箱验证码 ----------
+
+/** POST /api/auth/password/otp —— 发一条改密码验证码（200，恒定）。 */
+export async function passwordOTP(email: string): Promise<void> {
+  await request('password/otp', { method: 'POST', body: { email } })
+}
+
+/**
+ * POST /api/auth/password/otp/reset —— 凭验证码改密码（204）。
+ *
+ * 失败分诊（靠 `code`，不靠文案）：
+ *   `OTP_INVALID`            验证码不对，还能再试；
+ *   `OTP_ATTEMPTS_EXCEEDED`  这条码已废，必须重新获取；
+ *   `RATE_LIMITED`           太频繁。
+ */
+export async function passwordOTPReset(
+  input: { email: string; code: string; password: string },
+  idempotencyKey?: string,
+): Promise<void> {
+  await request('password/otp/reset', { method: 'POST', body: input, idempotencyKey })
 }

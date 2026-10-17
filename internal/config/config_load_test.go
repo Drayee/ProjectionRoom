@@ -4,11 +4,28 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
+// skipCompleteness 让本文件的用例跳过"必需配置齐全"那道闸。
+//
+// 那一道闸断言的是**部署完整性**（数据库/密钥/SMTP/静态产物都在），而本文件的
+// 用例断言的是**单个字段的默认值与边界**。两者混在一起时，任何一个字段的边界用例
+// 都会因为"没配数据库"而变红 —— 那会把"这个字段的边界对不对"这条信息彻底淹掉。
+//
+// 完整性本身由 TestRequireComplete* 一组用例负责，它们**不**调用本函数。
+func skipCompleteness(t *testing.T) {
+	t.Helper()
+	t.Setenv(envRequireComplete, "0")
+}
+
 func TestLoadDefaults(t *testing.T) {
+	// 本文件测的是**字段默认值与取值边界**，不是"启动完整性"。
+	// 后者由 requireComplete 这一道独立闸负责（见 TestRequireComplete*），
+	// 它要求数据库/密钥/SMTP/静态产物全部到位 —— 而这里关心的是"某个字段的默认值"。
+	skipCompleteness(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() 不应失败: %v", err)
@@ -22,6 +39,7 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envAddr, "0.0.0.0:9000")
 	t.Setenv(envMaxMembers, "8")
 	t.Setenv(envSTUNURLs, "stun:a:1, stun:b:2")
@@ -46,6 +64,7 @@ func TestLoadEnvOverride(t *testing.T) {
 // 默认列表的**顺序**也在断言里：它既是探测列表，也是"首窗口还没跑完"时的下发顺序，
 // 因此顺序本身就是契约（实测最快的排前面）。
 func TestICEDefaults(t *testing.T) {
+	skipCompleteness(t)
 	cfg := Default()
 	ic := cfg.ICE
 
@@ -100,6 +119,7 @@ func TestICEDefaults(t *testing.T) {
 
 // TestICEEnvOverride 锁定 PR_STUN_URLS / PR_ICE_MAX_STUN / PR_ICE_PROBE_INTERVAL / PR_ICE_TTL。
 func TestICEEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envSTUNURLs, "stun:x:1, stun:y:2 , stun:x:1") // 顺带验证去重
 	t.Setenv(envICEMaxSTUN, "2")
 	t.Setenv(envICEProbeInterval, "30s")
@@ -125,6 +145,7 @@ func TestICEEnvOverride(t *testing.T) {
 
 // TestICETTLBoundaries TTL 的合法范围是 (0, 3600s]：两端都要验收，越界必须报错。
 func TestICETTLBoundaries(t *testing.T) {
+	skipCompleteness(t)
 	okCases := []struct {
 		value string
 		want  time.Duration
@@ -160,6 +181,7 @@ func TestICETTLBoundaries(t *testing.T) {
 
 // TestICEEnvRejectsInvalid 其余三个 ICE 变量的非法值同样必须明确报错。
 func TestICEEnvRejectsInvalid(t *testing.T) {
+	skipCompleteness(t)
 	cases := []struct{ name, value string }{
 		{envICEMaxSTUN, "0"},   // 0 条等于不下发任何 STUN
 		{envICEMaxSTUN, "-1"},  // 负数
@@ -182,6 +204,7 @@ func TestICEEnvRejectsInvalid(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidEnv(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envMaxMembers, "1")
 	if _, err := Load(); err == nil {
 		t.Fatal("MaxMembers=1 应当报错")
@@ -199,6 +222,7 @@ func TestLoadRejectsInvalidEnv(t *testing.T) {
 
 // TestSegmentDefaults 锁定切片服务的默认配额：并发 2 / 队列 8 / 3 作业每分钟 / 30 分钟 TTL。
 func TestSegmentDefaults(t *testing.T) {
+	skipCompleteness(t)
 	cfg := Default()
 	sc := cfg.Segment
 
@@ -236,6 +260,7 @@ func TestSegmentDefaults(t *testing.T) {
 }
 
 func TestSegmentEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envSegmentConcurrency, "4")
 	t.Setenv(envSegmentQueueLength, "0")
 	t.Setenv(envSegmentRatePerMinute, "6")
@@ -282,6 +307,7 @@ func TestSegmentEnvOverride(t *testing.T) {
 }
 
 func TestSegmentEnvRejectsInvalid(t *testing.T) {
+	skipCompleteness(t)
 	cases := []struct{ name, value string }{
 		{envSegmentConcurrency, "0"},
 		{envSegmentConcurrency, "abc"},
@@ -313,6 +339,7 @@ func TestSegmentEnvRejectsInvalid(t *testing.T) {
 // 它必须覆盖"半开连接被 ping/写超时收尸"的最坏情况（20s ping + 10s 写超时 ≈ 30s），
 // 否则主播重连时会撞上"房间已销毁"。
 func TestHostGraceDefaults(t *testing.T) {
+	skipCompleteness(t)
 	if DefaultHostGrace != 60*time.Second {
 		t.Fatalf("默认宽限期应为 60s，实际 %v", DefaultHostGrace)
 	}
@@ -334,6 +361,7 @@ func TestHostGraceDefaults(t *testing.T) {
 
 // TestHostGraceEnvOverride 锁定 PR_ROOM_HOST_GRACE 接受 Go 时长字符串（45s / 2m）。
 func TestHostGraceEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	cases := []struct {
 		value string
 		want  time.Duration
@@ -361,6 +389,7 @@ func TestHostGraceEnvOverride(t *testing.T) {
 // TestHostGraceEnvRejectsInvalid 锁定非法宽限期必须明确报错，而不是静默回退：
 // 静默回退会让"配错了"和"配对了"在运行期完全无法区分。
 func TestHostGraceEnvRejectsInvalid(t *testing.T) {
+	skipCompleteness(t)
 	for _, v := range []string{
 		"0",       // 0 会让宽限期失效（等于立刻销毁房间）
 		"0s",      // 同上，显式写法也不能接受
@@ -388,6 +417,7 @@ func TestHostGraceEnvRejectsInvalid(t *testing.T) {
 // 58–78ms（docs/ALGORITHM.md §2.1 的实测表），4 跳最坏再叠约 300ms；
 // 而多出来的那一层在十几人的房间里很少真的换来容量（对价见 SPEC §6.2）。
 func TestRoomMaxDepthDefaults(t *testing.T) {
+	skipCompleteness(t)
 	if DefaultRoomMaxDepth != 3 {
 		t.Fatalf("默认深度上限应为 3，实际 %d", DefaultRoomMaxDepth)
 	}
@@ -409,6 +439,7 @@ func TestRoomMaxDepthDefaults(t *testing.T) {
 
 // TestRoomMaxDepthEnvOverride 锁定 PR_MAX_DEPTH：范围 [1,6] 的两端都必须认。
 func TestRoomMaxDepthEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	for _, want := range []int{1, 2, 3, 4, 5, 6} {
 		t.Run(strconv.Itoa(want), func(t *testing.T) {
 			t.Setenv(envRoomMaxDepth, strconv.Itoa(want))
@@ -428,6 +459,7 @@ func TestRoomMaxDepthEnvOverride(t *testing.T) {
 // 深度写小会把观众挡在房外（Unassigned 变多），写大会把延迟预算翻一倍，
 // 两者都必须立刻可见，而不是"配错了和配对了在运行期看起来一样"。
 func TestRoomMaxDepthEnvRejectsInvalid(t *testing.T) {
+	skipCompleteness(t)
 	for _, v := range []string{
 		"0",   // 0 等于除主播外一个人都放不下
 		"-1",  // 负数
@@ -448,6 +480,7 @@ func TestRoomMaxDepthEnvRejectsInvalid(t *testing.T) {
 
 // TestStaticDefaults 锁定单端口部署的默认形态：托管 client/dist，且默认开启。
 func TestStaticDefaults(t *testing.T) {
+	skipCompleteness(t)
 	cfg := Default()
 	if !cfg.Static.Serve {
 		t.Fatal("静态资源托管默认应开启")
@@ -458,6 +491,7 @@ func TestStaticDefaults(t *testing.T) {
 }
 
 func TestStaticEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envStaticDir, `D:\other\dist`)
 	t.Setenv(envServeStatic, "0")
 
@@ -485,9 +519,35 @@ func TestStaticEnvOverride(t *testing.T) {
 	}
 }
 
-// TestStaticDirMissingIsNotFatal 锁定一条边界：目录不存在/路径古怪都只是运行期降级，
-// 不可以在 Load 阶段报错——未构建前端时 go run ./cmd 仍要能起 API 与 /ws。
-func TestStaticDirMissingIsNotFatal(t *testing.T) {
+// TestStaticDirMissingFailsWhenComplete 锁定**新**策略：要求功能完整时，
+// 前端产物缺失属于"必需配置不全"，必须在 Load 阶段就失败。
+//
+// 这与本文件早先那条 `...IsNotFatal` 用例的断言相反，且是刻意的反转：
+// 旧策略允许"go run ./cmd 不装前端也能起 API 与 /ws"（开发态方便，代价是
+// 页面 404 要到用户点开才发现）；新策略要求启动即完整，缺产物直接拒绝启动。
+// 想要旧行为的场景（只跑信令）必须显式写 PR_REQUIRE_COMPLETE=0。
+func TestStaticDirMissingFailsWhenComplete(t *testing.T) {
+	t.Setenv(envRequireComplete, "1")
+	for _, dir := range []string{
+		`D:\definitely\not\here\dist`,
+		"relative/not/here",
+		"...",
+	} {
+		t.Setenv(envStaticDir, dir)
+		_, err := Load()
+		if err == nil {
+			t.Fatalf("PR_STATIC_DIR=%q 在要求功能完整时必须让 Load 失败", dir)
+		}
+		if !strings.Contains(err.Error(), "前端产物目录") {
+			t.Fatalf("错误信息应当点明「前端产物目录」，实际：%v", err)
+		}
+	}
+}
+
+// TestStaticDirMissingIsToleratedWhenSkipped 保住旧行为作为**显式选择**：
+// 写了 PR_REQUIRE_COMPLETE=0 时，目录缺失仍然只是运行期降级。
+func TestStaticDirMissingIsToleratedWhenSkipped(t *testing.T) {
+	skipCompleteness(t)
 	for _, dir := range []string{
 		`D:\definitely\not\here\dist`,
 		"relative/not/here",
@@ -496,7 +556,7 @@ func TestStaticDirMissingIsNotFatal(t *testing.T) {
 		t.Setenv(envStaticDir, dir)
 		cfg, err := Load()
 		if err != nil {
-			t.Fatalf("PR_STATIC_DIR=%q 不应让 Load 失败: %v", dir, err)
+			t.Fatalf("PR_STATIC_DIR=%q 在跳过完整性校验时不应让 Load 失败: %v", dir, err)
 		}
 		if cfg.Static.Dir != dir {
 			t.Fatalf("静态目录应当原样保留 %q，实际 %q", dir, cfg.Static.Dir)
@@ -505,6 +565,7 @@ func TestStaticDirMissingIsNotFatal(t *testing.T) {
 }
 
 func TestStaticEnvRejectsInvalidSwitch(t *testing.T) {
+	skipCompleteness(t)
 	for _, v := range []string{"maybe", "2", "开", "-1"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv(envServeStatic, v)
@@ -518,6 +579,7 @@ func TestStaticEnvRejectsInvalidSwitch(t *testing.T) {
 // TestDownloadsDirFollowsStaticRoot 锁定默认形态：不配 PR_DOWNLOADS_DIR 时，
 // 切片器二进制的目录就是 <Static.Dir>/downloads —— URL /downloads/<file> 与磁盘布局一致。
 func TestDownloadsDirFollowsStaticRoot(t *testing.T) {
+	skipCompleteness(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() 不应失败: %v", err)
@@ -542,6 +604,7 @@ func TestDownloadsDirFollowsStaticRoot(t *testing.T) {
 
 // TestDownloadsEnvOverride 锁定 PR_DOWNLOADS_DIR：非空即以它为准，不再跟随静态根。
 func TestDownloadsEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envDownloadsDir, `D:\pr-downloads`)
 	t.Setenv(envStaticDir, `D:\other\dist`)
 

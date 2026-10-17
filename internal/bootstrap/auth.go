@@ -1,7 +1,9 @@
 package bootstrap
 
 import (
+	"errors"
 	"fmt"
+	"log"
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/service"
@@ -70,6 +72,19 @@ func NewAccountService(
 		return nil, fmt.Errorf("%w（适配器=%v 签发器=%v 票据表=%v）",
 			errAccountDepsIncomplete, st != nil, signer != nil, tickets != nil)
 	}
+	// 开发态验证码回显 + 已配置 SMTP = 没有正当理由的组合。
+	//
+	// 那种状态下"验证码"既会被回显给调用方、又会真的发到邮箱里 —— 而它的唯一
+	// 用途是"本机没有 SMTP 时也能验证整条链路"。同时成立只说明一件事：
+	// 有人把开发配置带进了部署。这里直接拒绝启动，比让它安静地生效安全得多。
+	if cfg.Auth.OTPDevEcho && cfg.Auth.MailEnabled() {
+		return nil, errors.New(
+			"PR_OTP_DEV_ECHO 已打开，但 SMTP 也已配置：验证码回显只用于没有 SMTP 的本机开发，" +
+				"两者同时开启没有正当用途（生产必须关掉 PR_OTP_DEV_ECHO）")
+	}
+	if cfg.Auth.OTPDevEcho {
+		log.Printf("[WARN] PR_OTP_DEV_ECHO=1：验证码会明文回显在接口响应里（仅限本机开发，生产必须关闭）")
+	}
 	opts := service.AccountOptions{
 		BcryptCost: cfg.Auth.BcryptCost,
 		RefreshTTL: cfg.Auth.RefreshTTL,
@@ -81,6 +96,8 @@ func NewAccountService(
 
 		ResetTTL:       cfg.Auth.ResetTTL,
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
+		OTPTTL:         cfg.Auth.OTPTTL,
+		OTPDevEcho:     cfg.Auth.OTPDevEcho,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
 	}
 	if mailer != nil {

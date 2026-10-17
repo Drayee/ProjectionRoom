@@ -145,10 +145,44 @@ func newTestServerWithGrace(t *testing.T, grace time.Duration) (*httptest.Server
 	return startTestServer(t, cfg), cfg
 }
 
+// loadCompleteConfig 灌入一组**最小完整配置**后走 config.Load()。
+//
+// 用途：本包的一批用例要验"某个 PR_* 变量有没有真的生效"，它们必须走
+// `config.Load()` 才能覆盖环境变量解析这一段。而 `requireComplete` 那道闸
+// 要求数据库/密钥/对外基地址/SMTP/静态产物全部到位 —— 那与这些用例关心的事无关。
+//
+// 这里给的是"能过闸的最小组合"：假 DSN（不连库）、固定密钥、占位基地址、
+// dev echo 顶替 SMTP（本机没有发信通道）、关闭静态托管（测试不托管页面）。
+func loadCompleteConfig(t *testing.T) *config.Config {
+	t.Helper()
+	t.Setenv("PR_DB_DSN", "host=127.0.0.1 dbname=fixture sslmode=disable")
+	t.Setenv("PR_JWT_SECRET", handlerTestSecret)
+	t.Setenv("PR_PUBLIC_BASE_URL", "https://pr.test")
+	t.Setenv("PR_OTP_DEV_ECHO", "1")
+	t.Setenv("PR_SERVE_STATIC", "false")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	return cfg
+}
+
 // newTestServerFromEnv 走 config.Load()（含 PR_* 环境变量）起服务：
 // 用于验证环境变量真的作用到了运行期行为，而不是只落在配置结构体里。
+//
+// 它会先灌入一组**最小完整配置**（数据库 DSN 指向假地址、密钥、对外基地址、
+// dev echo 代替 SMTP、静态托管关闭）：本用例要验的是"某个环境变量有没有生效"，
+// 而不是"部署是否完整" —— 后者由 internal/config 的 requireComplete 用例负责。
+// 不灌这些的话，`requireComplete` 会先一步拒绝启动，用例就永远验不到它真正关心的事。
 func newTestServerFromEnv(t *testing.T) (*httptest.Server, *config.Config) {
 	t.Helper()
+
+	t.Setenv("PR_DB_DSN", "host=127.0.0.1 dbname=fixture sslmode=disable")
+	t.Setenv("PR_JWT_SECRET", handlerTestSecret)
+	t.Setenv("PR_PUBLIC_BASE_URL", "https://pr.test")
+	t.Setenv("PR_OTP_DEV_ECHO", "1")
+	t.Setenv("PR_SERVE_STATIC", "false")
 
 	cfg, err := config.Load()
 	if err != nil {

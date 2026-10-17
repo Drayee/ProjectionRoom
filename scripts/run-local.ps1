@@ -48,8 +48,28 @@ if ($Port -gt 0) {
 
 Write-Host "[run-local] 监听   : $($env:PR_ADDR)"
 Write-Host "[run-local] 数据库 : $(([regex]::Match($env:PR_DB_DSN, 'host=\S+ port=\S+ user=\S+').Value)) dbname=$(([regex]::Match($env:PR_DB_DSN, 'dbname=\S+').Value -replace 'dbname=',''))"
-Write-Host "[run-local] 账号能力: $(if ($env:PR_DB_DSN) { '已启用' } else { '关闭（游客模式）' })"
+Write-Host "[run-local] 账号能力: $(if ($env:PR_DB_DSN) { '已启用' } else { '未配置（启动会失败）' })"
 Write-Host "[run-local] 静态产物: client/dist（若缺请先 npm --prefix client run build）"
+
+# 启动完整性提示：缺任何一项必需配置都会在启动期被拒绝（不是运行期 503）。
+# 这里先做一次预检，把"等它编译完再报错"变成"现在就说清缺什么"。
+$missing = @()
+if (-not $env:PR_DB_DSN) { $missing += 'PR_DB_DSN' }
+if (-not $env:PR_JWT_SECRET -or $env:PR_JWT_SECRET.Length -lt 32) { $missing += 'PR_JWT_SECRET(>=32字节)' }
+if (-not $env:PR_PUBLIC_BASE_URL) { $missing += 'PR_PUBLIC_BASE_URL' }
+$smtpReady = $env:PR_SMTP_HOST -and $env:PR_SMTP_USER -and $env:PR_SMTP_PASS
+$devEcho = $env:PR_OTP_DEV_ECHO -in @('1', 'true', 'True')
+if (-not $smtpReady -and -not $devEcho) { $missing += 'SMTP 三件套 或 PR_OTP_DEV_ECHO=1' }
+if (-not (Test-Path (Join-Path $root 'client/dist/index.html'))) { $missing += 'client/dist（先 npm --prefix client run build）' }
+
+if ($missing.Count -gt 0) {
+    Write-Host ''
+    Write-Host '[run-local] 必需配置不完整，服务会拒绝启动。缺项：' -ForegroundColor Red
+    $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    Write-Host '[run-local] 把这些补进 .env.local 后重试。' -ForegroundColor Yellow
+    Write-Host ''
+}
+
 Write-Host ''
 
 if (-not $SkipBuild) {

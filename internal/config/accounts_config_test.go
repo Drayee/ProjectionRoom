@@ -47,6 +47,11 @@ func clearAuthEnv(t *testing.T) {
 	} {
 		unsetEnv(t, name)
 	}
+	// 本文件的用例测的是**默认值与取值边界**，不是"启动完整性"。
+	// `requireComplete` 是后加的一道独立闸（缺配置拒绝启动），它会让"不配账号"
+	// 这类默认值用例直接失败 —— 而那不是它们要断言的东西。
+	// 因此这里显式跳过它；完整性本身由 TestRequireComplete* 一组用例负责。
+	t.Setenv(envRequireComplete, "0")
 }
 
 const testJWTSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

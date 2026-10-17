@@ -27,10 +27,15 @@ type fakeStore struct {
 	audits   []store.AdminAudit
 	// resets 是一次性邮件令牌表（password_resets）的内存版。
 	resets map[int64]*store.PasswordReset
+	// drafts 是注册草稿表（register_drafts）的内存版。
+	drafts map[int64]*store.RegisterDraft
+	// idem 是幂等键（scope+key → 记录）。
+	idem map[string]*store.IdempotencyRecord
 
 	nextUserID    int64
 	nextSessionID int64
 	nextResetID   int64
+	nextDraftID   int64
 
 	// createUserErr / createSessionErr 是注入的失败（便于构造唯一约束冲突）。
 	createUserErr    error
@@ -48,6 +53,8 @@ func newFakeStore() *fakeStore {
 		byName:   map[string]int64{},
 		sessions: map[int64]*store.Session{},
 		resets:   map[int64]*store.PasswordReset{},
+		drafts:   map[int64]*store.RegisterDraft{},
+		idem:     map[string]*store.IdempotencyRecord{},
 	}
 }
 
@@ -352,6 +359,236 @@ func (f *fakeStore) ConsumeEmailVerify(_ context.Context, tokenHash string) (int
 	return r.UserID, true, nil
 }
 
+// —— 邮箱验证码（OTP）：内存版，**逐条对齐真 store 的语义**。
+//
+// 关键是 attempts 的落库语义：真 store 用 FOR UPDATE 串行化，这里用同一把互斥锁，
+// 因此"并发两次校验各自 +1 却只加了一次"这类丢失更新在测试里也不会被掩盖。
+
+func (f *fakeStore) InsertEmailOTP(_ context.Context, t *store.PasswordReset) error {
+	if t == nil || t.UserID <= 0 {
+		return errors.New("fakeStore: 验证码缺少 user_id")
+	}
+	if t.Email == nil || *t.Email == "" {
+		return errors.New("fakeStore: 验证码必须带邮箱")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// 作废旧码：与真 store 一致（同一 user + 同用途的未用行全部烧掉）。
+	for _, r := range f.resets {
+		if r.UserID == t.UserID && r.Purpose == store.PurposeEmailOTP && r.UsedAt == nil {
+			now := time.Now()
+			r.UsedAt = &now
+		}
+	}
+	f.nextResetID++
+	t.ID = f.nextResetID
+	t.Purpose = store.PurposeEmailOTP
+	t.Attempts = 0
+	cp := *t
+	f.resets[t.ID] = &cp
+	return nil
+}
+
+func (f *fakeStore) ConsumeEmailOTP(_ context.Context, userID int64, otpHash string, maxAttempts int) (bool, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// 找该账号最近一条未用未过期的码（与真 store 的 ORDER BY created_at DESC LIMIT 1 同义）。
+	var cur *store.PasswordReset
+	for _, r := range f.resets {
+		if r.UserID != userID || r.Purpose != store.PurposeEmailOTP {
+			continue
+		}
+		if r.UsedAt != nil || !time.Now().Before(r.ExpiresAt) {
+			continue
+		}
+		if cur == nil || r.CreatedAt.After(cur.CreatedAt) {
+			cur = r
+		}
+	}
+	if cur == nil {
+		return false, store.ErrOTPNotFound
+	}
+	if cur.Attempts >= maxAttempts {
+		now := time.Now()
+		cur.UsedAt = &now
+		return false, store.ErrOTPAttemptsExceeded
+	}
+	if cur.TokenHash != otpHash {
+		cur.Attempts++
+		if cur.Attempts >= maxAttempts {
+			now := time.Now()
+			cur.UsedAt = &now
+			return false, store.ErrOTPAttemptsExceeded
+		}
+		return false, nil
+	}
+	now := time.Now()
+	cur.UsedAt = &now
+	return true, nil
+}
+
+func (f *fakeStore) CountRecentEmailOTP(_ context.Context, userID int64, since time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for _, r := range f.resets {
+		if r.UserID == userID && r.Purpose == store.PurposeEmailOTP && !r.CreatedAt.Before(since) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeStore) LastEmailOTPSentAt(_ context.Context, userID int64) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var last time.Time
+	for _, r := range f.resets {
+		if r.UserID == userID && r.Purpose == store.PurposeEmailOTP && r.CreatedAt.After(last) {
+			last = r.CreatedAt
+		}
+	}
+	return last, nil
+}
+
+// —— 注册草稿 ——
+
+func (f *fakeStore) InsertRegisterDraft(_ context.Context, d *store.RegisterDraft) error {
+	if d == nil || d.Username == "" || d.PasswordHash == "" {
+		return errors.New("fakeStore: 草稿缺字段")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextDraftID++
+	d.ID = f.nextDraftID
+	cp := *d
+	f.drafts[d.ID] = &cp
+	return nil
+}
+
+func (f *fakeStore) DraftByTicket(_ context.Context, ticketHash string) (*store.RegisterDraft, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range f.drafts {
+		if d.TicketHash == ticketHash && d.ConsumedAt == nil && time.Now().Before(d.ExpiresAt) {
+			cp := *d
+			return &cp, nil
+		}
+	}
+	return nil, store.ErrDraftNotFound
+}
+
+func (f *fakeStore) AttachDraftOTP(_ context.Context, ticketHash, email, otpHash string, expiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range f.drafts {
+		if d.TicketHash == ticketHash && d.ConsumedAt == nil && time.Now().Before(d.ExpiresAt) {
+			e := email
+			h := otpHash
+			d.Email = &e
+			d.EmailOTPHash = &h
+			d.Attempts = 0
+			return nil
+		}
+	}
+	return store.ErrDraftNotFound
+}
+
+func (f *fakeStore) ConsumeDraftOTP(_ context.Context, ticketHash, otpHash string, maxAttempts int) (*store.RegisterDraft, bool, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range f.drafts {
+		if d.TicketHash != ticketHash || d.ConsumedAt != nil || !time.Now().Before(d.ExpiresAt) {
+			continue
+		}
+		if d.EmailOTPHash == nil || *d.EmailOTPHash == "" {
+			return nil, false, store.ErrOTPNotFound
+		}
+		if d.Attempts >= maxAttempts {
+			now := time.Now()
+			d.ConsumedAt = &now
+			return nil, false, store.ErrOTPAttemptsExceeded
+		}
+		if *d.EmailOTPHash != otpHash {
+			d.Attempts++
+			if d.Attempts >= maxAttempts {
+				now := time.Now()
+				d.ConsumedAt = &now
+				return nil, false, store.ErrOTPAttemptsExceeded
+			}
+			return nil, false, nil
+		}
+		d.EmailOTPHash = nil
+		d.Attempts = 0
+		cp := *d
+		return &cp, true, nil
+	}
+	return nil, false, store.ErrOTPNotFound
+}
+
+// —— 幂等键 ——
+
+func idemKey(scope, key string) string { return scope + "\x00" + key }
+
+func (f *fakeStore) ReserveIdempotencyKey(_ context.Context, scope, key, requestHash string, ttl time.Duration) (*store.IdempotencyRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := idemKey(scope, key)
+	if rec, ok := f.idem[k]; ok {
+		if rec.RequestHash != requestHash {
+			return nil, store.ErrIdempotencyKeyConflict
+		}
+		if rec.Status == 0 {
+			return nil, store.ErrIdempotencyKeyInFlight
+		}
+		cp := *rec
+		return &cp, nil
+	}
+	f.idem[k] = &store.IdempotencyRecord{
+		Scope:       scope,
+		Key:         key,
+		RequestHash: requestHash,
+		Status:      0,
+		ExpiresAt:   time.Now().Add(ttl),
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) CompleteIdempotencyKey(_ context.Context, scope, key string, status int, response []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if rec, ok := f.idem[idemKey(scope, key)]; ok && rec.Status == 0 {
+		rec.Status = status
+		rec.Response = append([]byte(nil), response...)
+	}
+	return nil
+}
+
+func (f *fakeStore) ReleaseIdempotencyKey(_ context.Context, scope, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.idem, idemKey(scope, key))
+	return nil
+}
+
+func (f *fakeStore) SetPasswordHash(_ context.Context, id int64, hash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.PasswordHash = hash
+	return nil
+}
+
 // resetRowCount 返回某个用途的令牌行数（验收"未验证邮箱不落行"用）。
 func (f *fakeStore) resetRowCount(purpose string) int {
 	f.mu.Lock()
@@ -451,6 +688,11 @@ func newTestService(t *testing.T, f *fakeStore, opts AccountOptions) *AccountSer
 	}
 	if opts.PublicBaseURL == "" {
 		opts.PublicBaseURL = "https://example.test"
+	}
+	// 验证码 TTL：生产默认 5 分钟（config.DefaultOTPTTL）。不填会让构造器拒绝，
+	// 于是每个既有用例都会因为"少填一个测试参数"而变红 —— 那不是它们要测的东西。
+	if opts.OTPTTL == 0 {
+		opts.OTPTTL = 5 * time.Minute
 	}
 	signer, err := auth.NewSigner(accountTestJWTSecret, 15*time.Minute)
 	if err != nil {

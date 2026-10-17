@@ -61,6 +61,19 @@ const (
 	// 能拿到这个码的前提是对方已经持有一串 256 bit 的随机串。
 	CodeVerifyTokenInvalid = "VERIFY_TOKEN_INVALID"
 
+	// —— 邮箱验证码链路（注册两段式 + 改密码）。
+
+	// CodeOTPInvalid 表示验证码不正确（还能再试）。
+	CodeOTPInvalid = "OTP_INVALID"
+	// CodeOTPAttemptsExceeded 表示这条码已因错误次数过多而作废。
+	//
+	// 与 CodeOTPInvalid 分开是**必须**的：两者的下一步动作不同 ——
+	// 前者是"再看看是不是抄错了"，后者是"这条码已经死了，必须重新获取"。
+	// 混成一条会让用户对着一个永远不会通过的码反复重试。
+	CodeOTPAttemptsExceeded = "OTP_ATTEMPTS_EXCEEDED"
+	// CodeRegisterTicketInvalid 表示注册会话（ticket）不可用。
+	CodeRegisterTicketInvalid = "REGISTER_TICKET_INVALID"
+
 	// CodeMailUnavailable 表示**邮件能力未配置**（PR_SMTP_HOST 或账号密码为空）。
 	//
 	// 与 CodeAuthUnavailable 同风格：显式的 503 降级，而不是"路由凭空消失"。
@@ -125,6 +138,22 @@ func accountErrorResponse(err error) (status int, code string, message string) {
 		return http.StatusBadRequest, CodeResetTokenInvalid, err.Error()
 	case errors.Is(err, service.ErrVerifyTokenInvalid):
 		return http.StatusBadRequest, CodeVerifyTokenInvalid, err.Error()
+
+	// —— 邮箱验证码链路（注册两段式 + 改密码）。
+	//
+	// 三条都用 400：它们都是"你手里这次输入不对"，而不是"资源不存在"。
+	// 分成三个错误码是为了让前端能给出不同文案 —— 尤其是
+	// OTP_ATTEMPTS_EXCEEDED（这条码已废，必须重新获取）与 OTP_INVALID
+	//（还能再试）对用户来说是完全不同的下一步。
+	case errors.Is(err, service.ErrOTPInvalid):
+		return http.StatusBadRequest, CodeOTPInvalid, err.Error()
+	case errors.Is(err, service.ErrOTPAttemptsExceeded):
+		return http.StatusBadRequest, CodeOTPAttemptsExceeded, err.Error()
+	case errors.Is(err, service.ErrOTPTooSoon):
+		// 429 而不是 400：它确实是"太频繁"，与限速器同一语义。
+		return http.StatusTooManyRequests, model.CodeRateLimited, err.Error()
+	case errors.Is(err, service.ErrDraftTicketInvalid):
+		return http.StatusBadRequest, CodeRegisterTicketInvalid, err.Error()
 	// 邮件能力未配置：503 + 显式错误码，与"AUTH_UNAVAILABLE"同一套降级风格。
 	// 注意它**不区分邮箱是否存在**（判据在查库之前就成立）。
 	case errors.Is(err, service.ErrMailUnavailable):
@@ -140,6 +169,10 @@ func accountErrorResponse(err error) (status int, code string, message string) {
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
 
 	case errors.Is(err, service.ErrBadRole):
+		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+
+	// 请求体不是合法 JSON：几条新端点（注册两段式 / 验证码）共用的 400。
+	case errors.Is(err, errBadJSON):
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
 
 	// 目标账号不存在：对管理员来说是"操作对象错了"，用 404 比 500 准确。

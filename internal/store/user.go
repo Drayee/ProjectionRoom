@@ -233,6 +233,28 @@ func (s *Store) SetUserRole(ctx context.Context, id int64, role string) error {
 	return nil
 }
 
+// SetPasswordHash 直接换口令哈希。
+//
+// ⚠ 它**只改口令**，不动会话与 token_version。改密必须同时让旧凭据失效，
+// 因此调用方（service.replacePassword）紧接着要调 RevokeAllSessions + BumpTokenVersion。
+// 链接令牌那条路径不需要它：ConsumePasswordReset 把四件事放在同一个事务里。
+//
+// 单独提供这个方法而不是复用 ConsumePasswordReset：后者要求一个待消费的令牌，
+// 而 OTP 路径的令牌已经在 ConsumeEmailOTP 里消费掉了（那是它自己的单次使用点）。
+func (s *Store) SetPasswordHash(ctx context.Context, id int64, hash string) error {
+	if strings.TrimSpace(hash) == "" {
+		return errors.New("store: SetPasswordHash 缺少口令哈希")
+	}
+	res := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", id).Update("password_hash", hash)
+	if res.Error != nil {
+		return fmt.Errorf("store: 更新口令失败: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // BumpTokenVersion 把 token_version 加一并返回新值（§5：改密/封禁/登出全部设备
 // 靠它让该用户所有 access token 立刻失效）。
 //

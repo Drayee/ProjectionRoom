@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -311,6 +312,44 @@ func (f *fakeAccountService) VerifyEmail(_ context.Context, token string) error 
 	defer f.mu.Unlock()
 	f.verifyCalls = append(f.verifyCalls, token)
 	return f.verifyErr
+}
+
+// —— 两段式注册 / 验证码 / 幂等键（新端点的假实现）。
+//
+// 这几个方法的职责只是**让接口满足**：本文件既有的用例覆盖的是登录、找回、
+// 验证邮件那几条链路，新链路的判据在 service 层与 store 层的用例里
+//（那里有真实的 attempts 计数与单次消费语义）。返回零值即"未实现"。
+
+func (f *fakeAccountService) RegisterStart(_ context.Context, _, _, _, _, _ string) (*service.RegisterStartResult, error) {
+	return &service.RegisterStartResult{Ticket: "fake-ticket", ExpiresIn: 900}, nil
+}
+
+func (f *fakeAccountService) RegisterSendEmailOTP(_ context.Context, _, _, _, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeAccountService) RegisterVerify(_ context.Context, _, _, _, _ string) (*service.Session, error) {
+	return nil, errors.New("fakeAccountService: RegisterVerify 未实现")
+}
+
+func (f *fakeAccountService) SendAccountOTP(_ context.Context, _, _, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeAccountService) ResetPasswordWithOTP(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (f *fakeAccountService) ReserveIdempotency(_ context.Context, _, _, _ string, _ time.Duration) (*store.IdempotencyRecord, error) {
+	return nil, nil
+}
+
+func (f *fakeAccountService) CompleteIdempotency(_ context.Context, _, _ string, _ int, _ []byte) error {
+	return nil
+}
+
+func (f *fakeAccountService) ReleaseIdempotency(_ context.Context, _, _ string) error {
+	return nil
 }
 
 // forgotCallCount 返回 Forgot 被调用了几次（"未验证邮箱不发信"这类判据用它）。

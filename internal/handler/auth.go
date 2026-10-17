@@ -50,6 +50,24 @@ type AccountService interface {
 	Forgot(ctx context.Context, email, ip, ua string) error
 	ResetPassword(ctx context.Context, token, password string) error
 	VerifyEmail(ctx context.Context, token string) error
+
+	// —— 两段式注册（先用户名口令，再邮箱验证码）。
+	//
+	// RegisterStart 只返回 ticket（一份 15 分钟过期的草稿凭据），**不建号**；
+	// RegisterVerify 才建号并返回会话。三段分开是为了让"收信读码"那段
+	// 不与 bcrypt 挤在同一个请求里。
+	RegisterStart(ctx context.Context, username, displayName, password, ip, ua string) (*service.RegisterStartResult, error)
+	RegisterSendEmailOTP(ctx context.Context, ticket, email, ip, ua string) (string, error)
+	RegisterVerify(ctx context.Context, ticket, code, ip, ua string) (*service.Session, error)
+
+	// —— 邮箱验证码（改密码）。
+	SendAccountOTP(ctx context.Context, email, ip, ua string) (string, error)
+	ResetPasswordWithOTP(ctx context.Context, email, code, password string) error
+
+	// —— 幂等键（写操作的重放保护）。
+	ReserveIdempotency(ctx context.Context, scope, key, requestHash string, ttl time.Duration) (*store.IdempotencyRecord, error)
+	CompleteIdempotency(ctx context.Context, scope, key string, status int, response []byte) error
+	ReleaseIdempotency(ctx context.Context, scope, key string) error
 }
 
 // TicketConsumer 是 /ws 一次性票据的消费能力（ACCOUNTS §5）。
@@ -148,7 +166,20 @@ func registerAccountRoutes(api *gin.RouterGroup, deps AuthDeps, cfg *config.Conf
 		// 因此在这里构造一个实例交给 handler 自己用。
 		forgotEmailLimiter: limiter.NewKeyed(
 			hourlyToPerMinute(cfg.IPC.MailPerEmailPerHour), cfg.IPC.MailPerEmailPerHour),
+		// 验证码的每邮箱闸门与找回**分开**：两者是不同的动作，共用一个桶会让
+		// "刚发过找回邮件"把"发注册验证码"也一起挡掉。
+		otpEmailLimiter: limiter.NewKeyed(
+			hourlyToPerMinute(cfg.IPC.MailPerEmailPerHour), cfg.IPC.MailPerEmailPerHour),
 	}
+
+	// 验证码链路的两个闸门（与登录/注册分开计数）。
+	//
+	// 为什么 send 与 verify 各一条：
+	//   send   花邮件配额（对外有成本），且是"给别人发骚扰信"的入口；
+	//   verify 是**可爆破**的入口（6 位数字），必须比 send 更严。
+	// 共用一条会让"多发几次码"顺便耗掉"能试几次码"的预算，攻击者反而更省事。
+	otpSendLimiter := newKeyedLimiter(cfg.IPC.RegisterPerMinute, cfg.IPC.RegisterBurst, "验证码发送")
+	otpVerifyLimiter := newKeyedLimiter(cfg.IPC.LoginPerMinute, cfg.IPC.LoginBurst, "验证码校验")
 
 	api.POST("/auth/register", registerLimiter, h.register)
 	api.POST("/auth/login", loginLimiter, h.login)
@@ -158,6 +189,14 @@ func registerAccountRoutes(api *gin.RouterGroup, deps AuthDeps, cfg *config.Conf
 	api.GET("/auth/me", RequireAuth(deps.Service), h.me)
 	api.POST("/auth/ws-ticket", RequireAuth(deps.Service), h.wsTicket)
 
+	// —— 两段式注册（新形态）。
+	//
+	// 三条各自一条闸门：start 跑 bcrypt（贵），email 发信（花配额），verify 校验码
+	//（可被爆破）。共用一条桶会让"多发几次验证码"把"能不能开始注册"也一起耗掉。
+	api.POST("/auth/register/start", registerLimiter, h.registerStart)
+	api.POST("/auth/register/email", otpSendLimiter, h.registerEmail)
+	api.POST("/auth/register/verify", otpVerifyLimiter, h.registerVerify)
+
 	// 邮件链路：全部免登录（它们要解决的正是"进不去账号"这件事）。
 	api.POST("/auth/forgot", forgotIPLimiter, h.forgot)
 	api.POST("/auth/reset", tokenIPLimiter, h.resetPassword)
@@ -165,6 +204,14 @@ func registerAccountRoutes(api *gin.RouterGroup, deps AuthDeps, cfg *config.Conf
 	//（client/src/api/auth.ts 的 verifyEmail），邮件里的验证链接会把用户带到
 	// `/verify#token=…` 页，那个页再 POST 到这里。改名就等于让每一封验证邮件失效。
 	api.POST("/auth/verify-email", tokenIPLimiter, h.verifyEmail)
+
+	// —— 改密码走邮箱验证码（与上面 reset 并存的第二条路径）。
+	//
+	// 为什么不替换掉 reset：reset 是"点邮件里的链接"，OTP 是"输 6 位数字"。
+	// 前者对老账号（邮箱已验证但用户习惯点链接）仍然可用，后者是新的主路径。
+	// 两条并存不增加攻击面：它们都要求证明邮箱归属，且各有自己的闸门。
+	api.POST("/auth/password/otp", otpSendLimiter, h.passwordOTP)
+	api.POST("/auth/password/otp/reset", otpVerifyLimiter, h.passwordOTPReset)
 }
 
 // registerAuthUnavailable 注册一组"账号能力暂时不可用"的处理器（全部 503）。
@@ -195,6 +242,8 @@ type authHandler struct {
 	// 它为什么不是中间件：键来自请求体，而 gin 的中间件跑在处理器之前、
 	// 读不到（也不该去读）业务字段。nil = 该闸门关闭（配置为 0 时不会发生 —— config 层不允许 0）。
 	forgotEmailLimiter *limiter.Keyed
+	// otpEmailLimiter 是**验证码**的每邮箱令牌桶（与 forgotEmailLimiter 分开计数）。
+	otpEmailLimiter *limiter.Keyed
 }
 
 // —— 请求体。

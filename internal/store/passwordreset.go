@@ -26,15 +26,29 @@ import (
 // 校验与归一化与 CreateSession 同风格：TokenHash 必须是 64 位 sha256 十六进制
 // （拒绝把**原文**误存进来 —— 那是一处真实的凭据泄漏），ExpiresAt 必须给出。
 func (s *Store) InsertPasswordReset(ctx context.Context, t *PasswordReset) error {
-	if t == nil {
-		return errors.New("store: InsertPasswordReset 收到 nil")
+	if err := normalizePasswordReset(t); err != nil {
+		return err
 	}
-	if t.UserID <= 0 {
-		return errors.New("store: password_resets 缺少 user_id")
+	if err := s.db.WithContext(ctx).Create(t).Error; err != nil {
+		return fmt.Errorf("store: 写入一次性令牌失败: %w", err)
+	}
+	return nil
+}
+
+// normalizePasswordReset 校验并归一化一行令牌（InsertPasswordReset 与
+// InsertEmailOTP 共用）。
+//
+// 抽出来的理由：OTP 与链接令牌的字段约束**完全相同**（哈希形状、expires_at 必填、
+// 邮箱归一、控制字符剥离），任何一处漂移都会让"某一种令牌忘了校验"成为漏洞。
+// 唯一允许不同的是 user_id：OTP 在注册第二段之前账号还没建，那种情况下它是 0
+// （DDL 已把该列改为可空，见迁移 0008）。
+func normalizePasswordReset(t *PasswordReset) error {
+	if t == nil {
+		return errors.New("store: 收到 nil 令牌")
 	}
 	if !isValidTokenPurpose(t.Purpose) {
-		return fmt.Errorf("store: 非法的 purpose %q（允许 %s / %s）",
-			t.Purpose, PurposeEmailVerify, PurposePasswordReset)
+		return fmt.Errorf("store: 非法的 purpose %q（允许 %s / %s / %s）",
+			t.Purpose, PurposeEmailVerify, PurposePasswordReset, PurposeEmailOTP)
 	}
 	hash, err := canonicalTokenHash(t.TokenHash)
 	if err != nil {
@@ -64,10 +78,6 @@ func (s *Store) InsertPasswordReset(ctx context.Context, t *PasswordReset) error
 	if t.IP != nil {
 		v := trimControl(*t.IP)
 		t.IP = &v
-	}
-
-	if err := s.db.WithContext(ctx).Create(t).Error; err != nil {
-		return fmt.Errorf("store: 写入一次性令牌失败: %w", err)
 	}
 	return nil
 }
@@ -213,5 +223,5 @@ RETURNING user_id, email`
 
 // isValidTokenPurpose 与 DDL 的 CHECK 约束对应（应用层先给可读错误）。
 func isValidTokenPurpose(p string) bool {
-	return p == PurposeEmailVerify || p == PurposePasswordReset
+	return p == PurposeEmailVerify || p == PurposePasswordReset || p == PurposeEmailOTP
 }

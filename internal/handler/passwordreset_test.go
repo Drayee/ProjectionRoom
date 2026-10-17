@@ -119,6 +119,7 @@ func newResetEnv(t *testing.T, withMail bool, mutate func(*config.Config)) *rese
 		RefreshTTL:     time.Hour,
 		ResetTTL:       30 * time.Minute,
 		EmailVerifyTTL: 24 * time.Hour,
+		OTPTTL:         5 * time.Minute,
 		PublicBaseURL:  "https://pr.example.com",
 		Mail:           sink,
 	})
@@ -384,7 +385,7 @@ func TestForgotDoesNotWaitForDelivery(t *testing.T) {
 
 	svc, err := service.NewAccountService(st, signer, auth.NewTicketStore(time.Minute), service.AccountOptions{
 		BcryptCost: auth.MinBcryptCost, RefreshTTL: time.Hour,
-		ResetTTL: 30 * time.Minute, EmailVerifyTTL: 24 * time.Hour,
+		ResetTTL: 30 * time.Minute, EmailVerifyTTL: 24 * time.Hour, OTPTTL: 5 * time.Minute,
 		PublicBaseURL: "https://pr.example.com", Mail: mailer,
 	})
 	if err != nil {

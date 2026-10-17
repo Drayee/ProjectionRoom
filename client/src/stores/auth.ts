@@ -204,6 +204,20 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /**
+   * 接管一份**已经拿到的会话**（两段式注册的第三段用）。
+   *
+   * 为什么需要这个入口：`api.auth.registerVerify` 直接返回 `AuthSession`，
+   * 而"把会话落到 store"这件事必须只有一处实现（access token 的存放纪律）。
+   * 让调用方自己写 `accessToken.value = …` 会立刻出现第二处写 token 的代码。
+   *
+   * 它**不做任何请求**，只做落地：调用方负责先拿到会话。
+   */
+  function adoptSession(session: AuthSession): void {
+    notice.value = ''
+    applySession(session)
+  }
+
+  /**
    * 登出（判据⑤）。
    *
    * 先通知服务端撤销 refresh 会话，再清本地；**服务端调用失败也照样清本地** ——
@@ -362,6 +376,7 @@ export const useAuthStore = defineStore('auth', () => {
     bootstrap,
     login,
     register,
+    adoptSession,
     logout,
     clearSession,
     authedFetch,

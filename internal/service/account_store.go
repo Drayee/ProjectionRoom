@@ -84,6 +84,60 @@ func (a *AccountStoreAdapter) SetUserRole(ctx context.Context, id int64, role st
 	return a.store.SetUserRole(ctx, id, role)
 }
 
+func (a *AccountStoreAdapter) SetPasswordHash(ctx context.Context, id int64, hash string) error {
+	return a.store.SetPasswordHash(ctx, id, hash)
+}
+
+// —— 邮箱验证码（OTP）——
+
+func (a *AccountStoreAdapter) InsertEmailOTP(ctx context.Context, t *store.PasswordReset) error {
+	return a.store.InsertEmailOTP(ctx, t)
+}
+
+func (a *AccountStoreAdapter) ConsumeEmailOTP(ctx context.Context, userID int64, otpHash string, maxAttempts int) (bool, error) {
+	return a.store.ConsumeEmailOTP(ctx, userID, otpHash, maxAttempts)
+}
+
+func (a *AccountStoreAdapter) CountRecentEmailOTP(ctx context.Context, userID int64, since time.Time) (int64, error) {
+	return a.store.CountRecentEmailOTP(ctx, userID, since)
+}
+
+func (a *AccountStoreAdapter) LastEmailOTPSentAt(ctx context.Context, userID int64) (time.Time, error) {
+	return a.store.LastEmailOTPSentAt(ctx, userID)
+}
+
+// —— 注册草稿 ——
+
+func (a *AccountStoreAdapter) InsertRegisterDraft(ctx context.Context, d *store.RegisterDraft) error {
+	return a.store.InsertRegisterDraft(ctx, d)
+}
+
+func (a *AccountStoreAdapter) DraftByTicket(ctx context.Context, ticketHash string) (*store.RegisterDraft, error) {
+	return a.store.DraftByTicket(ctx, ticketHash)
+}
+
+func (a *AccountStoreAdapter) AttachDraftOTP(ctx context.Context, ticketHash, email, otpHash string, expiresAt time.Time) error {
+	return a.store.AttachDraftOTP(ctx, ticketHash, email, otpHash, expiresAt)
+}
+
+func (a *AccountStoreAdapter) ConsumeDraftOTP(ctx context.Context, ticketHash, otpHash string, maxAttempts int) (*store.RegisterDraft, bool, error) {
+	return a.store.ConsumeDraftOTP(ctx, ticketHash, otpHash, maxAttempts)
+}
+
+// —— 幂等键 ——
+
+func (a *AccountStoreAdapter) ReserveIdempotencyKey(ctx context.Context, scope, key, requestHash string, ttl time.Duration) (*store.IdempotencyRecord, error) {
+	return a.store.ReserveIdempotencyKey(ctx, scope, key, requestHash, ttl)
+}
+
+func (a *AccountStoreAdapter) CompleteIdempotencyKey(ctx context.Context, scope, key string, status int, response []byte) error {
+	return a.store.CompleteIdempotencyKey(ctx, scope, key, status, response)
+}
+
+func (a *AccountStoreAdapter) ReleaseIdempotencyKey(ctx context.Context, scope, key string) error {
+	return a.store.ReleaseIdempotencyKey(ctx, scope, key)
+}
+
 func (a *AccountStoreAdapter) BumpTokenVersion(ctx context.Context, id int64) (int, error) {
 	return a.store.BumpTokenVersion(ctx, id)
 }

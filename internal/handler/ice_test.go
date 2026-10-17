@@ -230,10 +230,7 @@ func TestICEAPIMaxSTUNFromConfig(t *testing.T) {
 		t.Run("max="+strconv.Itoa(max), func(t *testing.T) {
 			t.Setenv("PR_ICE_MAX_STUN", strconv.Itoa(max))
 
-			cfg, err := config.Load()
-			if err != nil {
-				t.Fatalf("加载配置失败: %v", err)
-			}
+			cfg := loadCompleteConfig(t)
 
 			useICERegistry(t, offlineICERegistry)
 			srv := startTestServer(t, cfg)
@@ -265,10 +262,7 @@ func TestICEAPIMaxSTUNFromConfig(t *testing.T) {
 func TestICEAPIStunURLsEnvOverride(t *testing.T) {
 	t.Setenv("PR_STUN_URLS", "stun:override-a.example:3478, stun:override-b.example:3478")
 
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("加载配置失败: %v", err)
-	}
+	cfg := loadCompleteConfig(t)
 
 	// 覆盖成"整轮全失败"：走的是降级路径（下发完整覆盖列表），
 	// 因此这条同时验证了"覆盖生效"与"降级不返回空列表"。
@@ -306,10 +300,7 @@ func TestICEAPIStunURLsEnvOverride(t *testing.T) {
 func TestICETTLOverridesFromEnv(t *testing.T) {
 	t.Setenv("PR_ICE_TTL", "90s")
 
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("加载配置失败: %v", err)
-	}
+	cfg := loadCompleteConfig(t)
 
 	srv := startTestServer(t, cfg)
 	resp, err := http.Get(srv.URL + "/api/ice")

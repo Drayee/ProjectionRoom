@@ -8,6 +8,7 @@ import (
 
 // TestSecurityDefaults 锁定 S-1 / S-3 / S-9 / S-11 / F-9 的默认值与依据。
 func TestSecurityDefaults(t *testing.T) {
+	skipCompleteness(t)
 	cfg := Default()
 
 	// S-1 解码前预算。
@@ -81,6 +82,7 @@ func TestSecurityDefaults(t *testing.T) {
 
 // TestSignalBudgetEnvOverride 锁定 S-1 的预算都能被环境变量覆盖。
 func TestSignalBudgetEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envSignalMaxRepeatedElements, "5000")
 	t.Setenv(envSignalMaxMembers, "64")
 	t.Setenv(envSignalMaxSegments, "1000")
@@ -112,6 +114,7 @@ func TestSignalBudgetEnvOverride(t *testing.T) {
 // TestSignalBudgetEnvRejectsInvalid 锁定非法预算必须报错：
 // 预算写错等于把审计实证的 OOM 路径重新打开，绝不能静默回退。
 func TestSignalBudgetEnvRejectsInvalid(t *testing.T) {
+	skipCompleteness(t)
 	cases := []struct{ name, value string }{
 		{envSignalMaxRepeatedElements, "0"},
 		{envSignalMaxRepeatedElements, "-1"},
@@ -137,6 +140,7 @@ func TestSignalBudgetEnvRejectsInvalid(t *testing.T) {
 
 // TestRoomLifecycleEnvOverride 锁定 S-3 的房间上限与三个 TTL、清扫周期。
 func TestRoomLifecycleEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envMaxRooms, "42")
 	t.Setenv(envUnclaimedRoomTTL, "90s")
 	t.Setenv(envEmptyRoomTTL, "45s")
@@ -178,6 +182,7 @@ func TestRoomLifecycleEnvOverride(t *testing.T) {
 
 // TestRoomLifecycleEnvRejectsInvalid 锁定非法值必须报错。
 func TestRoomLifecycleEnvRejectsInvalid(t *testing.T) {
+	skipCompleteness(t)
 	cases := []struct{ name, value string }{
 		{envMaxRooms, "0"},
 		{envMaxRooms, "-3"},
@@ -216,6 +221,7 @@ func TestRoomLifecycleEnvRejectsInvalid(t *testing.T) {
 
 // TestSecurityEnvOverride 锁定 F-9 的开关与 CSP 覆盖。
 func TestSecurityEnvOverride(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envSecurityHeaders, "0")
 	cfg, err := Load()
 	if err != nil {
@@ -249,6 +255,7 @@ func TestSecurityEnvOverride(t *testing.T) {
 
 // TestSignalRateZeroDisables 锁定"0 表示关闭速率闸"（排障用）。
 func TestSignalRateZeroDisables(t *testing.T) {
+	skipCompleteness(t)
 	t.Setenv(envSignalMaxRate, "0")
 	cfg, err := Load()
 	if err != nil {
@@ -265,6 +272,7 @@ func TestSignalRateZeroDisables(t *testing.T) {
 // **满员房间的成员表被自己的预算拒掉**（房间越大越容易突然断线，日志里只有
 // 一条"帧预算超限"）。一个安静的配置组合错误比一个崩溃更难排查。
 func TestMaxMembersMustFitFrameBudget(t *testing.T) {
+	skipCompleteness(t)
 	t.Run("默认组合合法", func(t *testing.T) {
 		if _, err := Load(); err != nil {
 			t.Fatalf("默认 16 <= 256 应当合法: %v", err)
