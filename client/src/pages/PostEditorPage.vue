@@ -6,7 +6,7 @@
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
-import AppHeader from '../components/ui/AppHeader.vue'
+import BrandIcon from '../components/ui/BrandIcon.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
 
@@ -97,7 +97,6 @@ function discard() {
 
 <template>
   <div class="page">
-    <AppHeader variant="page" />
     <main class="body">
       <h1 class="title">发帖</h1>
       <form @submit.prevent="submit">

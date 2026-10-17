@@ -1,10 +1,15 @@
 <script setup lang="ts">
 /**
- * 顶栏。四种形态：
- *   - `shell`   登录后外壳（品牌名 + 分区导航 + 头像）
- *   - `page`    内容页（品牌名 + 返回 + 右侧少量入口）
- *   - `inline`  嵌在卡片里的极简条
- *   - `bare`    只有品牌名（登录/注册壳）
+ * 全局常驻顶栏（由 App.vue 挂载在路由出口之外，不属于任何页面）。
+ *
+ * 三种形态：
+ *   - `app`    已登录应用态（品牌名 + 分区图标导航 + 头像/退出）
+ *   - `page`   内容页（品牌名 + 右侧公开入口 / 登录注册）
+ *   - `bare`   只有品牌名（邮件链接落点页：/reset /verify）
+ *
+ * 分区导航**只看登录态**，不看形态：旧实现把它绑在 shell 形态上，
+ * 于是登录后从首页（shell）点到 /posts（page），导航整排消失。
+ * 顶栏常驻 + 导航只受登录态驱动，换页入口才不会忽隐忽现。
  *
  * 归 ui/：读 stores/auth、用 RouterLink 与 useRouter 导航，不发请求（符合票 #11 的 ui/ 准入判据）。
  *
@@ -15,7 +20,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from './BrandIcon.vue'
 import { useAuthStore } from '../../stores/auth'
 
-const props = withDefaults(defineProps<{ variant?: 'shell' | 'page' | 'inline' | 'bare' }>(), {
+const props = withDefaults(defineProps<{ variant?: 'app' | 'page' | 'bare' }>(), {
   variant: 'page',
 })
 
@@ -68,8 +73,10 @@ const NAV = [
       <span class="brand-text">月喵</span>
     </RouterLink>
 
-    <!-- 外壳形态：icon-first 分区导航 -->
-    <nav v-if="props.variant === 'shell'" class="nav" aria-label="分区导航">
+    <!-- 分区导航：只看登录态，与路由变体无关。
+         旧实现按 variant==='shell' 才显示，于是登录后从首页（shell）点到
+         /posts（page）导航整排消失。顶栏常驻后，导航必须只受登录态驱动。 -->
+    <nav v-if="auth.isLoggedIn && props.variant !== 'bare'" class="nav" aria-label="分区导航">
       <RouterLink
         v-for="item in NAV"
         :key="item.name"
@@ -83,24 +90,28 @@ const NAV = [
     </nav>
 
     <div class="right">
-      <RouterLink
-        v-if="props.variant === 'page' || props.variant === 'inline'"
-        class="nav-btn"
-        :to="{ name: 'public-rooms' }"
-        aria-label="公开房间"
-        v-tip="'公开房间'"
-      >
-        <BrandIcon name="video" decorative :size="17" />
-      </RouterLink>
-      <RouterLink
-        v-if="props.variant === 'page' || props.variant === 'inline'"
-        class="nav-btn"
-        :to="{ name: 'help' }"
-        aria-label="帮助"
-        v-tip="'帮助'"
-      >
-        <BrandIcon name="help" decorative :size="17" />
-      </RouterLink>
+      <!-- 未登录：右侧给两个公开入口（公开房间 / 帮助）。
+           已登录：分区导航里已有这两项，右侧只放账号相关，避免重复。 -->
+      <template v-if="!auth.isLoggedIn">
+        <RouterLink
+          v-if="props.variant !== 'bare'"
+          class="nav-btn"
+          :to="{ name: 'public-rooms' }"
+          aria-label="公开房间"
+          v-tip="'公开房间'"
+        >
+          <BrandIcon name="video" decorative :size="17" />
+        </RouterLink>
+        <RouterLink
+          v-if="props.variant !== 'bare'"
+          class="nav-btn"
+          :to="{ name: 'help' }"
+          aria-label="帮助"
+          v-tip="'帮助'"
+        >
+          <BrandIcon name="help" decorative :size="17" />
+        </RouterLink>
+      </template>
 
       <template v-if="props.variant !== 'bare'">
         <template v-if="auth.isLoggedIn">
@@ -287,15 +298,6 @@ const NAV = [
 
 /* bare 形态：只有品牌名，居中偏左 */
 .hdr--bare .right {
-  display: none;
-}
-
-.hdr--inline {
-  border-bottom: 0;
-  padding: 8px 0;
-}
-
-.hdr--inline::after {
   display: none;
 }
 </style>

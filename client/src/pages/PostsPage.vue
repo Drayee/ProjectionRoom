@@ -5,7 +5,6 @@
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import AppHeader from '../components/ui/AppHeader.vue'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import * as postsApi from '../api/posts'
 import type { Post } from '../types/posts'
@@ -84,7 +83,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page">
-    <AppHeader variant="page" />
     <main class="body">
       <div class="head">
         <h1 class="title">帖子</h1>

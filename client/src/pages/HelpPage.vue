@@ -4,7 +4,7 @@
  * #room-code #playback #diagnostics #privacy #faq；scrollBehavior 消费 to.hash。
  * 内容按 B 视觉重写（不平移旧文案）。
  */
-import AppHeader from '../components/ui/AppHeader.vue'
+import BrandIcon from '../components/ui/BrandIcon.vue'
 
 interface Section {
   id: string
@@ -74,7 +74,6 @@ const SECTIONS: Section[] = [
 
 <template>
   <div class="page">
-    <AppHeader variant="page" />
     <main class="body">
       <h1 class="title">帮助</h1>
       <nav class="toc" aria-label="目录">

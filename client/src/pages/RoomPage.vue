@@ -15,7 +15,6 @@
  */
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import AppHeader from '../components/ui/AppHeader.vue'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import MemberList from '../components/ui/MemberList.vue'
 import TopologyBadge from '../components/ui/TopologyBadge.vue'
@@ -116,8 +115,8 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="right">
-        <AppHeader variant="inline" />
-        <!-- 离开房间：纯图标（票 #12 裁决），aria-label + v-tip 承担可访问名 -->
+        <!-- 离开房间：纯图标（票 #12 裁决），aria-label + v-tip 承担可访问名。
+             顶栏与分区导航由全局外壳（App.vue）常驻，本页不再内嵌 AppHeader。 -->
         <button class="leave" aria-label="离开房间" v-tip="'离开房间'" @click="leave">
           <BrandIcon name="logout" decorative :size="17" />
         </button>

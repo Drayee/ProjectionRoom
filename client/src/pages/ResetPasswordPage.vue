@@ -6,7 +6,6 @@
  */
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import AppHeader from '../components/ui/AppHeader.vue'
 import { reset, toAuthError } from '../api/auth'
 import { useAuthStore } from '../stores/auth'
 import { takeFragmentToken } from '../utils/fragmentToken'
@@ -44,7 +43,6 @@ async function submit() {
 
 <template>
   <div class="page">
-    <AppHeader variant="bare" />
     <main class="body">
       <p v-if="!token" class="dim">链接不完整：没有取到重置令牌。请重新走一次「忘记密码」。</p>
       <form v-else-if="!done" class="panel" @submit.prevent="submit">

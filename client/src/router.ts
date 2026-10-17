@@ -27,18 +27,23 @@ import PostEditorPage from './pages/PostEditorPage.vue'
  * 做/占位的分配来自票 #16：
  *   - 真做：/ /room /login /register /reset /verify /help /rooms /user /posts×3
  *   - 占位（ComingSoonPage，props 驱动）：/friends /official /forum /messages /about /admin
+ *
+ * **`meta.header` 决定全局顶栏形态**（App.vue 常驻外壳，顶栏不属于任何页面）：
+ *   app=分区图标导航 / page=内容页 / bare=只有品牌名 / none=无顶栏。
+ *   落地页与登录注册壳取 none：它们全屏自足，顶栏会抢首屏焦点。
  */
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', name: 'home', component: HomePage },
-    { path: '/room/:roomId', name: 'room', component: RoomPage, props: true },
-    { path: '/login', name: 'login', component: LoginPage },
-    { path: '/register', name: 'register', component: RegisterPage },
+    // 落地页：全屏 hero，刻意无顶栏（首屏焦点是月喵标题 + 开始按钮）
+    { path: '/', name: 'home', component: HomePage, meta: { header: 'none' } },
+    { path: '/room/:roomId', name: 'room', component: RoomPage, props: true, meta: { header: 'app' } },
+    { path: '/login', name: 'login', component: LoginPage, meta: { header: 'none' } },
+    { path: '/register', name: 'register', component: RegisterPage, meta: { header: 'none' } },
     // 邮件链接落点：token 在 fragment（不进服务端日志），页面挂载时自己读
     // 并立刻抹掉 hash（utils/fragmentToken.ts）。不做成路由参数：那会让 token 进 URL 路径。
-    { path: '/reset', name: 'reset', component: ResetPasswordPage },
-    { path: '/verify', name: 'verify', component: VerifyEmailPage },
+    { path: '/reset', name: 'reset', component: ResetPasswordPage, meta: { header: 'bare' } },
+    { path: '/verify', name: 'verify', component: VerifyEmailPage, meta: { header: 'bare' } },
     // 帮助页：7 个锚点（#why-login #source #room-code #playback #diagnostics #privacy #faq）
     // 被多处深链引用，scrollBehavior 消费 to.hash —— 锚点 id 必须保留（票 #16）。
     { path: '/help', name: 'help', component: HelpPage },
@@ -75,7 +80,7 @@ export const router = createRouter({
       },
     },
     // 用户详情页：本轮只支持本人（公开档案接口尚未实现）
-    { path: '/user/:id', name: 'user', component: UserPage, props: true },
+    { path: '/user/:id', name: 'user', component: UserPage, props: true, meta: { header: 'page' } },
 
     // ---------- 分区占位页（建设中；props 驱动，零请求） ----------
     {
@@ -126,9 +131,9 @@ export const router = createRouter({
         depends: ['番剧目录（anime 条目）的数据模型', '帖子/主题表（与 /posts 共用）'],
       },
     },
-    { path: '/posts', name: 'posts', component: PostsPage },
-    { path: '/posts/new', name: 'post-editor', component: PostEditorPage },
-    { path: '/posts/:id', name: 'post-detail', component: PostDetailPage, props: true },
+    { path: '/posts', name: 'posts', component: PostsPage, meta: { header: 'page' } },
+    { path: '/posts/new', name: 'post-editor', component: PostEditorPage, meta: { header: 'page' } },
+    { path: '/posts/:id', name: 'post-detail', component: PostDetailPage, props: true, meta: { header: 'page' } },
     {
       path: '/messages',
       name: 'messages',

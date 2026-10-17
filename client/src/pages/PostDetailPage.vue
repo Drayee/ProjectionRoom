@@ -5,7 +5,7 @@
  */
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import AppHeader from '../components/ui/AppHeader.vue'
+import BrandIcon from '../components/ui/BrandIcon.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
 import type { Comment, Post } from '../types/posts'
@@ -48,7 +48,6 @@ onMounted(load)
 
 <template>
   <div class="page">
-    <AppHeader variant="page" />
     <main class="body">
       <p v-if="failed" class="alert">{{ failed }}</p>
       <template v-else-if="post">

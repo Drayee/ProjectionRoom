@@ -5,7 +5,6 @@
  */
 import { onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
-import AppHeader from '../components/ui/AppHeader.vue'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import { PUBLIC_ROOMS_EMPTY_TEXT } from '../api/publicRooms'
 import { usePublicRoomsStore } from '../stores/publicRooms'
@@ -19,7 +18,6 @@ onMounted(() => {
 
 <template>
   <div class="page">
-    <AppHeader variant="page" />
     <main class="body">
       <h1 class="title">公开的房间</h1>
       <p v-if="store.loading" class="dim">加载中…</p>

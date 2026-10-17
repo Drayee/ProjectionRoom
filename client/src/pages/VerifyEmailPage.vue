@@ -5,7 +5,6 @@
  * 读后立刻抹 hash、免登录可达。
  */
 import { onMounted, ref } from 'vue'
-import AppHeader from '../components/ui/AppHeader.vue'
 import { toAuthError, verifyEmail } from '../api/auth'
 import { takeFragmentToken } from '../utils/fragmentToken'
 
@@ -34,7 +33,6 @@ onMounted(async () => {
 
 <template>
   <div class="page">
-    <AppHeader variant="bare" />
     <main class="body">
       <p v-if="state === 'busy'" class="dim">正在验证…</p>
       <p v-else :class="state === 'ok' ? 'ok' : 'alert'" role="status">{{ message }}</p>

@@ -2,8 +2,10 @@
 /**
  * 建设中占位页（props 驱动，零请求、零副作用）。
  * 一份渲染逻辑，多份说明（票 #16）；内容写在 router.ts 的路由 props 里。
+ *
+ * 顶栏由全局外壳（App.vue）按路由 meta.header='page' 常驻渲染——
+ * 本页不再自己渲染，否则换页又会把顶栏销毁重建。
  */
-import AppHeader from '../components/ui/AppHeader.vue'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 
 defineProps<{
@@ -17,7 +19,6 @@ defineProps<{
 
 <template>
   <div class="page">
-    <AppHeader variant="page" />
     <main class="body">
       <h1 class="title">{{ title }}</h1>
       <p class="summary">{{ summary }}</p>
@@ -40,7 +41,7 @@ defineProps<{
 
 <style scoped>
 .page {
-  min-height: 100vh;
+  flex: 1;
   display: flex;
   flex-direction: column;
 }

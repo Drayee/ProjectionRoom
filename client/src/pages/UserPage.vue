@@ -5,7 +5,7 @@
  */
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
-import AppHeader from '../components/ui/AppHeader.vue'
+import BrandIcon from '../components/ui/BrandIcon.vue'
 import { useAuthStore } from '../stores/auth'
 
 const props = defineProps<{ id: string }>()
@@ -28,7 +28,6 @@ async function doLogout() {
 
 <template>
   <div class="page">
-    <AppHeader variant="page" />
     <main class="body">
       <h1 class="title">我的账号</h1>
       <p v-if="!auth.profile" class="dim">未登录。看片不需要账号，这里只服务已登录用户。</p>
