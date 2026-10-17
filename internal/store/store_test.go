@@ -196,12 +196,54 @@ func requireTestDB(t *testing.T) *Store {
 //
 // 保留 schema_migrations：它是迁移账本，清掉会让"已应用"这件事消失，
 // 迁移用例的断言也就失去意义。
+//
+// ⚠ 表清单是**从 pg_tables 动态取的**，不是手写的。旧版本写死了一张表清单，
+// 每加一张新表都要记得回来补 —— 而忘了的症状非常阴险：**不报错**，只是上一个
+// 用例的行还留在库里，下一个用例数到脏数据（0010_posts 落地时就是这样：
+// 列表用例的第二页多出了上一轮留下的帖子）。现在除了 schema_migrations，
+// public 下的所有表每次都被清，新表**不可能**再漏。
 func truncateAll(t *testing.T, s *Store) {
 	t.Helper()
-	const stmt = `TRUNCATE TABLE admin_audit, rooms_meta, password_resets, sessions, users RESTART IDENTITY CASCADE`
+
+	var tables []string
+	if err := s.DB().Raw(`
+		SELECT tablename FROM pg_tables
+		 WHERE schemaname = 'public' AND tablename <> 'schema_migrations'
+		 ORDER BY tablename`).Scan(&tables).Error; err != nil {
+		t.Fatalf("列出业务表失败：%v", err)
+	}
+	if len(tables) == 0 {
+		return // 空库（迁移用例的起点）：没有可清的。
+	}
+
+	// 表名来自 pg_tables（不是用户输入），拼进语句前再过滤一次非法字符做纵深防御。
+	quoted := make([]string, 0, len(tables))
+	for _, name := range tables {
+		if !isSafeTableName(name) {
+			t.Fatalf("跳过非常规表名（不该出现在这个库里）：%q", name)
+		}
+		quoted = append(quoted, `"`+name+`"`)
+	}
+	stmt := `TRUNCATE TABLE ` + strings.Join(quoted, ", ") + ` RESTART IDENTITY CASCADE`
 	if err := s.DB().Exec(stmt).Error; err != nil {
 		t.Fatalf("清空测试库失败：%v", err)
 	}
+}
+
+// isSafeTableName 只放行常规标识符（字母/下划线开头，后接字母数字下划线）。
+func isSafeTableName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // dropPhaseOneTables 删掉本期建的全部表（含账本），仅供迁移用例回到"空库"。

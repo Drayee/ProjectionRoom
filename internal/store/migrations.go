@@ -331,4 +331,72 @@ END $$`,
 		`CREATE INDEX IF NOT EXISTS anime_title_lower_idx ON anime (lower(title))`,
 		`CREATE INDEX IF NOT EXISTS anime_created_at_idx ON anime (created_at DESC)`,
 	}},
+
+	// 0010：帖子（posts / post_comments / post_likes）。wayfinder #27。
+	//
+	// # 为什么 like_count / comment_count 是**反范式列**而不是查询时聚合
+	//
+	// 列表页一次出 20 行，每行都要显示点赞数与评论数。若查询时聚合，
+	// 要么每行一个子查询（20 次额外扫描），要么 LEFT JOIN + GROUP BY
+	//（把 limit 20 的简单索引扫描变成"先扫全量再聚合"）。两者在列表变长后
+	// 都会明显变慢，而这两个数在页面上只是"参考量级"。
+	//
+	// 反范式的代价是**必须原子维护**：点赞/评论的插入与计数的增减放在**同一个事务**里
+	//（见 store/posts.go 的 TogglePostLike / AddPostComment / DeletePostComment）。
+	// 分开写会出现"纪录有了但计数没加"的永久漂移，而且没有对账路径能发现它。
+	//
+	// # 三张表的约束
+	//
+	//   - `post_likes` 主键是 (post_id, user_id)：一个用户对一篇帖子只能有一条点赞，
+	//     "重复点赞"在数据库层面就不可能 —— toggle 的实现因此可以靠
+	//     `INSERT … ON CONFLICT DO NOTHING` 的 RowsAffected 判断方向，不必先查。
+	//   - `images` 用 jsonb 存 URL 数组（前端消费的形状就是 string[]）。
+	//     **只存外链**：服务端不做图片上传（本票 out）。
+	//   - `content` 用 text：正文上限由应用层管（清洗口径 §7.3），不靠 varchar
+	//     截断 —— 截断会静默改用户内容，比拒绝更糟。
+	//   - `anime_id` 本期**不填**，只预留：番剧板块票（#38）会用到它。
+	//     现在加一列是加法，将来不必再来一次迁移。
+	//   - 所有外键 ON DELETE CASCADE：删号删帖、删帖删评论/点赞。
+	//     账号注销路径（#29 之后）因此不会留下孤儿子行。
+	{version: "0010_posts", statements: []string{
+		`CREATE TABLE IF NOT EXISTS posts (
+	id            bigserial PRIMARY KEY,
+	author_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	title         varchar(60) NOT NULL,
+	content       text NOT NULL,
+	images        jsonb NOT NULL DEFAULT '[]'::jsonb,
+	like_count    integer NOT NULL DEFAULT 0 CHECK (like_count >= 0),
+	comment_count integer NOT NULL DEFAULT 0 CHECK (comment_count >= 0),
+	anime_id      bigint NULL,
+	created_at    timestamptz NOT NULL DEFAULT now(),
+	updated_at    timestamptz NOT NULL DEFAULT now()
+)`,
+		// 列表默认按最新：这个索引让 "ORDER BY created_at DESC LIMIT n" 直接走索引。
+		`CREATE INDEX IF NOT EXISTS posts_created_at_idx ON posts (created_at DESC)`,
+		// 「热门」的排序键。表达式索引（like_count + comment_count）让排序不必回表计算；
+		// 第二键 created_at 保证同分时顺序稳定（否则翻页会出现重复/漏行）。
+		`CREATE INDEX IF NOT EXISTS posts_hot_idx ON posts ((like_count + comment_count) DESC, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS posts_author_idx ON posts (author_id)`,
+
+		`CREATE TABLE IF NOT EXISTS post_comments (
+	id         bigserial PRIMARY KEY,
+	post_id    bigint NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+	author_id  bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	content    text NOT NULL,
+	created_at timestamptz NOT NULL DEFAULT now()
+)`,
+		// 评论按 (post_id, created_at) 取：一篇文章的评论列表是唯一的热路径。
+		// 升序（老→新）与聊天界面一致；分页靠 (post_id, created_at, id) 稳定排序。
+		`CREATE INDEX IF NOT EXISTS post_comments_post_idx ON post_comments (post_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS post_comments_author_idx ON post_comments (author_id)`,
+
+		`CREATE TABLE IF NOT EXISTS post_likes (
+	post_id    bigint NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+	user_id    bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at timestamptz NOT NULL DEFAULT now(),
+	PRIMARY KEY (post_id, user_id)
+)`,
+		// 反查"我赞过哪些"（将来"我的点赞"要用），也服务 ON DELETE CASCADE 的清理。
+		`CREATE INDEX IF NOT EXISTS post_likes_user_idx ON post_likes (user_id)`,
+	}},
 }
