@@ -159,6 +159,10 @@ export const useAdminStore = defineStore('admin', () => {
       if (!classify(err)) rooms.value.error = toHttpError(err).message
     } finally {
       rooms.value.loading = false
+      // `booting` 初值是 true（"整页还在等第一个响应"）。只有 bootstrap() 会清它，
+      // 而直接进房间视图的页面（/admin/rooms）调的是 loadRooms() 而不是 bootstrap()
+      // —— 于是页面永远停在「加载中…」。谁先拿到响应，谁负责结束这个状态。
+      booting.value = false
     }
   }
 
