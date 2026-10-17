@@ -167,10 +167,11 @@ function statusText(status: string): string {
     <main class="body">
       <header class="head">
         <h1 class="title">管理端 · 用户</h1>
-        <RouterLink class="back" :to="{ name: 'home' }">
-          <BrandIcon name="home" decorative :size="14" />
-          返回首页
-        </RouterLink>
+        <nav class="switcher" aria-label="管理端区块">
+          <RouterLink class="tab on" :to="{ name: 'admin' }">用户</RouterLink>
+          <RouterLink class="tab" :to="{ name: 'admin-rooms' }">房间</RouterLink>
+          <RouterLink class="tab" :to="{ name: 'admin-ops' }">运维</RouterLink>
+        </nav>
       </header>
 
       <!-- 整页结论：服务端说了算（I3）。401 与 403 分开给出口：
@@ -383,22 +384,31 @@ function statusText(status: string): string {
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 .title {
   margin: 0;
   font-family: var(--font-glitch);
   font-size: clamp(28px, 5vw, 42px);
 }
-.back {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 13px;
-  color: var(--dim);
+/* 三张管理端视图共用同一套分区导航（用户 / 房间 / 运维） */
+.switcher {
+  display: flex;
+  gap: 2px;
 }
-.back:hover {
+.tab {
+  padding: 6px 16px;
+  color: var(--dim);
+  border-bottom: 2px solid transparent;
+  font-size: 13px;
+}
+.tab:hover {
   color: var(--text);
   text-decoration: none;
+}
+.tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
 }
 
 /* 屏幕阅读器专用标签：视觉上不占位，读屏仍可读 */

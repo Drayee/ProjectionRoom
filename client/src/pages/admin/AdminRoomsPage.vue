@@ -173,6 +173,7 @@ function stateClass(r: AdminRoom): string {
         <nav class="switcher" aria-label="管理端区块">
           <RouterLink class="tab" :to="{ name: 'admin' }">用户</RouterLink>
           <RouterLink class="tab on" :to="{ name: 'admin-rooms' }">房间</RouterLink>
+          <RouterLink class="tab" :to="{ name: 'admin-ops' }">运维</RouterLink>
         </nav>
       </header>
 

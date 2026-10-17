@@ -175,6 +175,7 @@ export const useAdminStore = defineStore('admin', () => {
       if (!classify(err)) metrics.value.error = toHttpError(err).message
     } finally {
       metrics.value.loading = false
+      booting.value = false
     }
   }
 
@@ -194,6 +195,7 @@ export const useAdminStore = defineStore('admin', () => {
       if (!classify(err)) logs.value.error = toHttpError(err).message
     } finally {
       logs.value.loading = false
+      booting.value = false
     }
   }
 
@@ -211,6 +213,7 @@ export const useAdminStore = defineStore('admin', () => {
       if (!classify(err)) audit.value.error = toHttpError(err).message
     } finally {
       audit.value.loading = false
+      booting.value = false
     }
   }
 

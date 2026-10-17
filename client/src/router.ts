@@ -14,6 +14,7 @@ import PostDetailPage from './pages/PostDetailPage.vue'
 import PostEditorPage from './pages/PostEditorPage.vue'
 import AdminUsersPage from './pages/admin/AdminUsersPage.vue'
 import AdminRoomsPage from './pages/admin/AdminRoomsPage.vue'
+import AdminOpsPage from './pages/admin/AdminOpsPage.vue'
 
 /**
  * 路由表（月夜故障重建 · 票 #18 骨架）。
@@ -51,11 +52,13 @@ export const router = createRouter({
     { path: '/help', name: 'help', component: HelpPage },
     // 公开房列表：免登录，与落地页「直接进入放映室」同一条发现路径
     { path: '/rooms', name: 'public-rooms', component: PublicRoomsPage },
-    // 管理端：用户视图（票 #23）与房间视图（票 #24）已落地。运维视图（#25）仍是后续票。
-    // `/admin/rooms` 的筛选与分页放在 query（`?search=&public=&offset=`）里，
-    // 因此这一屏可分享、刷新不丢——这是 #24 的验收判据之一。
+    // 管理端三张视图（票 #23 / #24 / #25）。`/admin/rooms` 的筛选与分页放在
+    // query（`?search=&public=&offset=`）里，因此那一屏可分享、刷新不丢。
+    // `/admin/ops` 的日志/审计分页**刻意不轮询**（轮询只刷指标），否则边看边刷新
+    // 会让 offset 分页错位、重复或漏行。
     { path: '/admin', name: 'admin', component: AdminUsersPage, meta: { header: 'page' } },
     { path: '/admin/rooms', name: 'admin-rooms', component: AdminRoomsPage, meta: { header: 'page' } },
+    { path: '/admin/ops', name: 'admin-ops', component: AdminOpsPage, meta: { header: 'page' } },
     // 作者介绍：内容形态属独立后续页（旧图 Out of scope），本轮占位
     {
       path: '/about',
