@@ -61,9 +61,36 @@ export class HttpError extends Error {
   }
 }
 
-/** 把任意异常归一成 HttpError，调用方只需要处理一种错误类型。 */
+/**
+ * 把任意异常归一成 HttpError，调用方只需要处理一种错误类型。
+ *
+ * **两种来源必须都认**（这是踩过的坑）：
+ *   1. 本层抛的 `HttpError`；
+ *   2. `auth.authedFetch` 抛的 `AuthApiError` —— 它在"401 且刷新也失败"时抛出，
+ *      带的是**服务端真实状态码**（401）与错误码（`AUTH_EXPIRED`）。
+ *
+ * 只认第 1 种会让"会话失效"被压平成 `status: 0 / offline: true`（网络不可达），
+ * 于是上层所有 `status === 401` 的分诊都成了死代码：管理端会把"该重新登录"
+ * 显示成一条普通错误，还顺手抹掉了重新登录入口。
+ *
+ * 这里**不 import `AuthApiError`** 而是按结构识别（有数值 `status` 与字符串 `code`），
+ * 避免 `http.ts → auth.ts` 的反向依赖：`auth.ts` 是账号层，`http.ts` 是更底层的原语，
+ * 底层依赖上层会把这两层的方向搞反。
+ */
 export function toHttpError(err: unknown): HttpError {
   if (err instanceof HttpError) return err
+  if (err instanceof Error) {
+    const candidate = err as Error & { status?: unknown; code?: unknown; offline?: unknown }
+    if (typeof candidate.status === 'number' && typeof candidate.code === 'string') {
+      return new HttpError({
+        status: candidate.status,
+        code: candidate.code,
+        message: err.message,
+        // 带真实状态码的错误**不是**网络不可达；只有 status === 0 才是。
+        offline: candidate.status === 0,
+      })
+    }
+  }
   const message = err instanceof Error ? err.message : String(err)
   // 走到这里说明异常不是本层产生的（多半是 fetch 自己抛的）：按网络不可达处理。
   return new HttpError({ status: 0, code: 'HTTP_NETWORK', message, offline: true })

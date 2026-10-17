@@ -293,6 +293,10 @@ export const useAdminStore = defineStore('admin', () => {
     return mutate(`user:${user.id}:email`, async () => {
       await api.patchUserEmail(auth.authedFetch, user.id, email)
       await loadUsers(users.value.offset)
+      // 解绑（空串）与绑定是两件不同的事：解绑不会"标记为已验证"（它把 email 与
+      // email_verified_at 一起清空），所以提示必须分开写 —— 否则会显示成
+      // "已把 x 的邮箱改为 （服务端已标记为已验证）"，读起来像成功了又像没改。
+      if (email === '') return `已解绑 ${user.username} 的邮箱`
       // 成功提示里带上新邮箱：列表刷新之后仍要能确认"改的就是这个值"。
       return `已把 ${user.username} 的邮箱改为 ${email}（服务端已标记为已验证）`
     })

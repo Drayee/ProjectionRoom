@@ -12,6 +12,7 @@ import ComingSoonPage from './pages/ComingSoonPage.vue'
 import PostsPage from './pages/PostsPage.vue'
 import PostDetailPage from './pages/PostDetailPage.vue'
 import PostEditorPage from './pages/PostEditorPage.vue'
+import AdminUsersPage from './pages/admin/AdminUsersPage.vue'
 
 /**
  * 路由表（月夜故障重建 · 票 #18 骨架）。
@@ -49,23 +50,9 @@ export const router = createRouter({
     { path: '/help', name: 'help', component: HelpPage },
     // 公开房列表：免登录，与落地页「直接进入放映室」同一条发现路径
     { path: '/rooms', name: 'public-rooms', component: PublicRoomsPage },
-    // 管理端：本轮不重建，走建设中占位（票 #16；不造能进但无功能的空壳）
-    {
-      path: '/admin',
-      name: 'admin',
-      component: ComingSoonPage,
-      props: {
-        title: '管理端',
-        icon: 'settings',
-        summary: '用户/房间管理、指标与审计。本轮前端重写暂不覆盖，建设中。',
-        bullets: [
-          '用户：封禁/解封、角色调整、邮箱绑定。',
-          '房间：强关、下架、指标观测。',
-          '审计与运行日志。',
-        ],
-        depends: ['下一轮前端重建计划（管理端视图）'],
-      },
-    },
+    // 管理端：用户视图已落地（票 #23）。房间 / 运维两张视图仍在后续票，
+    // 因此本路由只挂用户区块，顶栏走 page 形态（内容页）。
+    { path: '/admin', name: 'admin', component: AdminUsersPage, meta: { header: 'page' } },
     // 作者介绍：内容形态属独立后续页（旧图 Out of scope），本轮占位
     {
       path: '/about',
