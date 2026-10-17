@@ -248,6 +248,16 @@ func NewRouter(
 		RateBurst:     cfg.IPC.RoomMetaBurst,
 	}, cfg, accountDeps.Service)
 
+	// 番剧目录（wayfinder #37）：公开读 + 管理端 CRUD。
+	// 依赖同样取自既有链路，不新增 NewRouter 的参数位：
+	//   - accountDeps.Store 提供 anime 表的读写；
+	//   - adminDeps 的审计两件套提供异步审计投递（事件类 §9）。
+	registerAnimeRoutes(api, AnimeDeps{
+		Store:       accountDeps.Store,
+		AuditSink:   adminDeps.AuditSink,
+		AuditWriter: adminDeps.AuditWriter,
+	}, cfg, accountDeps.Service)
+
 	// 客户端切片器二进制的只读清单：只回 JSON（平台/大小/sha256），
 	// 二进制本身由静态托管 /downloads/<file> 送出，所以这里先于 registerStatic 注册。
 	registerDownloadRoutes(api, cfg)

@@ -294,4 +294,41 @@ END $$`,
 )`,
 		`CREATE INDEX IF NOT EXISTS idempotency_keys_expires_at_idx ON idempotency_keys (expires_at)`,
 	}},
+
+	// 0009：番剧目录（anime）。wayfinder #37，`/forum` 的数据底座。
+	//
+	// # 为什么 aliases 是 jsonb 而不是子表
+	//
+	// 别名（原名 / 简称 / 民间译名）只被两处用到：列表展示，以及 `?q=` 的模糊匹配。
+	// 它没有独立的生命周期（不会单独增删、不被别的实体引用），拆成 `anime_aliases`
+	// 子表会为每次列表查询引入一次 JOIN，却换不到任何查询能力。
+	// 存成 jsonb 数组则一次写入、一次读出，语义上就是「这个条目的若干个名字」。
+	//
+	// # title 为什么唯一
+	//
+	// 目录的价值在于"一个番剧只有一条"。允许重名，`?q=` 会返回两行看起来一样的条目，
+	// 而主题串（#38）只会挂在其中一条上 —— 用户无从判断该点哪个。
+	// 唯一约束把这件事挡在数据库层面：重复创建返回 409，而不是悄悄多一条。
+	//
+	// # 为什么没有 is_active / 软删除
+	//
+	// 本票的 DELETE 是硬删。软删除需要"已经挂了这个番剧的主题串怎么办"的答案，
+	// 而主题串（#38）还没落地 —— 现在加 `deleted_at` 只会让那个问题被提前假装解决。
+	{version: "0009_anime", statements: []string{
+		`CREATE TABLE IF NOT EXISTS anime (
+	id         bigserial PRIMARY KEY,
+	title      varchar(120) NOT NULL UNIQUE,
+	aliases    jsonb NOT NULL DEFAULT '[]'::jsonb,
+	cover_url  varchar(512) NULL,
+	summary    text NOT NULL DEFAULT '',
+	created_at timestamptz NOT NULL DEFAULT now(),
+	updated_at timestamptz NOT NULL DEFAULT now()
+)`,
+		// 搜索是 `title ILIKE '%q%'` 与 `created_at DESC` 的组合。
+		// lower(title) 的普通 B-tree 服务不了 ILIKE '%x%'，但它能让"按标题等值/前缀"
+		// 这类将来会有的查询走上索引；模糊匹配靠表大小兜着 —— 目录是人工维护的小表
+		// （几十到几千行），不为它引入 pg_trgm 扩展。
+		`CREATE INDEX IF NOT EXISTS anime_title_lower_idx ON anime (lower(title))`,
+		`CREATE INDEX IF NOT EXISTS anime_created_at_idx ON anime (created_at DESC)`,
+	}},
 }
