@@ -241,13 +241,19 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 
 ### 账号层（ACCOUNTS 一期）
 
-账号能力**默认关闭**：不配 `PR_DB_DSN` 时服务端不连库、不注册 `/api/auth/*` 与 `/api/admin/*`，
-观众仍可按房间码进房 —— 这是刻意的**两步部署**路径（先上代码、再开账号）。
+> ⚠ **本实例要求配置齐全才启动**：缺任何必需项（数据库、密钥、对外基地址、发信通道、
+> 前端产物）都会在启动期**逐条列出并拒绝启动**，不会退化成"页面能开、点下去才 503"。
+> 只想要功能不全的实例（例如只跑信令）时，显式设置 `PR_REQUIRE_COMPLETE=0`。
 
 | 环境变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
-| `PR_DB_DSN` | 空（账号关闭） | PostgreSQL 连接串；非空即账号能力总开关（同时触发启动期幂等迁移） |
-| `PR_JWT_SECRET` | 空 | access token 的 HS256 密钥，**至少 32 字节**（`openssl rand -hex 32`）。配了 `PR_DB_DSN` 却缺它 → **拒绝启动**：缺密钥的症状是"所有已登录用户随机掉线"，看起来像网络故障，极难归因 |
+| `PR_DB_DSN` | **必填** | PostgreSQL 连接串（启动期触发幂等迁移）。缺 → 拒绝启动 |
+| `PR_JWT_SECRET` | **必填** | access token 的 HS256 密钥，**至少 32 字节**（`openssl rand -hex 32`）。缺或过短 → **拒绝启动**：缺密钥的症状是"所有已登录用户随机掉线"，看起来像网络故障，极难归因 |
+| `PR_PUBLIC_BASE_URL` | **必填** | 邮件里链接的对外基地址。**没有默认值**：给一个默认值会让"漏配"静默指向另一个环境，而症状是"用户点开链接进了别人的站点" |
+| `PR_SMTP_HOST` / `_USER` / `_PASS` | **必填**（或用 dev echo） | 注册与改密码都靠邮箱验证码，没有发信通道等于注册不可用。本机没有 SMTP 时用 `PR_OTP_DEV_ECHO=1` 代替（见下） |
+| `PR_OTP_DEV_ECHO` | `0` | **仅本机开发**：`1` 时验证码会明文回显在接口响应里（前端会以"调试"样式显示）。打开它会废掉"邮箱归属"这件事，因此与已配 SMTP 同时开启会**拒绝启动** |
+| `PR_OTP_TTL` | `5m` | 邮箱验证码有效期（`1m`~`30m`）。6 位数字的猜测空间只有 100 万，时间窗口是防御维度之一 |
+| `PR_REQUIRE_COMPLETE` | 开启校验 | `0`/`false` = 跳过"必需配置齐全"这道启动闸。**只有刻意要功能不全的实例时才写** |
 | `PR_ACCESS_TTL` | `15m` | access token 有效期（上限 `24h`）。它只存内存 + `sessionStorage`，**不进 localStorage** |
 | `PR_REFRESH_TTL` | `720h` | refresh 会话有效期（`1h`~`1年`）。refresh 是 HttpOnly Cookie 里的不透明串，库里只存 sha256，每次刷新轮换且检测重放 |
 | `PR_BCRYPT_COST` | `12` | 口令哈希代价（`10`~`14`）；本机实测 12 ≈ 0.57s/次 |
@@ -255,8 +261,33 @@ go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 | `PR_WS_TICKET_TTL` | `30s` | WebSocket 一次性票据有效期（上限 `10m`）。浏览器 WebSocket 无法自定义请求头，所以账号身份走票（而不是把 token 塞进 URL） |
 | `PR_TRUSTED_PROXIES` | `127.0.0.1,::1` | 允许其 `X-Forwarded-For` 被采信的来源；显式设为**空** = 谁都不信（服务端直接对外的形态）。默认只信任本机反代 —— 否则任何人加一行伪造头就能把每 IP 限速全部绕过 |
 | `PR_AUTH_LOGIN_PER_MINUTE` / `_BURST` | `10` / `5` | 登录尝试的每 IP 令牌桶（失败也计入，挡撞库） |
-| `PR_AUTH_REGISTER_PER_MINUTE` / `_BURST` | `5` / `3` | 注册的每 IP 令牌桶（同样跑 bcrypt，所以更严） |
+| `PR_AUTH_REGISTER_PER_MINUTE` / `_BURST` | `5` / `3` | 注册与**发验证码**的每 IP 令牌桶（同样跑 bcrypt，所以更严） |
 | `PR_AUTH_REFRESH_PER_MINUTE` / `_BURST` | `30` / `10` | 刷新的每 IP 令牌桶（多标签页会叠加，故比登录宽松） |
+
+#### 注册与改密码（邮箱验证码）
+
+注册是**两段式**，用户看到的就是"先账号密码、翻一页填邮箱"：
+
+```
+POST /api/auth/register/start    {username, password}          → {ticket, expiresIn}   （不建号）
+POST /api/auth/register/email    {ticket, email}               → 204（发出验证码）
+POST /api/auth/register/verify   {ticket, code}                → 201（建号 + 会话）
+POST /api/auth/password/otp      {email}                       → 200（恒定，发改密验证码）
+POST /api/auth/password/otp/reset {email, code, password}      → 204（改密 + 撤销全部会话）
+```
+
+四条刻意的设计：
+
+- **昵称不在注册里填**：默认等于用户名（服务端 `SanitizeDisplayName` 同一口径），之后在设置页改。
+- **人机验证在页内子窗体里**（不是 `window.open`）：弹窗会被拦截，被挡住时用户只能看到
+  "请允许弹窗"——那是一次白跑。子窗体还能保住表单里已填的内容。
+  它是**摩擦**而不是安全边界：题面与校验都在前端，读源码即可绕过；真正的防线是
+  验证码错误计数（落库）+ 发送冷却 + 每 IP/每邮箱限流。
+- **验证码错误计数落库**（`password_resets.attempts`，5 次即作废）：放内存的话重启
+  一次就清零，而 6 位数字只有 100 万种。
+- **写操作支持幂等键**（`Idempotency-Key` 头，UUID）：同键同体只执行一次（双击不会建两个
+  账号、也不会让第一封验证码立刻作废）；**同键不同体返回 409**——那是客户端 bug，
+  不能返回旧结果。
 
 **无 TLS 的已知缺口**：当前部署是明文 http，因此 refresh Cookie **不带 `Secure`**（有一条测试断言
 把它钉住：上 TLS 之前不该加，否则浏览器会直接丢弃它）。上 TLS 后应立即补 `Secure` 并收紧 `SameSite`。

@@ -3,7 +3,7 @@
 > **这是 AI 会话进入本项目后的唯一入口。默认只读本文件**，需要动某处时再按下面的路径精确打开那几个文件，不要重新遍历整棵树。
 >
 > **维护约定（必须遵守）**：目录结构、关键约定、命令、部署事实一旦变化，**同步更新本文件**。过时地图比没有地图更危险——后续会话会按它行动。
-> 最近一次同步：本机非 docker PostgreSQL 的建库/启动脚本（`scripts/setup-local-db.ps1`、`scripts/run-local.ps1`）+ `.env*` 忽略规则；另记下 `TestWriterSubmitNeverBlocksWhenQueueFull` 的 Windows 假红之后。
+> 最近一次同步：注册/改密码改成**邮箱验证码**（两段式注册 + 页内人机验证子窗体 + 幂等键），并把「配置不全也启动」改成 **`requireComplete` 必需配置齐全才启动**；同时补了 `client/.env.example` 与 README 的账号层章节。
 
 ---
 
@@ -61,20 +61,23 @@
 
 - **混合式会话**：refresh = HttpOnly Cookie 里的不透明串（库里只存 sha256，每次刷新**轮换** + **重放检测→撤销全部会话**）；access = 15 分钟 JWT，**只存内存 + `sessionStorage`**（**不进 localStorage**）。
 - 前端缓存的 `pr:profile` 只用于显示，**不是授权依据**。
-- **DB 表**：`users`（含 `email` + `email_verified_at`，`lower(email)` 上有**部分唯一索引**）/ `sessions` / `password_resets`（验证与重置**共用**，靠 `purpose` 区分：`email_verify` / `password_reset`；只存 token 的 sha256）/ `rooms_meta` / `admin_audit` / `schema_migrations`（`friendships`/`messages`/`posts` 属后续阶段）。
-- **邮箱与找回**：注册**必须**填邮箱（不填会被拒）→ 发验证邮件 → **只有验证过的邮箱能用于找回**；管理员 `PATCH /api/admin/users/:id {email}` 绑定邮箱时会**同时标记已验证**（管理端 UI 已有该入口）。重置邮件里是一次性链接 `<PR_PUBLIC_BASE_URL>/reset#token=…`（token 在 **fragment** 里，故不进服务端访问日志）；验证链接同理走 `/verify#token=…`。
-- **迁移**：内嵌有序 DDL，启动自动补齐，**只做加法**；`schema_migrations` 记版本。
-- **API 速查**：`/api/auth/{register,login,refresh,logout,logout-all,me,ws-ticket}`、**`/api/auth/forgot`**（恒定 200，不泄露账号是否存在）、**`/api/auth/reset`**、**`/api/auth/verify-email`**（注意是 `verify-email` 而不是 `verify`）、`/api/rooms`(POST 建房，需登录)、`/api/rooms/:roomId`(信息)、`/api/rooms/:roomId/meta`(GET 仅房主读回 / PATCH 房主改)、`/api/public-rooms`(免登录)、`/api/ice`、`/api/v1/segment/*`、`/api/admin/{users,rooms,metrics,logs,audit}` + `/api/admin/rooms/:roomId/{close,unpublish}`。
-- **账号能力开关**：`PR_DB_DSN` 为空 = 账号关闭（不连库、不注册 `/api/auth/*` 与 `/api/admin/*`，游客照常进房）。这是刻意的**两步部署**路径。**注意它的用户可见形态**：此时 `/api/auth/*` 返回 404（路由未注册，有测试钉住），前端**必须**把这个 404 解释成"账号能力未启用（游客模式）"而不是裸的 `请求失败（HTTP 404）`（见 `useAuthForm.ts` 的分诊）——否则看起来像整个后端挂了。
+- **DB 表**：`users`（含 `email` + `email_verified_at`，`lower(email)` 上有**部分唯一索引**）/ `sessions` / `password_resets`（验证与重置**共用**，靠 `purpose` 区分：`email_verify` / `password_reset` / **`email_otp`**；只存 token 的 sha256；本轮新增 `attempts` 作验证码错误计数）/ **`register_drafts`**（两段式注册的中间态：已算好的 bcrypt + 待验证邮箱）/ **`idempotency_keys`**（写操作重放保护，`(scope,key)` 主键）/ `rooms_meta` / `admin_audit` / `schema_migrations`（`friendships`/`messages`/`posts` 属后续阶段）。
+- **注册与改密码（本轮重做）**：注册是**两段式**——`register/start`（账号+密码，返回一次性 `ticket`，**不建号**）→ `register/email`（发验证码）→ `register/verify`（建号+会话）。建号即视为**邮箱已验证**（验证码刚证明了归属），因此注册响应里的 `emailVerified` 是 true。**注册不收昵称**：默认等于用户名（`SanitizeDisplayName` 的兜底），之后在设置页改。改密码走 `password/otp` + `password/otp/reset`（与链接令牌那条 `forgot`/`reset` 并存）。旧的链接式找回仍然可用。
+- **验证码的三道防线**：6 位数字、5 分钟 TTL、**错误次数落库**（`attempts`，5 次即作废，重启不清零）+ 发送冷却 60s + 每 IP/每邮箱限流。人机验证是**前端页内子窗体**（`CaptchaDialog.vue`），定位是**摩擦而非安全边界**（题面与校验都在前端）。
+- **写操作幂等**：三个注册端点与改密端点接受 `Idempotency-Key`（UUID）。同键同体只执行一次（双击不建两个号、不让首封验证码立刻作废）；**同键不同体返回 409**。只有成功才落键——失败往往正是值得重试的那一类。
+- **邮箱与找回**：**只有验证过的邮箱能用于找回**；管理员 `PATCH /api/admin/users/:id {email}` 绑定邮箱时会**同时标记已验证**（管理端 UI 已有该入口）。重置邮件里是一次性链接 `<PR_PUBLIC_BASE_URL>/reset#token=…`（token 在 **fragment** 里，故不进服务端访问日志）；验证链接同理走 `/verify#token=…`。
+- **迁移**：内嵌有序 DDL，启动自动补齐，**只做加法**；`schema_migrations` 记版本。⚠ `CREATE TABLE IF NOT EXISTS` **不会给已存在的表补列**：凡是在建表之后又加的列，必须另写一条 `ADD COLUMN IF NOT EXISTS`（本轮 `register_drafts` 踩过，被 schema 测试抓到）。
+- **API 速查**：`/api/auth/{register,login,refresh,logout,logout-all,me,ws-ticket}`、**`/api/auth/register/{start,email,verify}`**（两段式注册）、**`/api/auth/password/otp` + `/api/auth/password/otp/reset`**（验证码改密）、**`/api/auth/forgot`**（恒定 200，不泄露账号是否存在）、**`/api/auth/reset`**、**`/api/auth/verify-email`**（注意是 `verify-email` 而不是 `verify`）、`/api/rooms`(POST 建房，需登录)、`/api/rooms/:roomId`(信息)、`/api/rooms/:roomId/meta`(GET 仅房主读回 / PATCH 房主改)、`/api/public-rooms`(免登录)、`/api/ice`、`/api/v1/segment/*`、`/api/admin/{users,rooms,metrics,logs,audit}` + `/api/admin/rooms/:roomId/{close,unpublish}`。
+- **启动完整性（本轮的策略变更）**：**配置必须齐全才启动**——缺 `PR_DB_DSN` / `PR_JWT_SECRET`(≥32字节) / `PR_PUBLIC_BASE_URL` / SMTP 三件套（或 `PR_OTP_DEV_ECHO=1`）/ 前端产物（`PR_SERVE_STATIC=true` 时）任一项，`config.requireComplete` 会**逐条列出并拒绝启动**。这取代了早先"缺 DB 就关账号、缺 SMTP 就 503"的运行期降级（那让"功能不全"要等用户点开才发现）。要跑功能不全的窄实例（只跑信令、单测）必须**显式**写 `PR_REQUIRE_COMPLETE=0`。**代码里"账号能力关闭"的分支仍在**（`PR_DB_DSN` 为空时不注册 `/api/auth/*`，返回 404），但它现在只在显式跳过校验时可达；前端保留"把这个 404 解释成游客模式"的分诊（`useAuthForm.ts`），因为那是对**降级实例**的正确解读。
 
 ## 5. 配置（环境变量）
 
 全部定义与默认值在 `internal/config/config_struct.go` + `config_load.go`（每个字段都有中文注释），用户可见的表在 `README.md`。本节只记**从默认值看不出**的三件事：
 
-- **账号能力总开关**：`PR_DB_DSN` 为空 ⇒ 账号整体关闭（不连库、不注册 `/api/auth/*` 与 `/api/admin/*`，游客照常进房）。这是刻意的**两步部署**路径。配了 DSN 而 `PR_JWT_SECRET` 少于 32 字节 ⇒ **拒绝启动**（缺密钥的症状是"所有人随机掉线"，极难归因）。
+- **必需配置齐全才启动**（见 §4 的"启动完整性"）：缺任何一项由 `config.requireComplete` 在启动期拦下并逐条列出。**要跑窄实例必须显式写 `PR_REQUIRE_COMPLETE=0`**——这道闸默认开启，因为"漏配"与"刻意跳过"在日志里长得一样，而后果完全不同。
 - **`PR_TRUSTED_PROXIES` 默认只信回环**：配错（把直连来源也标为可信）会让按 IP 限速退化成全局限速。
 - **`PR_SECURITY_CSP` 是本地矩阵的开关**：默认严格 CSP 会拦住脚手架注入的跨源本机媒体服务器；本地跑验收矩阵时临时放行 `http://127.0.0.1:*`。
-- **邮件能力的开关是 `PR_SMTP_HOST`**（为空 ⇒ `forgot` 返回 503 `MAIL_UNAVAILABLE`，对外仍是恒定响应）。两个会在启动期被拦下的组合：`PR_SMTP_TLS=none` + 非回环 host（标准库 `PlainAuth` 本来就会拒，提前拒更好归因）；以及 `PR_SMTP_FROM` 与认证账号不一致（QQ 会在 RCPT 阶段 550）。**发信是异步入队的**（队列满只记日志、对外仍恒定 200），所以"日志里出现『已入队』不等于『已投递』"——排查时要看两态。
+- **邮件能力现在也是必需项**（注册与改密码都靠验证码）：配齐 `PR_SMTP_HOST/_USER/_PASS`，或显式打开 `PR_OTP_DEV_ECHO=1`（**仅本机开发**：验证码明文回显在响应里）。**两者同时开启会拒绝启动**——那种组合没有正当理由，只说明开发配置被带进了部署。两个还会在启动期被拦下的组合：`PR_SMTP_TLS=none` + 非回环 host（标准库 `PlainAuth` 本来就会拒，提前拒更好归因）；以及 `PR_SMTP_FROM` 与认证账号不一致（QQ 会在 RCPT 阶段 550）。**发信是异步入队的**（队列满只记日志、对外仍恒定 200），所以"日志里出现『已入队』不等于『已投递』"——排查时要看两态。
 
 ## 6. 构建与验证（照抄即可）
 
