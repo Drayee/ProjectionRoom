@@ -261,6 +261,9 @@ func NewRouter(
 	// 帖子域（wayfinder #27）：公开读 + 登录写（发帖/点赞/评论/删自己的评论）。
 	registerPostRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
 
+	// 好友域（wayfinder #29）：全部登录，三种状态语义在 store 层裁决。
+	registerFriendshipRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
+
 	// 客户端切片器二进制的只读清单：只回 JSON（平台/大小/sha256），
 	// 二进制本身由静态托管 /downloads/<file> 送出，所以这里先于 registerStatic 注册。
 	registerDownloadRoutes(api, cfg)

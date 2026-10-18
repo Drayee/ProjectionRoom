@@ -66,19 +66,23 @@ func TestMigrateFirstRunAppliesAllThenSecondRunIsNoop(t *testing.T) {
 	}
 }
 
-// TestMigrateCreatesPhaseOneTablesOnly 断言本期的表边界（ACCOUNTS §4 + 计划 T2）：
-// 五张表都在，二三期的表与房间快照表都不建。
+// TestMigrateCreatesPhaseOneTablesOnly 断言表边界。
+//
+// ⚠ 这条用例的历史比迁移本身更早：它最初钉住"一期只建 5 张表"。但 #27（posts）、
+// #37（anime）、#29（friendships）按地图逐个落地，表边界随之扩张。这里不再维护
+// 一张"已建表"清单（那正是 truncateAll 曾经踩过的坑——手写清单会过时），只保留
+// "本期确实**不该**建"的负向断言：messages / room_snapshots 仍属后续票。
 func TestMigrateCreatesPhaseOneTablesOnly(t *testing.T) {
 	s := requireTestDB(t)
 
-	for _, name := range []string{"schema_migrations", "users", "sessions", "rooms_meta", "admin_audit", "password_resets"} {
+	for _, name := range []string{"schema_migrations", "users", "sessions", "rooms_meta", "admin_audit", "password_resets", "posts", "anime", "friendships"} {
 		if !tableExists(t, s, name) {
-			t.Fatalf("表 %s 应该存在", name)
+			t.Fatalf("表 %s 应该存在（它已由相应票落地）", name)
 		}
 	}
-	for _, name := range []string{"friendships", "messages", "room_snapshots"} {
+	for _, name := range []string{"messages", "room_snapshots"} {
 		if tableExists(t, s, name) {
-			t.Fatalf("表 %s 属于二期/三期，本期不该建", name)
+			t.Fatalf("表 %s 仍属后续票，本期不该建", name)
 		}
 	}
 }
@@ -133,9 +137,9 @@ func TestMigrationPlanIsOrderedAndAdditiveOnly(t *testing.T) {
 		}
 	}
 	sql := all.String()
-	for _, forbidden := range []string{"friendships", "messages", "room_snapshots"} {
+	for _, forbidden := range []string{"messages", "room_snapshots"} {
 		if strings.Contains(sql, forbidden) {
-			t.Fatalf("迁移 DDL 里出现了 %q：违反了期数边界（本期只建 5 张表）", forbidden)
+			t.Fatalf("迁移 DDL 里出现了 %q：仍属后续票，本期不该建", forbidden)
 		}
 	}
 	// DDL 里不能出现占位符字符：GORM 的 Exec 会把它当参数位置，导致语句跑不成。

@@ -399,4 +399,47 @@ END $$`,
 		// 反查"我赞过哪些"（将来"我的点赞"要用），也服务 ON DELETE CASCADE 的清理。
 		`CREATE INDEX IF NOT EXISTS post_likes_user_idx ON post_likes (user_id)`,
 	}},
+
+	// 0011：好友关系（friendships）。wayfinder #29。
+	//
+	// # 一段关系只存一行（docs/ACCOUNTS.md §7.1 的硬语义）
+	//
+	// `requester_id` / `addressee_id` **按登记时的角色写入**，此后不变——状态流转
+	//（pending → accepted / blocked）都发生在同一行上，不会出现"两条边不同步"。
+	// 三种状态：
+	//
+	//   - `accepted` 对称：任一方查"我的好友"都能看到对方（查询用
+	//     `requester_id = ? OR addressee_id = ?`），不需要第二条边；
+	//   - `pending` 有向：只有 `addressee_id`（被请求方）能 accept / reject；
+	//   - `blocked` 有向：`blocked_by_id` 记"是谁拉黑了谁"。
+	//
+	// # 为什么 `blocked_by_id` 要单独一列，而不是"用 requester_id 就是拉黑方"
+	//
+	// 因为关系行保留**最初登记的角色**：A 发起好友、B 接受（requester=A），之后
+	// **B 拉黑了 A** —— 此时 requester 仍是 A，但拉黑方是 B。若用 requester_id 当
+	// 拉黑方，"被请求方拉黑请求方"就表达不出来。`blocked_by_id` 就是这个事实的记录。
+	//
+	// # 为什么 UNIQUE(requester_id, addressee_id) 不够、还要服务层防"反方向重复"
+	//
+	// 唯一约束只挡 (A,B) 这一方向的重复，挡不住 (B,A)。真正"一段关系只存一行"
+	// 由 store 层在事务里 `FOR UPDATE` 锁两个方向后裁决（见 store/friendships.go），
+	// 唯一约束是最后的兜底（并发竞态下仍然不可能写出两条）。
+	{version: "0011_friendships", statements: []string{
+		`CREATE TABLE IF NOT EXISTS friendships (
+	id            bigserial PRIMARY KEY,
+	requester_id  bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	addressee_id  bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	status        varchar(10) NOT NULL,
+	blocked_by_id bigint NULL,
+	created_at    timestamptz NOT NULL DEFAULT now(),
+	updated_at    timestamptz NOT NULL DEFAULT now(),
+	UNIQUE (requester_id, addressee_id)
+)`,
+		// 被请求方的收件箱：pending 请求按"谁发给我的"列出来。
+		`CREATE INDEX IF NOT EXISTS friendships_addressee_status_idx ON friendships (addressee_id, status)`,
+		// 拉黑后"被拉黑方发不进消息"的判断：按任一方向 + blocked 状态查。
+		`CREATE INDEX IF NOT EXISTS friendships_requester_status_idx ON friendships (requester_id, status)`,
+		// 好友列表（accepted）按任一方取：对称查询的两个入口都走这条。
+		`CREATE INDEX IF NOT EXISTS friendships_status_idx ON friendships (status)`,
+	}},
 }
