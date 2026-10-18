@@ -67,8 +67,9 @@ export function isCapabilityUnavailable(err: unknown): err is CapabilityUnavaila
  * 为什么需要它而不是让真实实现返回空数组：空数组是**撒谎**（"你没有拉黑任何人"）
  * 与真实状态（"我不知道你拉黑了谁"）在界面上一模一样，而后者必须能被用户看见。
  *
- * 好友域当前有三处：按用户名找人、黑名单列表、解除拉黑（`docs/ACCOUNTS.md` §7.1
- * 只冻结了 6 个端点，见 #29）。后端补上后，把对应实现换成真实请求即可，页面不用动。
+ * 好友域曾经有三处单点缺口（按用户名找人 / 黑名单列表 / 解除拉黑，见 #28），
+ * 已由 #39 在服务端补齐。这个类保留给**将来的**单点缺口用 ——
+ * 判据仍然是"整域在线、但这个动作没有接口"。
  */
 export class FeatureUnavailable extends Error {
   readonly domain: ApiDomain

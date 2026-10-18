@@ -63,8 +63,9 @@ export interface FriendRequests {
 /**
  * 搜索结果里"我和这个人现在是什么关系" —— 决定按钮该显示什么、能不能点。
  *
- * 服务端目前**没有**按用户名找人的接口，所以这个类型暂时只由 mock 产出；
- * 真实实现见 `real/friends.ts` 的 `searchUsers`（抛 `FeatureUnavailable`）。
+ * 与服务端 #39 的 `relation` 逐字对应（store.RelationState 那一组常量）：
+ * `none|friend|pending-out|pending-in|blocked`。`pending-*` 的**方向**由谁是
+ * 请求方决定（服务端按 requester 判），前端不重新推导。
  */
 export type RelationState = 'none' | 'friend' | 'pending-out' | 'pending-in' | 'blocked'
 
@@ -72,7 +73,7 @@ export interface SearchHit extends PersonRef {
   relation: RelationState
 }
 
-/** 黑名单里的一行。解除拉黑按 `userId`（将来 `DELETE /api/blocks/:userId`）。 */
+/** 黑名单里的一行。解除拉黑按 `userId`（`DELETE /api/blocks/:userId`，#39）。 */
 export interface BlockedEntry {
   user: PersonRef
 }

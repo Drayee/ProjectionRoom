@@ -1,11 +1,11 @@
 /**
- * 好友域 · 真实 HTTP 实现（wayfinder #28；服务端契约由 #29 冻结）。
+ * 好友域 · 真实 HTTP 实现（wayfinder #28；服务端契约由 #29 冻结，#39 补齐三处缺口）。
  *
  * 两条与 `api/admin.ts` / `api/real/posts.ts` 一致的写法：一律走
  * `requestJSON(authedFetch, …)`（401 自动刷新一次的语义只在 `stores/auth.ts` 一处实现），
  * 并用 `toCapabilityUnavailable*` 保留"整域 404 = 能力未上线"的判据。
  *
- * 服务端契约（#29 已冻结，6 个端点，全部要登录）：
+ * 服务端契约（#29 冻结 6 个 + #39 补 3 个，全部要登录）：
  *
  *   GET    /api/friends                            → {items: friendshipView[]}     （accepted）
  *   GET    /api/friends/requests                    → {incoming, outgoing}          （pending 两摞）
@@ -14,6 +14,9 @@
  *   POST   /api/friends/requests/:requestId/reject  → 204
  *   DELETE /api/friends/:friendshipId               → 204
  *   POST   /api/blocks                 {userId}     → friendshipView
+ *   GET    /api/users/search?q=                    → {items: searchHitView[]}      （#39）
+ *   GET    /api/blocks                             → {items: blockedEntryView[]}   （#39）
+ *   DELETE /api/blocks/:userId                     → 204                           （#39）
  *
  * `friendshipView` = `{relationshipId, userId, displayName, status}`，其中 `userId` 是
  * **对方**。三处形状适配只发生在这一层：
@@ -24,22 +27,14 @@
  *     所以门面把它们的返回值定成 `void`，页面写完重新拉列表 —— 权威显示名来自列表，
  *     不是从响应里硬拼一个空名字。
  *
- * ⚠ **三处服务端还没有的能力**（本文件显式抛 `FeatureUnavailable`，页面在**原地**
- * 说明"这个接口还没有"，而不是把整页降级成"该分区未上线"）：
- *   1. 按用户名/昵称找人（`GET /api/users/search?q=`）—— 没有它，"加好友"只能靠
- *      userId，而 userId 在界面上根本不可得；
- *   2. 黑名单列表（`GET /api/blocks`）—— 没有它，只能拉黑、无法回看；
- *   3. 解除拉黑（`DELETE /api/blocks/:userId`）—— 没有它，拉黑是**单向不可逆**的。
- * 三者已作为一张后续后端票提出（见 #28 的结论）。
- *
- * ⚠ **404 的两种含义必须分开**（#26 踩过的坑）：`accept` / `reject` / `remove` 的 404
- * 是**语义**错误——服务端对"关系不存在"与"越权"统一回 404（#29 的防探测决定），它跟
- * "整域路由没注册"长得一模一样。所以这三个走 `toCapabilityUnavailableIf`，用一次
- * `listFriends()` 探针回答"域到底在不在"；否则"这条请求已被处理"会被说成
- * "后端没上线"，用户会以为好友功能全挂了。
+ * ⚠ **404 的两种含义必须分开**（#26 踩过的坑）：`accept` / `reject` / `remove` /
+ * `unblock` 的 404 是**语义**错误——服务端对"关系不存在"与"越权"统一回 404
+ * （#29 的防探测决定），它跟"整域路由没注册"长得一模一样。所以这四个走
+ * `toCapabilityUnavailableIf`，用一次探针回答"域到底在不在"；否则"这条请求已被处理"
+ * 会被说成"后端没上线"，用户会以为好友功能全挂了。
  */
-import { requestJSON, type AuthedFetch } from '../http'
-import { FeatureUnavailable, toCapabilityUnavailable, toCapabilityUnavailableIf } from '../mode'
+import { requestJSON, query, type AuthedFetch } from '../http'
+import { toCapabilityUnavailable, toCapabilityUnavailableIf } from '../mode'
 import { avatarOf } from '../../utils/avatar'
 import { useAuthStore } from '../../stores/auth'
 import type {
@@ -47,6 +42,7 @@ import type {
   FriendEntry,
   FriendRequest,
   FriendRequests,
+  RelationState,
   SearchHit,
   FriendshipStatus,
   PresenceState,
@@ -68,8 +64,38 @@ interface ServerFriendship {
   status: string
 }
 
+/** 服务端搜索结果的一行（`GET /api/users/search`，#39）。 */
+interface ServerSearchHit {
+  userId: number
+  username: string
+  displayName: string
+  /** none|friend|pending-out|pending-in|blocked（服务端一次算好）。 */
+  relation: string
+}
+
+/** 服务端黑名单的一行（`GET /api/blocks`，#39）。 */
+interface ServerBlockedEntry {
+  userId: number
+  displayName: string
+  username: string
+  blockedAt: string
+}
+
 function toStatus(raw: string): FriendshipStatus {
   return raw === 'accepted' || raw === 'blocked' ? raw : 'pending'
+}
+
+/**
+ * 服务端关系状态 → 前端 RelationState。
+ *
+ * 未知值一律回落 `'none'`：那是前端按钮的**可用**分支（"还可以加好友"），
+ * 与"已拉黑/已是好友"比起来是更安全的错（错的那一下会拿到服务端的 409/403，
+ * 而不是让用户以为加成功了）。
+ */
+function toRelation(raw: string): RelationState {
+  return raw === 'friend' || raw === 'pending-out' || raw === 'pending-in' || raw === 'blocked'
+    ? raw
+    : 'none'
 }
 
 function toPerson(userId: number, displayName: string) {
@@ -123,9 +149,36 @@ export async function listRequests(): Promise<FriendRequests> {
   }
 }
 
-/** 按用户名找人：服务端没有这个接口（见文件头的三处缺口），显式说到底缺什么。 */
-export async function searchUsers(_query: string): Promise<SearchHit[]> {
-  throw new FeatureUnavailable('friends', '按用户名找人')
+/**
+ * 按用户名找人：`GET /api/users/search?q=<关键词>`（wayfinder #39 落地）。
+ *
+ * 服务端返回 `{items: [{userId, username, displayName, relation}]}`：
+ *   - `relation ∈ none|friend|pending-out|pending-in|blocked` 由服务端一次算好
+ *     （它按本次结果的 id 批量查关系，不让我们每个结果再问一次）；
+ *   - **blocked 也出现在结果里**（不隐藏）—— 那是"我拉黑了谁"的唯一可见入口。
+ *
+ * 两条与既有端点一致的取舍：
+ *   - 空 `q` 服务端回 400，因此这里**不**在本地先拦：让服务端的文案统一出口
+ *     （页面本来就禁用了空查询的提交按钮，双拦只会让两边文案不一致）。
+ *   - 走 `toCapabilityUnavailable`：这个路径整组没注册时（域未上线）是 404，
+ *     与好友列表同一个降级语义。注意搜索的 404 不会出现 —— 服务端对"没有匹配"
+ *     回的是 200 + 空数组（"搜不到"与"接口没有"必须可分辨）。
+ */
+export async function searchUsers(keyword: string): Promise<SearchHit[]> {
+  try {
+    const body = await requestJSON<{ items: ServerSearchHit[] }>(
+      fetcher(),
+      `/api/users/search${query({ q: keyword })}`,
+    )
+    return (body?.items ?? []).map((raw) => ({
+      id: raw.userId,
+      displayName: raw.displayName || '未知用户',
+      ...avatarOf(raw.userId, raw.displayName),
+      relation: toRelation(raw.relation),
+    }))
+  } catch (err) {
+    throw toCapabilityUnavailable('friends', err)
+  }
 }
 
 /**
@@ -187,12 +240,29 @@ export async function blockUser(userId: number): Promise<void> {
   }
 }
 
-/** 黑名单列表：服务端没有这个接口（见文件头），显式说到底缺什么。 */
+/** 黑名单列表：`GET /api/blocks`（wayfinder #39 落地）。只列**我拉黑的**人。 */
 export async function listBlocked(): Promise<BlockedEntry[]> {
-  throw new FeatureUnavailable('friends', '黑名单列表')
+  try {
+    const body = await requestJSON<{ items: ServerBlockedEntry[] }>(fetcher(), '/api/blocks')
+    return (body?.items ?? []).map((raw) => ({
+      user: toPerson(raw.userId, raw.displayName),
+    }))
+  } catch (err) {
+    throw toCapabilityUnavailable('friends', err)
+  }
 }
 
-/** 解除拉黑：服务端没有这个接口（见文件头）。拉黑因此是**单向不可逆**的。 */
-export async function unblock(_userId: number): Promise<void> {
-  throw new FeatureUnavailable('friends', '解除拉黑')
+/**
+ * 解除拉黑：`DELETE /api/blocks/:userId`（wayfinder #39 落地）。
+ *
+ * 服务端对"这人不在你的黑名单里"回 **404**（与 #29 同一决定：越权与不存在不可分辨，
+ * 避免存在性探测）。所以这里要用 `toCapabilityUnavailableIf` 配一次列表探针 ——
+ * 否则"已经解除过了"会被说成"后端没上线"。
+ */
+export async function unblock(userId: number): Promise<void> {
+  try {
+    await requestJSON<null>(fetcher(), `/api/blocks/${userId}`, { method: 'DELETE' })
+  } catch (err) {
+    throw await toCapabilityUnavailableIf('friends', err, () => listBlocked())
+  }
 }

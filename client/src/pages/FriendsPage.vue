@@ -184,12 +184,13 @@ async function loadBlocked(): Promise<void> {
 }
 
 /**
- * 进「找朋友」时先探一次"这个接口在不在"。
+ * 进「找朋友」时探一次接口在不在。
  *
- * 为什么要有这次探针：真实实现里 `searchUsers` 是**本地就抛** `FeatureUnavailable`（服务端没有
- * 路由），而页面若等到用户敲完查询才去撞它，用户会先白输一次、再看到"接口没有"。
- * 一次空查询的探针能在**进入分区时**就把话说清：mock 返回空数组（无副作用），
- * 真实实现当场抛 —— 两种实现共用同一条入口，不必在页面里判断 `isMock`。
+ * 为什么保留这次探针（#39 之后它几乎不会再触发，但保留是有代价极小的）：
+ * 域整体没上线时 `searchUsers` 的 404 会被 `toCapabilityUnavailable` 翻成
+ * `CapabilityUnavailable`（域级），而不是 `FeatureUnavailable`（单点级）——
+ * 探针要接住的正是那一种，于是页面能把"这一栏还没有"与"整页还没上线"分开说。
+ * mock 态下它返回空数组（无副作用），两种实现共用同一条入口，页面不必判断 `isMock`。
  */
 async function probeSearch(): Promise<void> {
   try {
@@ -281,7 +282,7 @@ async function confirmPending(): Promise<void> {
   notice.value = `已拉黑 ${p.displayName}：对方发不进消息，双方在列表里互不可见`
 }
 
-/** 解除拉黑（mock 可用；真实实现抛 FeatureUnavailable，按钮在那种情况下不显示）。 */
+/** 解除拉黑（#39 起真实实现可用；域未上线时按钮那栏会显示说明）。 */
 async function unblock(entry: BlockedEntry): Promise<void> {
   if (!(await attempt(() => friendsApi.unblock(entry.user.id)))) return
   await loadBlocked()

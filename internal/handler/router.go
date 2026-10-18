@@ -263,7 +263,9 @@ func NewRouter(
 
 	// 好友域（wayfinder #29）：全部登录，三种状态语义在 store 层裁决。
 	// pusher 是 /ws/user 的实时投递出口（#31）：nil 时关系变化只落库，不推送。
-	registerFriendshipRoutes(api, accountDeps.Store, cfg, accountDeps.Service, accountDeps.FriendPusher)
+	// 审计两件套由 #39 引入（解除拉黑要能事后追责），与 anime 用的是同一对实例。
+	registerFriendshipRoutes(api, accountDeps.Store, cfg, accountDeps.Service, accountDeps.FriendPusher,
+		adminDeps.AuditSink, adminDeps.AuditWriter)
 
 	// 私聊域（wayfinder #31）：全部登录，拉黑在 store 的事务里强制。
 	//

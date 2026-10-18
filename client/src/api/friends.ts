@@ -1,17 +1,18 @@
 /**
  * 好友域门面（唯一被页面 import 的出口）。
  *
- * 形状（#28 定稿，`/messages` 票 #30 只消费 `conversationPath`，不消费这些函数）：
+ * 形状（#28 定稿，#39 把三个缺口填实；`/messages` 票 #30 只消费 `conversationPath`，
+ * 不消费这些函数）：
  *   listFriends()                  → FriendEntry[]
  *   listRequests()                 → {incoming, outgoing}
- *   searchUsers(query)             → SearchHit[]           （real 抛 FeatureUnavailable）
+ *   searchUsers(query)             → SearchHit[]
  *   sendRequest(userId)            → void
  *   acceptRequest(relationshipId)  → void
  *   rejectRequest(relationshipId)  → void
  *   removeFriend(relationshipId)   → void
  *   blockUser(userId)              → void
- *   listBlocked()                  → BlockedEntry[]        （real 抛 FeatureUnavailable）
- *   unblock(userId)                → void                  （real 抛 FeatureUnavailable）
+ *   listBlocked()                  → BlockedEntry[]
+ *   unblock(userId)                → void
  *
  * 三个「写操作返回 void」是刻意的：服务端 create/accept 的响应**不带 displayName**，
  * 硬拼一个空名字会让"刚加的好友"显示成「未知用户」。所以写完由页面重新拉列表 ——
