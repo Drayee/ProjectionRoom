@@ -10,7 +10,7 @@ import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
 import { isCapabilityUnavailable } from '../api/mode'
-import { usePostFailure, ensureLoggedInForWrite } from '../components/features/posts/usePostFailure'
+import { useApiFailure, ensureLoggedInForWrite } from '../components/features/common/useApiFailure'
 import { useAuthStore } from '../stores/auth'
 import type { Comment, Post } from '../types/posts'
 
@@ -18,7 +18,7 @@ const props = defineProps<{ id: string }>()
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
-const { failure, run } = usePostFailure(() => route.fullPath)
+const { failure, run } = useApiFailure(() => route.fullPath)
 
 const post = ref<Post | null>(null)
 const comments = ref<Comment[]>([])

@@ -9,6 +9,7 @@ import UserPage from './pages/UserPage.vue'
 import ResetPasswordPage from './pages/ResetPasswordPage.vue'
 import VerifyEmailPage from './pages/VerifyEmailPage.vue'
 import ComingSoonPage from './pages/ComingSoonPage.vue'
+import FriendsPage from './pages/FriendsPage.vue'
 import PostsPage from './pages/PostsPage.vue'
 import PostDetailPage from './pages/PostDetailPage.vue'
 import PostEditorPage from './pages/PostEditorPage.vue'
@@ -28,8 +29,9 @@ import AdminOpsPage from './pages/admin/AdminOpsPage.vue'
  * 18 条 path/name 与旧表逐字一致（票 #12 契约平移：`/room/:roomId`、
  * `/login`（负向判据）、`/reset`、`/verify`（邮件链接写死）不可改）。
  * 做/占位的分配来自票 #16：
- *   - 真做：/ /room /login /register /reset /verify /help /rooms /user /posts×3
- *   - 占位（ComingSoonPage，props 驱动）：/friends /official /forum /messages /about /admin
+ *   - 真做：/ /room /login /register /reset /verify /help /rooms /user /posts×3 /friends
+ *   - 占位（ComingSoonPage，props 驱动）：/official /forum /messages /about
+ *   - 管理端三屏（#23/#24/#25）：/admin /admin/rooms /admin/ops
  *
  * **`meta.header` 决定全局顶栏形态**（App.vue 常驻外壳，顶栏不属于任何页面）：
  *   app=分区图标导航 / page=内容页 / bare=只有品牌名 / none=无顶栏。
@@ -75,23 +77,9 @@ export const router = createRouter({
     // 用户详情页：本轮只支持本人（公开档案接口尚未实现）
     { path: '/user/:id', name: 'user', component: UserPage, props: true, meta: { header: 'page' } },
 
-    // ---------- 分区占位页（建设中；props 驱动，零请求） ----------
-    {
-      path: '/friends',
-      name: 'friends',
-      component: ComingSoonPage,
-      props: {
-        title: '房间室 · 好友',
-        icon: 'users-group',
-        summary: '和固定的人一起看：好友关系、在线状态，以及"好友正在看的房间"。',
-        bullets: [
-          '好友列表：双向确认的关系（请求 / 接受 / 删除），不再只靠房间码找人。',
-          '好友动态：谁在线、谁正在看片、房间公开性允许时的一键跟看。',
-          '邀请进房：把当前房间推给好友（仍遵守房间密码与公开性）。',
-        ],
-        depends: ['friendships 表的读写接口', '用户级实时通道（/ws/user，用于在线状态与邀请）'],
-      },
-    },
+    // 好友（票 #28）：列表 / 待处理请求 / 按用户名找人 / 黑名单，全部走 api/friends.ts 门面。
+    // 「发消息」按 utils/dmRoute.ts 的约定跳到 /messages?peer=<id>（票 #30 解析）。
+    { path: '/friends', name: 'friends', component: FriendsPage, meta: { header: 'page' } },
     {
       path: '/official',
       name: 'official',

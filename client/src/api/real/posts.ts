@@ -35,6 +35,8 @@ import { requestJSON, query, type AuthedFetch } from '../http'
 import { toCapabilityUnavailable, toCapabilityUnavailableIf } from '../mode'
 import type { Comment, ListPostsInput, ListPostsResult, Post } from '../../types/posts'
 import { useAuthStore } from '../../stores/auth'
+// 头像派生（首字母 + 稳定取色）与好友域共用一份：utils/avatar.ts。
+import { avatarOf } from '../../utils/avatar'
 
 /** 页面大小：与 store 的 defaultPostLimit 同值（20）。 */
 const PAGE_SIZE = 20
@@ -49,15 +51,6 @@ function fetcher(): AuthedFetch {
   return useAuthStore().authedFetch
 }
 
-/** 从名字派生头像首字母与稳定颜色（与 ui/AppHeader.vue 同一套逻辑，见那里的注释）。 */
-function avatarOf(id: number, displayName: string): { avatarChar: string; avatarColor: string } {
-  const name = displayName || '?'
-  const palette = ['#00a1d6', '#fb7299', '#8b7bf0', '#3ddc97', '#f5c76a']
-  return {
-    avatarChar: name.slice(0, 1),
-    avatarColor: palette[Math.abs(id) % palette.length],
-  }
-}
 
 /** 服务端帖子行的最小形状（只声明本文件用到的键）。 */
 interface ServerPost {

@@ -9,11 +9,11 @@ import { RouterLink } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import * as postsApi from '../api/posts'
-import { usePostFailure } from '../components/features/posts/usePostFailure'
+import { useApiFailure } from '../components/features/common/useApiFailure'
 import type { Post } from '../types/posts'
 
 const route = useRoute()
-const { failure, run } = usePostFailure(() => route.fullPath)
+const { failure, run } = useApiFailure(() => route.fullPath)
 
 const posts = ref<Post[]>([])
 const sort = ref<'latest' | 'hot'>('latest')
@@ -27,7 +27,7 @@ const hasMore = ref(false)
  */
 const capabilityMissing = ref(false)
 
-/** 失败态的一行文案（分诊结果，见 usePostFailure）。 */
+/** 失败态的一行文案（分诊结果，见 useApiFailure）。 */
 const failureText = computed(() => {
   const f = failure.value
   if (!f) return ''

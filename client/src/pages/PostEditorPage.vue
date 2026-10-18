@@ -11,13 +11,13 @@ import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
 import { isCapabilityUnavailable, isMock } from '../api/mode'
-import { usePostFailure, ensureLoggedInForWrite } from '../components/features/posts/usePostFailure'
+import { useApiFailure, ensureLoggedInForWrite } from '../components/features/common/useApiFailure'
 
 const DRAFT_KEY = 'pr:post-draft'
 
 const route = useRoute()
 const router = useRouter()
-const { failure, run } = usePostFailure(() => route.fullPath)
+const { failure, run } = useApiFailure(() => route.fullPath)
 
 const title = ref('')
 const content = ref('')

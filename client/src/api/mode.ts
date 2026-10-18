@@ -55,6 +55,39 @@ export function isCapabilityUnavailable(err: unknown): err is CapabilityUnavaila
   return err instanceof CapabilityUnavailable
 }
 
+/**
+ * 域**在线**、但其中某一个动作服务端还没提供（wayfinder #28 引入）。
+ *
+ * 与 `CapabilityUnavailable` 的区别是"整域还是单点"，两者绝不能混：
+ *   - `CapabilityUnavailable` → 页面整块换成「该分区后端尚未上线」空态；
+ *   - `FeatureUnavailable`  → **该域照常工作**，只有这一个按钮/这一栏显示
+ *     「服务端暂未提供此接口」。若把它也当成整域未上线，好友列表会因为
+ *     "黑名单读不到"而整页消失 —— 用户会以为好友功能全废了。
+ *
+ * 为什么需要它而不是让真实实现返回空数组：空数组是**撒谎**（"你没有拉黑任何人"）
+ * 与真实状态（"我不知道你拉黑了谁"）在界面上一模一样，而后者必须能被用户看见。
+ *
+ * 好友域当前有三处：按用户名找人、黑名单列表、解除拉黑（`docs/ACCOUNTS.md` §7.1
+ * 只冻结了 6 个端点，见 #29）。后端补上后，把对应实现换成真实请求即可，页面不用动。
+ */
+export class FeatureUnavailable extends Error {
+  readonly domain: ApiDomain
+  /** 用户可读的动作名，如「黑名单列表」。直接进界面文案。 */
+  readonly feature: string
+
+  constructor(domain: ApiDomain, feature: string, message?: string) {
+    super(message ?? `服务端暂未提供「${feature}」接口`)
+    this.name = 'FeatureUnavailable'
+    this.domain = domain
+    this.feature = feature
+  }
+}
+
+/** 类型守卫：区分"整域未上线"与"这个动作还没接口"。 */
+export function isFeatureUnavailable(err: unknown): err is FeatureUnavailable {
+  return err instanceof FeatureUnavailable
+}
+
 /** 把 `import.meta.env` 的取值收窄成 `string | undefined`（Vite 的类型是 `any`）。 */
 function readRaw(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
