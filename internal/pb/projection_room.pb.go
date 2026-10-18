@@ -806,7 +806,30 @@ type Envelope struct {
 	// 令牌，只在创建响应里返回给创建者；宽限期内只有携带正确令牌的连接才能接回主播位。
 	// 字段 34 是纯加法（proto3 未知字段可忽略），旧客户端不带该字段 → 行为不变
 	// （首次进房不需要令牌；宽限期内则无法接回，由客户端另一条线补上）。
-	HostToken     string `protobuf:"bytes,34,opt,name=host_token,json=hostToken,proto3" json:"host_token,omitempty"`
+	HostToken string `protobuf:"bytes,34,opt,name=host_token,json=hostToken,proto3" json:"host_token,omitempty"`
+	// —— 用户级实时通道（/ws/user）的字段。wayfinder #31 / ACCOUNTS §7.2。
+	//
+	// 为什么复用同一个 Envelope 而不是新开一个 message：`/ws` 与 `/ws/user` 是
+	// **同一个信封模型的两条通道**，而"客户端只写一套编解码"是既有约定
+	// （internal/model/pb_convert.go 是唯一转换点）。新开 message 会让客户端
+	// 有两套 fromBinary，而它们迟早会漂移。
+	//
+	// 字段号从 35 起：34 之前是房间信令的面，已冻结；新增全是纯加法
+	// （proto3 未知字段可忽略，旧客户端收到这些字段只会忽略）。
+	//
+	// dm / dm-read 的载荷：
+	//   - 服务端下行 dm：dm 带完整消息（id/sender/body/created_at）；
+	//   - 服务端下行 dm-read：只带"读到哪一条"（id + read_at），不带正文。
+	Dm *DirectMessage `protobuf:"bytes,35,opt,name=dm,proto3" json:"dm,omitempty"`
+	// 用户通道的连接确认（服务端在 ticket 校验通过、连接注册完成后立刻下发）。
+	// 客户端据此知道"实时通道已就绪"，而不是靠"连上了但没有任何帧"去猜。
+	UserChannelReady bool `protobuf:"varint,36,opt,name=user_channel_ready,json=userChannelReady,proto3" json:"user_channel_ready,omitempty"`
+	// 好友域事件（friend-request / friend-accepted / friend-removed / blocked）
+	// 的载荷。四个事件共用一个结构：它们的形状就是"一段关系 + 对方是谁"。
+	Friend *FriendEvent `protobuf:"bytes,37,opt,name=friend,proto3" json:"friend,omitempty"`
+	// 在线态（presence）。本期只在好友范围内广播（见 wsuser.go 的说明）：
+	// 全站在线态需要一个"谁能看见谁"的授权模型，那是另一件事。
+	Presence      *PresenceState `protobuf:"bytes,38,opt,name=presence,proto3" json:"presence,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1079,6 +1102,249 @@ func (x *Envelope) GetHostToken() string {
 	return ""
 }
 
+func (x *Envelope) GetDm() *DirectMessage {
+	if x != nil {
+		return x.Dm
+	}
+	return nil
+}
+
+func (x *Envelope) GetUserChannelReady() bool {
+	if x != nil {
+		return x.UserChannelReady
+	}
+	return false
+}
+
+func (x *Envelope) GetFriend() *FriendEvent {
+	if x != nil {
+		return x.Friend
+	}
+	return nil
+}
+
+func (x *Envelope) GetPresence() *PresenceState {
+	if x != nil {
+		return x.Presence
+	}
+	return nil
+}
+
+// DirectMessage 是一条私聊的线上形态（/ws/user 的 dm 与 dm-read 共用）。
+type DirectMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	SenderId      int64                  `protobuf:"varint,2,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
+	RecipientId   int64                  `protobuf:"varint,3,opt,name=recipient_id,json=recipientId,proto3" json:"recipient_id,omitempty"`
+	SenderName    string                 `protobuf:"bytes,4,opt,name=sender_name,json=senderName,proto3" json:"sender_name,omitempty"`
+	Body          string                 `protobuf:"bytes,5,opt,name=body,proto3" json:"body,omitempty"`                            // dm-read 事件里为空（已读回执不带正文）
+	CreatedAt     string                 `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // RFC3339
+	ReadAt        string                 `protobuf:"bytes,7,opt,name=read_at,json=readAt,proto3" json:"read_at,omitempty"`          // RFC3339；空 = 未读
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DirectMessage) Reset() {
+	*x = DirectMessage{}
+	mi := &file_projection_room_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DirectMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DirectMessage) ProtoMessage() {}
+
+func (x *DirectMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_projection_room_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DirectMessage.ProtoReflect.Descriptor instead.
+func (*DirectMessage) Descriptor() ([]byte, []int) {
+	return file_projection_room_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *DirectMessage) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *DirectMessage) GetSenderId() int64 {
+	if x != nil {
+		return x.SenderId
+	}
+	return 0
+}
+
+func (x *DirectMessage) GetRecipientId() int64 {
+	if x != nil {
+		return x.RecipientId
+	}
+	return 0
+}
+
+func (x *DirectMessage) GetSenderName() string {
+	if x != nil {
+		return x.SenderName
+	}
+	return ""
+}
+
+func (x *DirectMessage) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+func (x *DirectMessage) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+func (x *DirectMessage) GetReadAt() string {
+	if x != nil {
+		return x.ReadAt
+	}
+	return ""
+}
+
+// FriendEvent 是好友域的一次变化（/ws/user 的 friend-* 与 blocked）。
+type FriendEvent struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RelationshipId int64                  `protobuf:"varint,1,opt,name=relationship_id,json=relationshipId,proto3" json:"relationship_id,omitempty"`
+	UserId         int64                  `protobuf:"varint,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"` // "对方"是谁（相对收件人）
+	DisplayName    string                 `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Status         string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"` // pending | accepted | blocked
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *FriendEvent) Reset() {
+	*x = FriendEvent{}
+	mi := &file_projection_room_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FriendEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FriendEvent) ProtoMessage() {}
+
+func (x *FriendEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_projection_room_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FriendEvent.ProtoReflect.Descriptor instead.
+func (*FriendEvent) Descriptor() ([]byte, []int) {
+	return file_projection_room_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *FriendEvent) GetRelationshipId() int64 {
+	if x != nil {
+		return x.RelationshipId
+	}
+	return 0
+}
+
+func (x *FriendEvent) GetUserId() int64 {
+	if x != nil {
+		return x.UserId
+	}
+	return 0
+}
+
+func (x *FriendEvent) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *FriendEvent) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+// PresenceState 是一个用户的在线态。
+type PresenceState struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        int64                  `protobuf:"varint,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Online        bool                   `protobuf:"varint,2,opt,name=online,proto3" json:"online,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PresenceState) Reset() {
+	*x = PresenceState{}
+	mi := &file_projection_room_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PresenceState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PresenceState) ProtoMessage() {}
+
+func (x *PresenceState) ProtoReflect() protoreflect.Message {
+	mi := &file_projection_room_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PresenceState.ProtoReflect.Descriptor instead.
+func (*PresenceState) Descriptor() ([]byte, []int) {
+	return file_projection_room_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PresenceState) GetUserId() int64 {
+	if x != nil {
+		return x.UserId
+	}
+	return 0
+}
+
+func (x *PresenceState) GetOnline() bool {
+	if x != nil {
+		return x.Online
+	}
+	return false
+}
+
 // PeerControl 是 DataChannel 上的控制消息。
 // 分片数据本身不走这里：它在控制消息之后以原始二进制帧发送。
 type PeerControl struct {
@@ -1109,7 +1375,7 @@ type PeerControl struct {
 
 func (x *PeerControl) Reset() {
 	*x = PeerControl{}
-	mi := &file_projection_room_proto_msgTypes[9]
+	mi := &file_projection_room_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1121,7 +1387,7 @@ func (x *PeerControl) String() string {
 func (*PeerControl) ProtoMessage() {}
 
 func (x *PeerControl) ProtoReflect() protoreflect.Message {
-	mi := &file_projection_room_proto_msgTypes[9]
+	mi := &file_projection_room_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1134,7 +1400,7 @@ func (x *PeerControl) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerControl.ProtoReflect.Descriptor instead.
 func (*PeerControl) Descriptor() ([]byte, []int) {
-	return file_projection_room_proto_rawDescGZIP(), []int{9}
+	return file_projection_room_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PeerControl) GetT() string {
@@ -1322,7 +1588,8 @@ const file_projection_room_proto_rawDesc = "" +
 	"\x11DistributorChange\x12\x17\n" +
 	"\afrom_id\x18\x01 \x01(\tR\x06fromId\x12\x13\n" +
 	"\x05to_id\x18\x02 \x01(\tR\x04toId\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xfe\b\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xd7\n" +
+	"\n" +
 	"\bEnvelope\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x17\n" +
 	"\aroom_id\x18\x02 \x01(\tR\x06roomId\x12\x1b\n" +
@@ -1361,7 +1628,29 @@ const file_projection_room_proto_rawDesc = "" +
 	"\amessage\x18  \x01(\tR\amessage\x12\x16\n" +
 	"\x06reason\x18! \x01(\tR\x06reason\x12\x1d\n" +
 	"\n" +
-	"host_token\x18\" \x01(\tR\thostToken\"\x8f\x03\n" +
+	"host_token\x18\" \x01(\tR\thostToken\x121\n" +
+	"\x02dm\x18# \x01(\v2!.projection_room.v1.DirectMessageR\x02dm\x12,\n" +
+	"\x12user_channel_ready\x18$ \x01(\bR\x10userChannelReady\x127\n" +
+	"\x06friend\x18% \x01(\v2\x1f.projection_room.v1.FriendEventR\x06friend\x12=\n" +
+	"\bpresence\x18& \x01(\v2!.projection_room.v1.PresenceStateR\bpresence\"\xcc\x01\n" +
+	"\rDirectMessage\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1b\n" +
+	"\tsender_id\x18\x02 \x01(\x03R\bsenderId\x12!\n" +
+	"\frecipient_id\x18\x03 \x01(\x03R\vrecipientId\x12\x1f\n" +
+	"\vsender_name\x18\x04 \x01(\tR\n" +
+	"senderName\x12\x12\n" +
+	"\x04body\x18\x05 \x01(\tR\x04body\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x06 \x01(\tR\tcreatedAt\x12\x17\n" +
+	"\aread_at\x18\a \x01(\tR\x06readAt\"\x8a\x01\n" +
+	"\vFriendEvent\x12'\n" +
+	"\x0frelationship_id\x18\x01 \x01(\x03R\x0erelationshipId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\x03R\x06userId\x12!\n" +
+	"\fdisplay_name\x18\x03 \x01(\tR\vdisplayName\x12\x16\n" +
+	"\x06status\x18\x04 \x01(\tR\x06status\"@\n" +
+	"\rPresenceState\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\x03R\x06userId\x12\x16\n" +
+	"\x06online\x18\x02 \x01(\bR\x06online\"\x8f\x03\n" +
 	"\vPeerControl\x12\f\n" +
 	"\x01t\x18\x01 \x01(\tR\x01t\x12\x10\n" +
 	"\x03rid\x18\x02 \x01(\tR\x03rid\x12\x10\n" +
@@ -1393,7 +1682,7 @@ func file_projection_room_proto_rawDescGZIP() []byte {
 	return file_projection_room_proto_rawDescData
 }
 
-var file_projection_room_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_projection_room_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_projection_room_proto_goTypes = []any{
 	(*MediaSegment)(nil),       // 0: projection_room.v1.MediaSegment
 	(*MediaIndex)(nil),         // 1: projection_room.v1.MediaIndex
@@ -1404,23 +1693,29 @@ var file_projection_room_proto_goTypes = []any{
 	(*TopologyAssignment)(nil), // 6: projection_room.v1.TopologyAssignment
 	(*DistributorChange)(nil),  // 7: projection_room.v1.DistributorChange
 	(*Envelope)(nil),           // 8: projection_room.v1.Envelope
-	(*PeerControl)(nil),        // 9: projection_room.v1.PeerControl
+	(*DirectMessage)(nil),      // 9: projection_room.v1.DirectMessage
+	(*FriendEvent)(nil),        // 10: projection_room.v1.FriendEvent
+	(*PresenceState)(nil),      // 11: projection_room.v1.PresenceState
+	(*PeerControl)(nil),        // 12: projection_room.v1.PeerControl
 }
 var file_projection_room_proto_depIdxs = []int32{
-	0, // 0: projection_room.v1.MediaIndex.segments:type_name -> projection_room.v1.MediaSegment
-	2, // 1: projection_room.v1.Envelope.playback:type_name -> projection_room.v1.PlaybackState
-	3, // 2: projection_room.v1.Envelope.metrics:type_name -> projection_room.v1.Metrics
-	4, // 3: projection_room.v1.Envelope.member:type_name -> projection_room.v1.MemberInfo
-	4, // 4: projection_room.v1.Envelope.members:type_name -> projection_room.v1.MemberInfo
-	1, // 5: projection_room.v1.Envelope.media_index:type_name -> projection_room.v1.MediaIndex
-	5, // 6: projection_room.v1.Envelope.capacity:type_name -> projection_room.v1.Capacity
-	6, // 7: projection_room.v1.Envelope.topology:type_name -> projection_room.v1.TopologyAssignment
-	7, // 8: projection_room.v1.Envelope.distributor:type_name -> projection_room.v1.DistributorChange
-	9, // [9:9] is the sub-list for method output_type
-	9, // [9:9] is the sub-list for method input_type
-	9, // [9:9] is the sub-list for extension type_name
-	9, // [9:9] is the sub-list for extension extendee
-	0, // [0:9] is the sub-list for field type_name
+	0,  // 0: projection_room.v1.MediaIndex.segments:type_name -> projection_room.v1.MediaSegment
+	2,  // 1: projection_room.v1.Envelope.playback:type_name -> projection_room.v1.PlaybackState
+	3,  // 2: projection_room.v1.Envelope.metrics:type_name -> projection_room.v1.Metrics
+	4,  // 3: projection_room.v1.Envelope.member:type_name -> projection_room.v1.MemberInfo
+	4,  // 4: projection_room.v1.Envelope.members:type_name -> projection_room.v1.MemberInfo
+	1,  // 5: projection_room.v1.Envelope.media_index:type_name -> projection_room.v1.MediaIndex
+	5,  // 6: projection_room.v1.Envelope.capacity:type_name -> projection_room.v1.Capacity
+	6,  // 7: projection_room.v1.Envelope.topology:type_name -> projection_room.v1.TopologyAssignment
+	7,  // 8: projection_room.v1.Envelope.distributor:type_name -> projection_room.v1.DistributorChange
+	9,  // 9: projection_room.v1.Envelope.dm:type_name -> projection_room.v1.DirectMessage
+	10, // 10: projection_room.v1.Envelope.friend:type_name -> projection_room.v1.FriendEvent
+	11, // 11: projection_room.v1.Envelope.presence:type_name -> projection_room.v1.PresenceState
+	12, // [12:12] is the sub-list for method output_type
+	12, // [12:12] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_projection_room_proto_init() }
@@ -1434,7 +1729,7 @@ func file_projection_room_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_projection_room_proto_rawDesc), len(file_projection_room_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

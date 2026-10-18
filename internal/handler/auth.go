@@ -103,6 +103,24 @@ type AuthDeps struct {
 	// 一个**只回答昵称**的更窄的出口（实现见 service.ProfileNameLookup）。
 	// 它不放在 AdminDeps 里，是因为它服务的端点是免登录的公开列表，不是管理端。
 	ProfileNames PublicRoomProfileStore
+
+	// —— 用户级实时通道（/ws/user）的依赖。wayfinder #31。
+	//
+	// 同样挂在 AuthDeps 而不是新增 NewRouter 参数位（同一条硬约束）：
+	// 这三样东西的来源（账号/关系/消息）与 Store 完全一致，它们只是
+	// "把已发生的事实推给在线连接"这一个能力的三个面。
+	//
+	// 三个字段各自是一个**按域切开**的窄接口（MessagePusher / FriendPusher /
+	// PresenceBroadcaster，分别定义在 messages.go / friendships.go / wsuser.go）：
+	// 发消息的路径不该有"推送好友事件"的能力，反之亦然。
+	// 生产装配里三者指向同一个 *service.RealtimePusher；测试可各自注入。
+	//
+	// 全部可为 nil：nil 表示"不做实时投递"，消息与关系照常落库
+	//（§7.2 的"否则只落库"分支），不是错误状态。
+	UserHub       *service.UserHub
+	MessagePusher MessagePusher
+	FriendPusher  FriendPusher
+	Presence      PresenceBroadcaster
 }
 
 // SessionConfig 是会话在 HTTP 层的参数。

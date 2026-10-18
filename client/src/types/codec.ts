@@ -273,6 +273,30 @@ export function encodeEnvelope(env: Envelope): Bytes {
     code: env.code ?? '',
     message: env.message ?? '',
     reason: env.reason ?? '',
+    // —— 用户级实时通道（/ws/user）的载荷。wayfinder #31。
+    userChannelReady: env.userChannelReady ?? false,
+    dm: env.dm
+      ? {
+          id: big(env.dm.id),
+          senderId: big(env.dm.senderId),
+          recipientId: big(env.dm.recipientId),
+          senderName: env.dm.senderName ?? '',
+          body: env.dm.body ?? '',
+          createdAt: env.dm.createdAt ?? '',
+          readAt: env.dm.readAt ?? '',
+        }
+      : undefined,
+    friend: env.friend
+      ? {
+          relationshipId: big(env.friend.relationshipId),
+          userId: big(env.friend.userId),
+          displayName: env.friend.displayName ?? '',
+          status: env.friend.status ?? '',
+        }
+      : undefined,
+    presence: env.presence
+      ? { userId: big(env.presence.userId), online: env.presence.online }
+      : undefined,
   })
   return toBinary(EnvelopeSchema, msg)
 }
@@ -313,6 +337,33 @@ export function decodeEnvelope(bytes: Uint8Array): Envelope {
     code: pb.code || undefined,
     message: pb.message || undefined,
     reason: pb.reason || undefined,
+    // —— 用户级实时通道（/ws/user）的载荷。wayfinder #31。
+    //
+    // 三个子结构都是"有才给"：房间信令里它们恒为 undefined，
+    // 而业务代码用 `env.dm` 的存在性判断"这是不是一条私聊帧"（配合 type）。
+    userChannelReady: pb.userChannelReady || undefined,
+    dm: pb.dm
+      ? {
+          id: num(pb.dm.id),
+          senderId: num(pb.dm.senderId),
+          recipientId: num(pb.dm.recipientId),
+          senderName: pb.dm.senderName || undefined,
+          body: pb.dm.body || undefined,
+          createdAt: pb.dm.createdAt || undefined,
+          readAt: pb.dm.readAt || undefined,
+        }
+      : undefined,
+    friend: pb.friend
+      ? {
+          relationshipId: num(pb.friend.relationshipId),
+          userId: num(pb.friend.userId),
+          displayName: pb.friend.displayName || undefined,
+          status: pb.friend.status,
+        }
+      : undefined,
+    presence: pb.presence
+      ? { userId: num(pb.presence.userId), online: pb.presence.online }
+      : undefined,
     // 刻意**不**解析入站的 host_token：它是主播复位令牌（上行专用密钥），
     // 客户端永远不需要在信封里"收到"它。落进内存对象只会多一个被日志/诊断快照带出去的出口，
     // 所以下行这里保持 undefined —— 这是取舍，不是漏写。

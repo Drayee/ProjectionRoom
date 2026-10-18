@@ -262,13 +262,17 @@ func NewRouter(
 	registerPostRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
 
 	// 好友域（wayfinder #29）：全部登录，三种状态语义在 store 层裁决。
-	registerFriendshipRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
+	// pusher 是 /ws/user 的实时投递出口（#31）：nil 时关系变化只落库，不推送。
+	registerFriendshipRoutes(api, accountDeps.Store, cfg, accountDeps.Service, accountDeps.FriendPusher)
 
 	// 私聊域（wayfinder #31）：全部登录，拉黑在 store 的事务里强制。
 	//
 	// 它排在好友域之后是刻意的：私聊的准入条件（关系 + 非拉黑）由好友域的那张表
 	// 回答，读代码时这两段应当相邻 —— 而"为什么发不出去"的答案就在上一段里。
-	registerMessageRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
+	registerMessageRoutes(api, accountDeps.Store, cfg, accountDeps.Service, accountDeps.MessagePusher)
+
+	// 用户级实时通道（wayfinder #31）：/ws/user。票据必填，不属于任何房间。
+	registerUserWSRoute(r, cfg, accountDeps.UserHub, accountDeps, accountDeps.Presence)
 
 	// 客户端切片器二进制的只读清单：只回 JSON（平台/大小/sha256），
 	// 二进制本身由静态托管 /downloads/<file> 送出，所以这里先于 registerStatic 注册。

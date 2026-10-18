@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -62,7 +63,7 @@ const CodeMessageNotFriends = "MESSAGE_NOT_FRIENDS"
 
 // registerMessageRoutes 注册私聊路由。装配约定同 posts/friendships：
 // 账号能力关闭时不注册；Store 缺失时注册一组 503。
-func registerMessageRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Config, auth AccountService) {
+func registerMessageRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Config, auth AccountService, pusher MessagePusher) {
 	if api == nil {
 		return
 	}
@@ -83,7 +84,7 @@ func registerMessageRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Co
 		return
 	}
 
-	h := &messageHandler{store: st}
+	h := &messageHandler{store: st, pusher: pusher}
 
 	readLimiter := newKeyedLimiter(cfg.IPC.RoomMetaPerMinute, cfg.IPC.RoomMetaBurst, "私聊历史")
 	writeLimiter := newKeyedLimiter(cfg.IPC.LoginPerMinute, cfg.IPC.LoginBurst, "发送私聊")
@@ -100,6 +101,23 @@ func registerMessageRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Co
 
 type messageHandler struct {
 	store *store.Store
+	// pusher 是实时投递出口（wayfinder #31 的 /ws/user）。
+	//
+	// nil = 不做实时投递（装配缺失）：消息照常落库，对方下次拉历史/未读仍然看得到。
+	// 这正是 §7.2 的"否则只落库"那条分支 —— 所以 nil 不是错误状态。
+	pusher MessagePusher
+}
+
+// MessagePusher 是"把一条私聊/已读回执推给对方"的窄出口（*service.UserHub 的组合实现）。
+//
+// 为什么是接口：handler 不该知道 UserHub 与 store 如何组合，也不该为了"对方在不在线"
+// 去 import 传输层。测试可以注入一个捕获型假实现来断言"推送了什么"，
+// 而真实现只在装配层出现一次。
+type MessagePusher interface {
+	// PushDM 把一条新私聊推给收件人；返回是否至少有一条连接收到。
+	PushDM(ctx context.Context, msg *store.Message) bool
+	// PushDMRead 把"读到哪一条"推给发送方。
+	PushDMRead(ctx context.Context, readerID, senderID, msgID int64, readAt time.Time) bool
 }
 
 // messageView 是单条消息的对外形状（camelCase，与前端 types 一致）。
@@ -258,6 +276,21 @@ func (h *messageHandler) send(c *gin.Context) {
 		h.writeStoreError(c, err)
 		return
 	}
+
+	// 实时投递（§7.2「对方在线直投，否则只落库」）。
+	//
+	// **在响应之前**推：客户端拿到 201 时，对方若在线就应该已经收到了。
+	// 反过来（先回 201 再异步推）会留一个"我以为发出去了、对方却还没收到"的
+	// 窗口，而那个窗口在真机上表现为"消息延迟一两秒才出现"。
+	// 推失败**不影响**响应：消息已经落库，对方下次拉历史仍然看得到 ——
+	// 这正是"离线只落库"那条分支，不是错误。
+	//
+	// 用 context.WithoutCancel：请求 ctx 在响应写完后就被取消，而推送要读完
+	// 连接表并逐条入队；用请求 ctx 会让"刚发完就断开"的请求推不出去。
+	if h.pusher != nil {
+		h.pusher.PushDM(context.WithoutCancel(c.Request.Context()), msg)
+	}
+
 	c.JSON(http.StatusCreated, toMessageView(msg))
 }
 
@@ -296,6 +329,16 @@ func (h *messageHandler) markRead(c *gin.Context) {
 		h.writeStoreError(c, err)
 		return
 	}
+
+	// 已读回执推给**发送方**（actor 是读的人，peer 是发的人）。
+	//
+	// 只在真的标了行时才推：`updated == 0` 意味着这条上报是重复的（幂等 no-op），
+	// 再推一次回执只会让对方的界面上"已读"闪一下又不变。
+	// 与 PushDM 同一条理由用 WithoutCancel。
+	if h.pusher != nil && updated > 0 {
+		h.pusher.PushDMRead(context.WithoutCancel(c.Request.Context()), actor.ID, req.PeerID, req.UpTo, time.Now())
+	}
+
 	c.JSON(http.StatusOK, gin.H{"updated": updated})
 }
 

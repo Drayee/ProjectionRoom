@@ -158,6 +158,58 @@ message Envelope {
   // 字段 34 是纯加法（proto3 未知字段可忽略），旧客户端不带该字段 → 行为不变
   //（首次进房不需要令牌；宽限期内则无法接回，由客户端另一条线补上）。
   string host_token = 34;
+
+  // —— 用户级实时通道（/ws/user）的字段。wayfinder #31 / ACCOUNTS §7.2。
+  //
+  // 为什么复用同一个 Envelope 而不是新开一个 message：`/ws` 与 `/ws/user` 是
+  // **同一个信封模型的两条通道**，而"客户端只写一套编解码"是既有约定
+  //（internal/model/pb_convert.go 是唯一转换点）。新开 message 会让客户端
+  // 有两套 fromBinary，而它们迟早会漂移。
+  //
+  // 字段号从 35 起：34 之前是房间信令的面，已冻结；新增全是纯加法
+  //（proto3 未知字段可忽略，旧客户端收到这些字段只会忽略）。
+  //
+  // dm / dm-read 的载荷：
+  //   - 服务端下行 dm：dm 带完整消息（id/sender/body/created_at）；
+  //   - 服务端下行 dm-read：只带"读到哪一条"（id + read_at），不带正文。
+  DirectMessage dm = 35;
+
+  // 用户通道的连接确认（服务端在 ticket 校验通过、连接注册完成后立刻下发）。
+  // 客户端据此知道"实时通道已就绪"，而不是靠"连上了但没有任何帧"去猜。
+  bool user_channel_ready = 36;
+
+  // 好友域事件（friend-request / friend-accepted / friend-removed / blocked）
+  // 的载荷。四个事件共用一个结构：它们的形状就是"一段关系 + 对方是谁"。
+  FriendEvent friend = 37;
+
+  // 在线态（presence）。本期只在好友范围内广播（见 wsuser.go 的说明）：
+  // 全站在线态需要一个"谁能看见谁"的授权模型，那是另一件事。
+  PresenceState presence = 38;
+}
+
+// DirectMessage 是一条私聊的线上形态（/ws/user 的 dm 与 dm-read 共用）。
+message DirectMessage {
+  int64 id = 1;
+  int64 sender_id = 2;
+  int64 recipient_id = 3;
+  string sender_name = 4;
+  string body = 5;         // dm-read 事件里为空（已读回执不带正文）
+  string created_at = 6;   // RFC3339
+  string read_at = 7;      // RFC3339；空 = 未读
+}
+
+// FriendEvent 是好友域的一次变化（/ws/user 的 friend-* 与 blocked）。
+message FriendEvent {
+  int64 relationship_id = 1;
+  int64 user_id = 2;        // "对方"是谁（相对收件人）
+  string display_name = 3;
+  string status = 4;        // pending | accepted | blocked
+}
+
+// PresenceState 是一个用户的在线态。
+message PresenceState {
+  int64 user_id = 1;
+  bool online = 2;
 }
 
 // PeerControl 是 DataChannel 上的控制消息。

@@ -71,7 +71,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
-	authDeps, err := bootstrap.NewEngineDeps(cfg, dbResources, accountService, ticketStore)
+	userHub, cleanup5, err := service.NewUserHub(cfg)
 	if err != nil {
 		cleanup4()
 		cleanup3()
@@ -79,8 +79,18 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
-	logRingResources, cleanup5, err := bootstrap.NewLogRingResources(cfg)
+	authDeps, err := bootstrap.NewEngineDeps(cfg, dbResources, accountService, ticketStore, userHub)
 	if err != nil {
+		cleanup5()
+		cleanup4()
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	logRingResources, cleanup6, err := bootstrap.NewLogRingResources(cfg)
+	if err != nil {
+		cleanup5()
 		cleanup4()
 		cleanup3()
 		cleanup2()
@@ -89,6 +99,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	}
 	adminDeps, err := bootstrap.NewAdminDeps(cfg, dbResources, accountService, hub, manager, logRingResources)
 	if err != nil {
+		cleanup6()
 		cleanup5()
 		cleanup4()
 		cleanup3()
@@ -98,6 +109,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	}
 	engine, err := bootstrap.NewEngine(cfg, hub, manager, queue, authDeps, adminDeps)
 	if err != nil {
+		cleanup6()
 		cleanup5()
 		cleanup4()
 		cleanup3()
@@ -107,6 +119,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 	}
 	server, err := service.NewServer(cfg, engine)
 	if err != nil {
+		cleanup6()
 		cleanup5()
 		cleanup4()
 		cleanup3()
@@ -115,6 +128,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		return nil, nil, err
 	}
 	return server, func() {
+		cleanup6()
 		cleanup5()
 		cleanup4()
 		cleanup3()

@@ -146,6 +146,50 @@ export interface Envelope {
   code?: string
   message?: string
   reason?: string
+
+  // —— 用户级实时通道（/ws/user）的载荷。wayfinder #31。
+  //
+  // 四个字段只在 `/ws/user` 上有值；房间信令里它们恒为 undefined。
+  dm?: DirectMessage
+  /** 通道就绪确认（服务端在连接注册完成后立刻下发，type = 'user-ready'）。 */
+  userChannelReady?: boolean
+  friend?: FriendEvent
+  presence?: PresenceState
+}
+
+/**
+ * 一条私聊（`dm` 与 `dm-read` 共用）。
+ *
+ * `dm-read` 里 `body` 为空、`readAt` 有值 —— 客户端按 **type** 决定渲染什么，
+ * 而不是按字段有没有值去猜（见 proto 里 DirectMessage 的注释）。
+ */
+export interface DirectMessage {
+  id: number
+  senderId: number
+  recipientId: number
+  senderName?: string
+  /** dm-read 事件里为空。 */
+  body?: string
+  /** RFC3339；空 = 未读。 */
+  createdAt?: string
+  /** RFC3339；空 = 未读。 */
+  readAt?: string
+}
+
+/** 好友域的一次变化（friend-request / friend-accepted / friend-removed / blocked）。 */
+export interface FriendEvent {
+  relationshipId: number
+  /** "对方"是谁（相对收件人）。 */
+  userId: number
+  displayName?: string
+  /** pending | accepted | blocked | removed */
+  status: string
+}
+
+/** 好友上线/下线。 */
+export interface PresenceState {
+  userId: number
+  online: boolean
 }
 
 /** WebRTC 信令载荷：服务端只做原样转发，不解析（SPEC §5.1）。 */

@@ -33,6 +33,10 @@ func NewEngineDeps(
 	res *DBResources,
 	svc *service.AccountService,
 	tickets *auth.TicketStore,
+	// hub 是用户级实时通道（/ws/user）的连接注册表（wayfinder #31）。
+	// 作为参数而不是在这里 new：它有自己的 cleanup（关闭全部连接），
+	// 必须由 wire 的清理序列管住（见本文件头部关于 cleanup 反序的说明）。
+	hub *service.UserHub,
 ) (handler.AuthDeps, error) {
 	if cfg == nil {
 		return handler.AuthDeps{}, errConfigMissing
@@ -60,6 +64,19 @@ func NewEngineDeps(
 	// 建房时的 rooms_meta 异步投递（T8）。返回 nil 接口表示"没有写队列"，
 	// 建房路径会据此只记一条日志（元数据缺失不影响开播）。
 	deps.RoomMeta = handler.NewRoomMetaSink(res.Store, res.Writer)
+	// 用户级实时通道（wayfinder #31）：UserHub 由 wire 创建并作为参数传进来
+	//（它有自己的生命周期与 cleanup，不能在这里凭空 new 一个 —— 那样
+	// cmd/wire_gen.go 的清理序列就管不到它，进程退出时连接不会被关）。
+	// pusher 三件套指向同一个 RealtimePusher 实例：它们只是同一个能力的三个面
+	//（见 AuthDeps 里那段说明）。
+	if hub != nil {
+		deps.UserHub = hub
+		if pusher := service.NewRealtimePusher(hub, res.Store); pusher != nil {
+			deps.MessagePusher = pusher
+			deps.FriendPusher = pusher
+			deps.Presence = pusher
+		}
+	}
 	// 二次（T2）：公开房列表取房主昵称的**窄出口**（只返回一个 string）。
 	// nil 表示"查不了昵称"，列表会把 ownerName 显示成空串 —— 与"账号能力关闭"
 	// 时的降级路径是同一个方向，因此不需要在这里判错。

@@ -13,6 +13,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -28,7 +29,7 @@ import (
 
 // registerFriendshipRoutes 注册好友路由。装配约定同 posts/anime：
 // 账号能力关闭时不注册；Store 缺失时注册一组 503。
-func registerFriendshipRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Config, auth AccountService) {
+func registerFriendshipRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Config, auth AccountService, pusher FriendPusher) {
 	if api == nil {
 		return
 	}
@@ -52,7 +53,7 @@ func registerFriendshipRoutes(api *gin.RouterGroup, st *store.Store, cfg *config
 		return
 	}
 
-	h := &friendshipHandler{store: st}
+	h := &friendshipHandler{store: st, pusher: pusher}
 
 	// 全部端点都要登录（非登录一律 401，验收第 2 条）。
 	// 限速：读写都用 RoomMeta 桶（60/min）——好友操作是低频互动，不需要更严的桶。
@@ -72,6 +73,24 @@ func registerFriendshipRoutes(api *gin.RouterGroup, st *store.Store, cfg *config
 
 type friendshipHandler struct {
 	store *store.Store
+	// pusher 是实时投递出口（wayfinder #31 的 /ws/user）。
+	//
+	// nil = 不做实时投递：关系变化照常落库，对方下次打开好友页/刷新列表仍然看得到。
+	// 与 messages.go 的同名字段是同一条取舍（实时是体验增量，不是正确性前提）。
+	pusher FriendPusher
+}
+
+// FriendPusher 是"把好友域事件推给对方"的窄出口。
+//
+// 四个事件各自一个方法而不是一个带 kind 的方法：它们的**收件人不同**
+// （请求推给被请求方、接受推给请求方、删除推给另一方、拉黑推给被拉黑方），
+// 而"推给谁"正是这里最容易搞错的地方 —— 让方法名把收件人写死，
+// 调用点就没有机会传错方向。
+type FriendPusher interface {
+	PushFriendRequest(ctx context.Context, actorID, targetID int64, relationshipID int64, actorName string) bool
+	PushFriendAccepted(ctx context.Context, actorID, requesterID int64, relationshipID int64, actorName string) bool
+	PushFriendRemoved(ctx context.Context, actorID, targetID int64) bool
+	PushBlocked(ctx context.Context, actorID, targetID int64) bool
 }
 
 // friendshipView 是响应的对外形状：一段关系的"对方"是谁。
@@ -171,6 +190,12 @@ func (h *friendshipHandler) createRequest(c *gin.Context) {
 		h.writeStoreError(c, err)
 		return
 	}
+	// 推给**被请求方**（req.UserID）：他要看到"有人想加你"。
+	// 用 actor 的昵称（请求方），因为收件人界面上要显示"谁加了我"。
+	if h.pusher != nil {
+		h.pusher.PushFriendRequest(context.WithoutCancel(c.Request.Context()),
+			actor.ID, req.UserID, row.ID, actor.DisplayName)
+	}
 	c.JSON(http.StatusCreated, friendshipView{
 		RelationshipID: row.ID, UserID: row.AddresseeID, Status: row.Status,
 	})
@@ -202,10 +227,20 @@ func (h *friendshipHandler) handleRequestOutcome(c *gin.Context, op string) {
 			h.writeStoreError(c, err)
 			return
 		}
+		// 推给**请求方**（row.RequesterID）：他要看到"对方同意了"。
+		// 注意 actor 是接受的人（addressee），与收件人方向相反 —— 这正是
+		// 把收件人写进方法名（PushFriendAccepted）的理由。
+		if h.pusher != nil {
+			h.pusher.PushFriendAccepted(context.WithoutCancel(c.Request.Context()),
+				actor.ID, row.RequesterID, row.ID, actor.DisplayName)
+		}
 		c.JSON(http.StatusOK, friendshipView{
 			RelationshipID: row.ID, UserID: row.RequesterID, Status: row.Status,
 		})
 	case "reject":
+		// reject **不推送**：请求被拒方在界面上不需要一条"对方拒绝了你"的通知
+		// （那是骚扰面：拒绝方本来就想安静地结束这件事）。请求方下次拉列表
+		// 会发现那条 pending 消失了 —— 这是刻意的静默。
 		if err := h.store.RejectFriendshipRequest(c.Request.Context(), id, actor.ID); err != nil {
 			h.writeStoreError(c, err)
 			return
@@ -224,9 +259,17 @@ func (h *friendshipHandler) remove(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// 删除前先记下"对方是谁"：RemoveFriendship 之后那行就没了，
+	// 而推送需要一个收件人 id（读一次 store 比让 RemoveFriendship 多返回一个值更省改动）。
+	peerID := h.peerIDOf(c, id, actor.ID)
+
 	if err := h.store.RemoveFriendship(c.Request.Context(), id, actor.ID); err != nil {
 		h.writeStoreError(c, err)
 		return
+	}
+	// 推给**另一方**（不是 actor 自己）。
+	if h.pusher != nil && peerID > 0 {
+		h.pusher.PushFriendRemoved(context.WithoutCancel(c.Request.Context()), actor.ID, peerID)
 	}
 	c.Status(http.StatusNoContent)
 }
@@ -250,6 +293,12 @@ func (h *friendshipHandler) block(c *gin.Context) {
 	if err != nil {
 		h.writeStoreError(c, err)
 		return
+	}
+	// 推给**被拉黑方**（req.UserID）：他要立刻知道"发不出去了"，
+	// 否则界面上表现为"消息一直发，对方却收不到"——那是比被拉黑更糟的体验。
+	// 拉黑的方向语义是单向的（§7.1），所以这条通知只发给被拉黑的一方。
+	if h.pusher != nil {
+		h.pusher.PushBlocked(context.WithoutCancel(c.Request.Context()), actor.ID, req.UserID)
 	}
 	// block 返回的"对方"是被拉黑方（addressee）。displayName 从 store 回带
 	//（BlockUser 里 JOIN 了 users，见 store/friendships.go）。
@@ -275,6 +324,30 @@ func (h *friendshipHandler) writeStoreError(c *gin.Context, err error) {
 	default:
 		friendInternal(c, "好友操作失败", err)
 	}
+}
+
+// peerIDOf 在删除关系**之前**查出"对方是谁"（推送需要收件人 id）。
+//
+// 查不到时返回 0，调用方据此跳过推送：删一条不存在的关系本来就会在
+// RemoveFriendship 里返回 404，推送跳过不影响那条路径的正确性。
+//
+// 为什么不让 RemoveFriendship 多返回一个 peerID：那会改一个已被 #29 的
+// 真库用例覆盖的签名，而这里只需要一个"尽力而为"的收件人 id ——
+// 推送失败/查不到都不是错误（实时是体验增量）。
+func (h *friendshipHandler) peerIDOf(c *gin.Context, relationshipID, actorID int64) int64 {
+	f, err := h.store.FriendshipByID(c.Request.Context(), relationshipID)
+	if err != nil || f == nil {
+		return 0
+	}
+	if f.RequesterID == actorID {
+		return f.AddresseeID
+	}
+	if f.AddresseeID == actorID {
+		return f.RequesterID
+	}
+	// 既不是请求方也不是被请求方：不推（这条关系不归 actor，
+	// RemoveFriendship 会自己返回 404）。
+	return 0
 }
 
 func relationshipIDParam(c *gin.Context, name string) (int64, bool) {

@@ -3,6 +3,9 @@ import { defineStore } from 'pinia'
 import * as api from '../api/auth'
 import { AuthApiError, toAuthError } from '../api/auth'
 import type { AuthSession, AuthUser, LoginInput, RegisterInput } from '../api/auth'
+// 用户级实时通道的 token 注入点（wayfinder #31）。只 import 这两个函数而不是整个
+// 通道模块：通道的生命周期由页面的组合式函数管，store 只负责"token 变了"这一个事实。
+import { setUserChannelToken } from '../api/userChannel'
 // 说明：router.ts → views/*.vue → stores/auth.ts 构成一个环。这里只在**函数体内**
 // 引用 `router`（懒到真正要跳转的时刻才解析绑定），模块初始化期不碰它 ——
 // 所以环不会在求值阶段被打开（ESM 的 live binding 在调用时已经全部就绪）。
@@ -155,6 +158,10 @@ export const useAuthStore = defineStore('auth', () => {
     writeAccessToken(session.accessToken)
     applyUser(session.user)
     status.value = 'authenticated'
+    // 把 token 交给用户通道（wayfinder #31）：它是取 WS 票据的唯一凭据。
+    // 在**唯一**的 token 写入点做这件事，而不是让各处调用方自己记得同步 ——
+    // 漏一处的症状是"登录了但实时通道一直重连"（因为票据取不到）。
+    setUserChannelToken(session.accessToken)
   }
 
   /**
@@ -174,6 +181,9 @@ export const useAuthStore = defineStore('auth', () => {
     profile.value = null
     writeStoredProfile(null)
     status.value = 'anonymous'
+    // 同时清掉用户通道的 token：否则它拿着已失效的凭据无限重连取票（每次 401），
+    // 在日志里表现为一串无意义的失败请求。
+    setUserChannelToken('')
   }
 
   /**

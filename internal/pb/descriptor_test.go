@@ -31,10 +31,22 @@ func TestEnvelopeDescriptorMatchesGoStruct(t *testing.T) {
 		29: {"have", protoreflect.BytesKind, protoreflect.Optional, "have"},
 		33: {"reason", protoreflect.StringKind, protoreflect.Optional, "reason"},
 		34: {"host_token", protoreflect.StringKind, protoreflect.Optional, "hostToken"},
+		// —— 用户级实时通道（/ws/user）的字段。wayfinder #31。
+		//
+		// 它们与上面那批同属 Envelope，但只在 `/ws/user` 上有值。
+		// 加进这份断言的理由与 host_token 相同：描述符与结构体不同步的症状是
+		// **字段静默丢失**（proto3 未知字段被忽略），而不是一次响亮的报错。
+		35: {"dm", protoreflect.MessageKind, protoreflect.Optional, "dm"},
+		36: {"user_channel_ready", protoreflect.BoolKind, protoreflect.Optional, "userChannelReady"},
+		37: {"friend", protoreflect.MessageKind, protoreflect.Optional, "friend"},
+		38: {"presence", protoreflect.MessageKind, protoreflect.Optional, "presence"},
 	}
 
-	if got := md.Fields().Len(); got != 34 {
-		t.Fatalf("Envelope 字段数应为 34，实际 %d（描述符与 .proto 不同步）", got)
+	// 字段数是**硬编码**的（不是从 map 长度推出来的）：这条断言的价值正是
+	// "有人加了字段但没更新这里"时立刻红。改成 len(want) 会让它永远自洽、
+	// 也就永远发现不了漂移。改 .proto 时必须同步改这个数字与上面的 map。
+	if got := md.Fields().Len(); got != 38 {
+		t.Fatalf("Envelope 字段数应为 38，实际 %d（描述符与 .proto 不同步）", got)
 	}
 
 	for num, exp := range want {

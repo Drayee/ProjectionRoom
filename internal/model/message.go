@@ -94,6 +94,36 @@ const (
 	ActionRate  = "rate"
 )
 
+// 用户级实时通道（/ws/user）的信封类型。wayfinder #31 / ACCOUNTS §7.2。
+//
+// 这批**只走 /ws/user**，不出现房间信令里：房间通道的收件人是"房间成员"，
+// 而这里的收件人是"某个账号"—— 两条通道的可见性规则不同，混用会让
+// "谁该收到"变成一个要看 type 才能回答的问题。
+const (
+	// TypeUserReady 是服务端在连接注册完成后下发的第一帧（通道就绪）。
+	//
+	// 为什么需要它：客户端连上之后若长时间收不到任何帧，无法区分
+	// "通道已就绪但没人找我" 与 "连接其实已经半死"。一帧显式确认把这两者分开。
+	TypeUserReady = "user-ready"
+
+	// TypeDM 是一条新私聊（服务端 → 收件人）。
+	TypeDM = "dm"
+	// TypeDMRead 是已读回执（服务端 → 发送方：对方读到了哪一条）。
+	TypeDMRead = "dm-read"
+
+	// TypeFriendRequest 有人向你发起好友请求（服务端 → 被请求方）。
+	TypeFriendRequest = "friend-request"
+	// TypeFriendAccepted 对方接受了你的请求（服务端 → 请求方）。
+	TypeFriendAccepted = "friend-accepted"
+	// TypeFriendRemoved 对方删除了好友关系（服务端 → 另一方）。
+	TypeFriendRemoved = "friend-removed"
+	// TypeBlocked 对方拉黑了你（服务端 → 被拉黑方）。
+	TypeBlocked = "blocked"
+
+	// TypePresence 好友上线/下线（服务端 → 好友）。
+	TypePresence = "presence"
+)
+
 // ModePending 表示尚未拿到实测上行、容量未定（SPEC §6.1、§6.2）。
 // M3 之后由 service 的分配算法给出 fanout / chain。
 const ModePending = "pending"
@@ -165,6 +195,55 @@ type Envelope struct {
 	Message    string    `json:"message,omitempty"`
 	// Reason 说明请求或通知的缘由（如 topology-request 的 "stalled"）。
 	Reason string `json:"reason,omitempty"`
+
+	// —— 用户级实时通道（/ws/user）的载荷。wayfinder #31。
+	//
+	// 四个字段都只在 /ws/user 上有意义；房间信令里它们恒为零值。
+	// 复用同一个 Envelope 而不是新开 message：`/ws` 与 `/ws/user` 是同一个信封
+	// 模型的两条通道，而 internal/model/pb_convert.go 是唯一转换点 ——
+	// 新开 message 会让客户端有两套 fromBinary，它们迟早漂移。
+	DM *DirectMessage `json:"dm,omitempty"`
+	// UserChannelReady 是"实时通道已就绪"的确认（服务端在注册完成后立刻下发）。
+	UserChannelReady bool `json:"userChannelReady,omitempty"`
+	// Friend 是好友域事件（friend-* 与 blocked）的载荷。
+	Friend *FriendEvent `json:"friend,omitempty"`
+	// Presence 是好友上线/下线的载荷。
+	Presence *PresenceState `json:"presence,omitempty"`
+}
+
+// DirectMessage 是一条私聊的线上形态（dm 与 dm-read 共用）。
+//
+// 为什么把"消息"和"已读回执"塞进同一个结构：已读回执要表达的事实是
+// "哪一条被读了"（id）+ "什么时候"（ReadAt），而正文/发送者对一个回执没有意义
+// —— 用同一个结构让客户端只有一条解析路径，代价是回执里 Body 为空
+// （前端按 Type 决定渲染什么，而不是按字段有无去猜）。
+type DirectMessage struct {
+	ID          int64  `json:"id"`
+	SenderID    int64  `json:"senderId"`
+	RecipientID int64  `json:"recipientId"`
+	SenderName  string `json:"senderName,omitempty"`
+	// Body 在 dm-read 事件里为空。
+	Body string `json:"body,omitempty"`
+	// CreatedAt / ReadAt 都是 RFC3339；ReadAt 为空表示未读。
+	CreatedAt string `json:"createdAt,omitempty"`
+	ReadAt    string `json:"readAt,omitempty"`
+}
+
+// FriendEvent 是好友域的一次变化。
+//
+// UserID 是"对方"（相对收件人）：收件人看到的事件永远是"谁对我做了什么"，
+// 而不是"谁和谁之间发生了什么"—— 后者会把第三方的 id 泄漏给无关的人。
+type FriendEvent struct {
+	RelationshipID int64  `json:"relationshipId"`
+	UserID         int64  `json:"userId"`
+	DisplayName    string `json:"displayName,omitempty"`
+	Status         string `json:"status"`
+}
+
+// PresenceState 是一个用户的在线态。
+type PresenceState struct {
+	UserID int64 `json:"userId"`
+	Online bool  `json:"online"`
 }
 
 // PlaybackState 是播放权威信息的服务端表示。

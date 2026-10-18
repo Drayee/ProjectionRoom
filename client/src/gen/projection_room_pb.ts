@@ -19,7 +19,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file projection_room.proto.
  */
 export const file_projection_room: GenFile = /*@__PURE__*/
-  fileDesc("ChVwcm9qZWN0aW9uX3Jvb20ucHJvdG8SEnByb2plY3Rpb25fcm9vbS52MSKQAQoMTWVkaWFTZWdtZW50Eg0KBWluZGV4GAEgASgFEgwKBGZpbGUYAiABKAkSDgoGb2Zmc2V0GAMgASgDEgwKBHNpemUYBCABKAMSEAoIZHVyYXRpb24YBSABKAESEQoJc3RhcnRfcHRzGAYgASgBEhAKCGtleWZyYW1lGAcgASgIEg4KBnNoYTI1NhgIIAEoCSLOAQoKTWVkaWFJbmRleBIPCgd2ZXJzaW9uGAEgASgFEhEKCWluaXRfZmlsZRgCIAEoCRIRCgltaW1lX3R5cGUYAyABKAkSFgoOdG90YWxfZHVyYXRpb24YBCABKAESEwoLc2VnbWVudF9zZWMYBSABKAESEwoLYml0cmF0ZV9icHMYBiABKAMSEwoLdG90YWxfYnl0ZXMYByABKAMSMgoIc2VnbWVudHMYCCADKAsyIC5wcm9qZWN0aW9uX3Jvb20udjEuTWVkaWFTZWdtZW50InwKDVBsYXliYWNrU3RhdGUSDgoGcGF1c2VkGAEgASgIEhQKDGN1cnJlbnRfdGltZRgCIAEoARIVCg1ob3N0X2Nsb2NrX21zGAMgASgDEgwKBHJhdGUYBCABKAESCwoDc2VxGAUgASgDEhMKC2Nsb2NrX2Vwb2NoGAYgASgJIsgBCgdNZXRyaWNzEg4KBnJ0dF9tcxgBIAEoARIWCg50aHJvdWdocHV0X2JwcxgCIAEoARIbChN1cGxvYWRfY2FwYWNpdHlfYnBzGAMgASgDEg0KBWRlcHRoGAQgASgFEhUKDWJ1ZmZlcl9oZWFsdGgYBSABKAESFwoPcDk1X2RlbGl2ZXJ5X21zGAYgASgBEhMKC3N0YWxsX2NvdW50GAcgASgFEhAKCGRlZ3JhZGVkGAggASgIEhIKCnByaW1hcnlfaWQYCSABKAkihgEKCk1lbWJlckluZm8SCgoCaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJEgwKBHJvbGUYAyABKAkSDQoFZGVwdGgYBCABKAUSEgoKcHJpbWFyeV9pZBgFIAEoCRISCgpiYWNrdXBfaWRzGAYgAygJEhEKCWpvaW5lZF9hdBgHIAEoAyJbCghDYXBhY2l0eRIMCgRtb2RlGAEgASgJEhMKC21heF9tZW1iZXJzGAIgASgFEhIKCnN0cmVhbV9icHMYAyABKAMSGAoQaG9zdF9jaGlsZF9zbG90cxgEIAEoBSK3AQoSVG9wb2xvZ3lBc3NpZ25tZW50Eg8KB3BlZXJfaWQYASABKAkSEgoKcHJpbWFyeV9pZBgCIAEoCRISCgpiYWNrdXBfaWRzGAMgAygJEhAKCGNoaWxkcmVuGAQgAygJEg0KBWRlcHRoGAUgASgFEgwKBG1vZGUYBiABKAkSFgoOZGlzdHJpYnV0b3JfaWQYByABKAkSDgoGcmVhc29uGAggASgJEhEKCW1heF9kZXB0aBgJIAEoBSJDChFEaXN0cmlidXRvckNoYW5nZRIPCgdmcm9tX2lkGAEgASgJEg0KBXRvX2lkGAIgASgJEg4KBnJlYXNvbhgDIAEoCSLYBgoIRW52ZWxvcGUSDAoEdHlwZRgBIAEoCRIPCgdyb29tX2lkGAIgASgJEhEKCWNsaWVudF9pZBgDIAEoCRIKCgJ0bxgEIAEoCRIMCgRmcm9tGAUgASgJEhQKDGRpc3BsYXlfbmFtZRgGIAEoCRIMCgRyb2xlGAcgASgJEhAKCHBhc3N3b3JkGAggASgJEg8KB3BheWxvYWQYCSABKAwSDAoEdGV4dBgKIAEoCRIKCgJ0cxgLIAEoAxIOCgZhY3Rpb24YDCABKAkSFAoMY3VycmVudF90aW1lGA0gASgBEhUKDWhvc3RfY2xvY2tfbXMYDiABKAMSEwoLY2xvY2tfZXBvY2gYDyABKAkSDgoGcGF1c2VkGBAgASgIEgwKBHJhdGUYESABKAESMwoIcGxheWJhY2sYEiABKAsyIS5wcm9qZWN0aW9uX3Jvb20udjEuUGxheWJhY2tTdGF0ZRILCgNzZXEYEyABKAMSLAoHbWV0cmljcxgUIAEoCzIbLnByb2plY3Rpb25fcm9vbS52MS5NZXRyaWNzEg8KB3NlbGZfaWQYFSABKAkSDwoHaG9zdF9pZBgWIAEoCRIuCgZtZW1iZXIYFyABKAsyHi5wcm9qZWN0aW9uX3Jvb20udjEuTWVtYmVySW5mbxIvCgdtZW1iZXJzGBggAygLMh4ucHJvamVjdGlvbl9yb29tLnYxLk1lbWJlckluZm8SMwoLbWVkaWFfaW5kZXgYGSABKAsyHi5wcm9qZWN0aW9uX3Jvb20udjEuTWVkaWFJbmRleBIuCghjYXBhY2l0eRgaIAEoCzIcLnByb2plY3Rpb25fcm9vbS52MS5DYXBhY2l0eRI4Cgh0b3BvbG9neRgbIAEoCzImLnByb2plY3Rpb25fcm9vbS52MS5Ub3BvbG9neUFzc2lnbm1lbnQSOgoLZGlzdHJpYnV0b3IYHCABKAsyJS5wcm9qZWN0aW9uX3Jvb20udjEuRGlzdHJpYnV0b3JDaGFuZ2USDAoEaGF2ZRgdIAEoDBIQCghjb21wbGV0ZRgeIAEoCBIMCgRjb2RlGB8gASgJEg8KB21lc3NhZ2UYICABKAkSDgoGcmVhc29uGCEgASgJEhIKCmhvc3RfdG9rZW4YIiABKAkijgIKC1BlZXJDb250cm9sEgkKAXQYASABKAkSCwoDcmlkGAIgASgJEgsKA2lkeBgDIAEoBRIMCgRjb2RlGAQgASgJEg4KBmNodW5rcxgFIAEoDBIQCghjb21wbGV0ZRgGIAEoCBIKCgJ0cxgHIAEoAxIUCgxjdXJyZW50X3RpbWUYCCABKAESFQoNaG9zdF9jbG9ja19tcxgJIAEoAxITCgtjbG9ja19lcG9jaBgKIAEoCRIOCgZwYXVzZWQYCyABKAgSDAoEcmF0ZRgMIAEoARILCgNzZXEYDSABKAMSFwoPcGFyZW50X2Nsb2NrX21zGA4gASgDEhgKEHBhcmVudF9vZmZzZXRfbXMYDyABKAFCH1odUHJvamVjdGlvblJvb20vaW50ZXJuYWwvcGI7cGJiBnByb3RvMw");
+  fileDesc("ChVwcm9qZWN0aW9uX3Jvb20ucHJvdG8SEnByb2plY3Rpb25fcm9vbS52MSKQAQoMTWVkaWFTZWdtZW50Eg0KBWluZGV4GAEgASgFEgwKBGZpbGUYAiABKAkSDgoGb2Zmc2V0GAMgASgDEgwKBHNpemUYBCABKAMSEAoIZHVyYXRpb24YBSABKAESEQoJc3RhcnRfcHRzGAYgASgBEhAKCGtleWZyYW1lGAcgASgIEg4KBnNoYTI1NhgIIAEoCSLOAQoKTWVkaWFJbmRleBIPCgd2ZXJzaW9uGAEgASgFEhEKCWluaXRfZmlsZRgCIAEoCRIRCgltaW1lX3R5cGUYAyABKAkSFgoOdG90YWxfZHVyYXRpb24YBCABKAESEwoLc2VnbWVudF9zZWMYBSABKAESEwoLYml0cmF0ZV9icHMYBiABKAMSEwoLdG90YWxfYnl0ZXMYByABKAMSMgoIc2VnbWVudHMYCCADKAsyIC5wcm9qZWN0aW9uX3Jvb20udjEuTWVkaWFTZWdtZW50InwKDVBsYXliYWNrU3RhdGUSDgoGcGF1c2VkGAEgASgIEhQKDGN1cnJlbnRfdGltZRgCIAEoARIVCg1ob3N0X2Nsb2NrX21zGAMgASgDEgwKBHJhdGUYBCABKAESCwoDc2VxGAUgASgDEhMKC2Nsb2NrX2Vwb2NoGAYgASgJIsgBCgdNZXRyaWNzEg4KBnJ0dF9tcxgBIAEoARIWCg50aHJvdWdocHV0X2JwcxgCIAEoARIbChN1cGxvYWRfY2FwYWNpdHlfYnBzGAMgASgDEg0KBWRlcHRoGAQgASgFEhUKDWJ1ZmZlcl9oZWFsdGgYBSABKAESFwoPcDk1X2RlbGl2ZXJ5X21zGAYgASgBEhMKC3N0YWxsX2NvdW50GAcgASgFEhAKCGRlZ3JhZGVkGAggASgIEhIKCnByaW1hcnlfaWQYCSABKAkihgEKCk1lbWJlckluZm8SCgoCaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJEgwKBHJvbGUYAyABKAkSDQoFZGVwdGgYBCABKAUSEgoKcHJpbWFyeV9pZBgFIAEoCRISCgpiYWNrdXBfaWRzGAYgAygJEhEKCWpvaW5lZF9hdBgHIAEoAyJbCghDYXBhY2l0eRIMCgRtb2RlGAEgASgJEhMKC21heF9tZW1iZXJzGAIgASgFEhIKCnN0cmVhbV9icHMYAyABKAMSGAoQaG9zdF9jaGlsZF9zbG90cxgEIAEoBSK3AQoSVG9wb2xvZ3lBc3NpZ25tZW50Eg8KB3BlZXJfaWQYASABKAkSEgoKcHJpbWFyeV9pZBgCIAEoCRISCgpiYWNrdXBfaWRzGAMgAygJEhAKCGNoaWxkcmVuGAQgAygJEg0KBWRlcHRoGAUgASgFEgwKBG1vZGUYBiABKAkSFgoOZGlzdHJpYnV0b3JfaWQYByABKAkSDgoGcmVhc29uGAggASgJEhEKCW1heF9kZXB0aBgJIAEoBSJDChFEaXN0cmlidXRvckNoYW5nZRIPCgdmcm9tX2lkGAEgASgJEg0KBXRvX2lkGAIgASgJEg4KBnJlYXNvbhgDIAEoCSKJCAoIRW52ZWxvcGUSDAoEdHlwZRgBIAEoCRIPCgdyb29tX2lkGAIgASgJEhEKCWNsaWVudF9pZBgDIAEoCRIKCgJ0bxgEIAEoCRIMCgRmcm9tGAUgASgJEhQKDGRpc3BsYXlfbmFtZRgGIAEoCRIMCgRyb2xlGAcgASgJEhAKCHBhc3N3b3JkGAggASgJEg8KB3BheWxvYWQYCSABKAwSDAoEdGV4dBgKIAEoCRIKCgJ0cxgLIAEoAxIOCgZhY3Rpb24YDCABKAkSFAoMY3VycmVudF90aW1lGA0gASgBEhUKDWhvc3RfY2xvY2tfbXMYDiABKAMSEwoLY2xvY2tfZXBvY2gYDyABKAkSDgoGcGF1c2VkGBAgASgIEgwKBHJhdGUYESABKAESMwoIcGxheWJhY2sYEiABKAsyIS5wcm9qZWN0aW9uX3Jvb20udjEuUGxheWJhY2tTdGF0ZRILCgNzZXEYEyABKAMSLAoHbWV0cmljcxgUIAEoCzIbLnByb2plY3Rpb25fcm9vbS52MS5NZXRyaWNzEg8KB3NlbGZfaWQYFSABKAkSDwoHaG9zdF9pZBgWIAEoCRIuCgZtZW1iZXIYFyABKAsyHi5wcm9qZWN0aW9uX3Jvb20udjEuTWVtYmVySW5mbxIvCgdtZW1iZXJzGBggAygLMh4ucHJvamVjdGlvbl9yb29tLnYxLk1lbWJlckluZm8SMwoLbWVkaWFfaW5kZXgYGSABKAsyHi5wcm9qZWN0aW9uX3Jvb20udjEuTWVkaWFJbmRleBIuCghjYXBhY2l0eRgaIAEoCzIcLnByb2plY3Rpb25fcm9vbS52MS5DYXBhY2l0eRI4Cgh0b3BvbG9neRgbIAEoCzImLnByb2plY3Rpb25fcm9vbS52MS5Ub3BvbG9neUFzc2lnbm1lbnQSOgoLZGlzdHJpYnV0b3IYHCABKAsyJS5wcm9qZWN0aW9uX3Jvb20udjEuRGlzdHJpYnV0b3JDaGFuZ2USDAoEaGF2ZRgdIAEoDBIQCghjb21wbGV0ZRgeIAEoCBIMCgRjb2RlGB8gASgJEg8KB21lc3NhZ2UYICABKAkSDgoGcmVhc29uGCEgASgJEhIKCmhvc3RfdG9rZW4YIiABKAkSLQoCZG0YIyABKAsyIS5wcm9qZWN0aW9uX3Jvb20udjEuRGlyZWN0TWVzc2FnZRIaChJ1c2VyX2NoYW5uZWxfcmVhZHkYJCABKAgSLwoGZnJpZW5kGCUgASgLMh8ucHJvamVjdGlvbl9yb29tLnYxLkZyaWVuZEV2ZW50EjMKCHByZXNlbmNlGCYgASgLMiEucHJvamVjdGlvbl9yb29tLnYxLlByZXNlbmNlU3RhdGUijAEKDURpcmVjdE1lc3NhZ2USCgoCaWQYASABKAMSEQoJc2VuZGVyX2lkGAIgASgDEhQKDHJlY2lwaWVudF9pZBgDIAEoAxITCgtzZW5kZXJfbmFtZRgEIAEoCRIMCgRib2R5GAUgASgJEhIKCmNyZWF0ZWRfYXQYBiABKAkSDwoHcmVhZF9hdBgHIAEoCSJdCgtGcmllbmRFdmVudBIXCg9yZWxhdGlvbnNoaXBfaWQYASABKAMSDwoHdXNlcl9pZBgCIAEoAxIUCgxkaXNwbGF5X25hbWUYAyABKAkSDgoGc3RhdHVzGAQgASgJIjAKDVByZXNlbmNlU3RhdGUSDwoHdXNlcl9pZBgBIAEoAxIOCgZvbmxpbmUYAiABKAgijgIKC1BlZXJDb250cm9sEgkKAXQYASABKAkSCwoDcmlkGAIgASgJEgsKA2lkeBgDIAEoBRIMCgRjb2RlGAQgASgJEg4KBmNodW5rcxgFIAEoDBIQCghjb21wbGV0ZRgGIAEoCBIKCgJ0cxgHIAEoAxIUCgxjdXJyZW50X3RpbWUYCCABKAESFQoNaG9zdF9jbG9ja19tcxgJIAEoAxITCgtjbG9ja19lcG9jaBgKIAEoCRIOCgZwYXVzZWQYCyABKAgSDAoEcmF0ZRgMIAEoARILCgNzZXEYDSABKAMSFwoPcGFyZW50X2Nsb2NrX21zGA4gASgDEhgKEHBhcmVudF9vZmZzZXRfbXMYDyABKAFCH1odUHJvamVjdGlvblJvb20vaW50ZXJuYWwvcGI7cGJiBnByb3RvMw");
 
 /**
  * MediaSegment 是一个媒体分片（与 internal/model.Segment 一一对应）。
@@ -616,6 +616,49 @@ export type Envelope = Message<"projection_room.v1.Envelope"> & {
    * @generated from field: string host_token = 34;
    */
   hostToken: string;
+
+  /**
+   * —— 用户级实时通道（/ws/user）的字段。wayfinder #31 / ACCOUNTS §7.2。
+   *
+   * 为什么复用同一个 Envelope 而不是新开一个 message：`/ws` 与 `/ws/user` 是
+   * **同一个信封模型的两条通道**，而"客户端只写一套编解码"是既有约定
+   * （internal/model/pb_convert.go 是唯一转换点）。新开 message 会让客户端
+   * 有两套 fromBinary，而它们迟早会漂移。
+   *
+   * 字段号从 35 起：34 之前是房间信令的面，已冻结；新增全是纯加法
+   * （proto3 未知字段可忽略，旧客户端收到这些字段只会忽略）。
+   *
+   * dm / dm-read 的载荷：
+   *   - 服务端下行 dm：dm 带完整消息（id/sender/body/created_at）；
+   *   - 服务端下行 dm-read：只带"读到哪一条"（id + read_at），不带正文。
+   *
+   * @generated from field: projection_room.v1.DirectMessage dm = 35;
+   */
+  dm?: DirectMessage | undefined;
+
+  /**
+   * 用户通道的连接确认（服务端在 ticket 校验通过、连接注册完成后立刻下发）。
+   * 客户端据此知道"实时通道已就绪"，而不是靠"连上了但没有任何帧"去猜。
+   *
+   * @generated from field: bool user_channel_ready = 36;
+   */
+  userChannelReady: boolean;
+
+  /**
+   * 好友域事件（friend-request / friend-accepted / friend-removed / blocked）
+   * 的载荷。四个事件共用一个结构：它们的形状就是"一段关系 + 对方是谁"。
+   *
+   * @generated from field: projection_room.v1.FriendEvent friend = 37;
+   */
+  friend?: FriendEvent | undefined;
+
+  /**
+   * 在线态（presence）。本期只在好友范围内广播（见 wsuser.go 的说明）：
+   * 全站在线态需要一个"谁能看见谁"的授权模型，那是另一件事。
+   *
+   * @generated from field: projection_room.v1.PresenceState presence = 38;
+   */
+  presence?: PresenceState | undefined;
 };
 
 /**
@@ -624,6 +667,123 @@ export type Envelope = Message<"projection_room.v1.Envelope"> & {
  */
 export const EnvelopeSchema: GenMessage<Envelope> = /*@__PURE__*/
   messageDesc(file_projection_room, 8);
+
+/**
+ * DirectMessage 是一条私聊的线上形态（/ws/user 的 dm 与 dm-read 共用）。
+ *
+ * @generated from message projection_room.v1.DirectMessage
+ */
+export type DirectMessage = Message<"projection_room.v1.DirectMessage"> & {
+  /**
+   * @generated from field: int64 id = 1;
+   */
+  id: bigint;
+
+  /**
+   * @generated from field: int64 sender_id = 2;
+   */
+  senderId: bigint;
+
+  /**
+   * @generated from field: int64 recipient_id = 3;
+   */
+  recipientId: bigint;
+
+  /**
+   * @generated from field: string sender_name = 4;
+   */
+  senderName: string;
+
+  /**
+   * dm-read 事件里为空（已读回执不带正文）
+   *
+   * @generated from field: string body = 5;
+   */
+  body: string;
+
+  /**
+   * RFC3339
+   *
+   * @generated from field: string created_at = 6;
+   */
+  createdAt: string;
+
+  /**
+   * RFC3339；空 = 未读
+   *
+   * @generated from field: string read_at = 7;
+   */
+  readAt: string;
+};
+
+/**
+ * Describes the message projection_room.v1.DirectMessage.
+ * Use `create(DirectMessageSchema)` to create a new message.
+ */
+export const DirectMessageSchema: GenMessage<DirectMessage> = /*@__PURE__*/
+  messageDesc(file_projection_room, 9);
+
+/**
+ * FriendEvent 是好友域的一次变化（/ws/user 的 friend-* 与 blocked）。
+ *
+ * @generated from message projection_room.v1.FriendEvent
+ */
+export type FriendEvent = Message<"projection_room.v1.FriendEvent"> & {
+  /**
+   * @generated from field: int64 relationship_id = 1;
+   */
+  relationshipId: bigint;
+
+  /**
+   * "对方"是谁（相对收件人）
+   *
+   * @generated from field: int64 user_id = 2;
+   */
+  userId: bigint;
+
+  /**
+   * @generated from field: string display_name = 3;
+   */
+  displayName: string;
+
+  /**
+   * pending | accepted | blocked
+   *
+   * @generated from field: string status = 4;
+   */
+  status: string;
+};
+
+/**
+ * Describes the message projection_room.v1.FriendEvent.
+ * Use `create(FriendEventSchema)` to create a new message.
+ */
+export const FriendEventSchema: GenMessage<FriendEvent> = /*@__PURE__*/
+  messageDesc(file_projection_room, 10);
+
+/**
+ * PresenceState 是一个用户的在线态。
+ *
+ * @generated from message projection_room.v1.PresenceState
+ */
+export type PresenceState = Message<"projection_room.v1.PresenceState"> & {
+  /**
+   * @generated from field: int64 user_id = 1;
+   */
+  userId: bigint;
+
+  /**
+   * @generated from field: bool online = 2;
+   */
+  online: boolean;
+};
+
+/**
+ * Describes the message projection_room.v1.PresenceState.
+ * Use `create(PresenceStateSchema)` to create a new message.
+ */
+export const PresenceStateSchema: GenMessage<PresenceState> = /*@__PURE__*/
+  messageDesc(file_projection_room, 11);
 
 /**
  * PeerControl 是 DataChannel 上的控制消息。
@@ -724,5 +884,5 @@ export type PeerControl = Message<"projection_room.v1.PeerControl"> & {
  * Use `create(PeerControlSchema)` to create a new message.
  */
 export const PeerControlSchema: GenMessage<PeerControl> = /*@__PURE__*/
-  messageDesc(file_projection_room, 9);
+  messageDesc(file_projection_room, 12);
 

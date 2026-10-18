@@ -344,6 +344,30 @@ func (s *Store) BlockUser(ctx context.Context, actorID, targetID int64) (*Friend
 	return row, nil
 }
 
+// FriendshipByID 按主键取一条关系行（只读）。
+//
+// 用途只有一个：删除/变更**之前**记下"对方是谁"（实时推送需要收件人 id）。
+// 之所以不并进 RemoveFriendship 的返回值：那会改一个已被 #29 真库用例覆盖的
+// 签名，而"尽力而为地取一个收件人 id"不该让那个签名变形。
+//
+// 不做权限判定（这里没有 actor 概念）：调用方拿到的行只用于自己算对方是谁，
+// 真正的越权判定仍在 RemoveFriendship 的事务里（I3：授权在服务端，且在最知道
+// 事实的那一层）。
+func (s *Store) FriendshipByID(ctx context.Context, id int64) (*Friendship, error) {
+	if id <= 0 {
+		return nil, ErrFriendshipNotFound
+	}
+	var f Friendship
+	err := s.db.WithContext(ctx).Where("id = ?", id).Take(&f).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrFriendshipNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询好友关系失败: %w", err)
+	}
+	return &f, nil
+}
+
 // BlockStatusBetween 回答"a 与 b 之间有没有 blocked 关系，以及是谁拉黑了谁"。
 //
 // 这是给 #31（私聊）留的窄出口：发消息前要判"被拉黑方发不进消息"。

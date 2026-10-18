@@ -63,12 +63,19 @@ var ProviderSet = wire.NewSet(
 	service.NewManager,     // 房间、成员与拓扑用例
 	service.NewHub,         // 信令连接池（自带清理函数）
 	service.NewBroadcaster, // Hub → service.Broadcaster
-	segment.NewQueue,       // 一次性的视频切片作业队列（自带清理函数）
-	NewMailer,              // 邮件投递器 + 有界队列（未配置时为 nil；自带清理函数）
-	NewAccountService,      // 账号用例
-	NewAccountStore,        // 账号存储适配器（唯一碰 gorm 的一层）
-	NewSigner,              // access token 签发器
-	NewTicketStore,         // WS 一次性票据表
-	NewLogRingResources,    // 日志环形缓冲 + 退出时恢复标准输出
-	NewDBResources,         // 数据库连接、迁移与事件写入器（最先创建、最后清理）
+	// 用户级实时通道（/ws/user）的连接注册表（wayfinder #31）。
+	//
+	// 位置刻意与 NewHub 相邻：两者都是"连接池 + 自带清理"，而它们的清理必须
+	// 早于连接池关闭（先关连接，再关 DB —— 反过来会让退避重试全部失败，
+	// 同 NewHub 上方那条注释的语义）。它不消费 DBResources，因此放在这里
+	// 不会改变"DBResources 最后创建"这条约束。
+	service.NewUserHub,
+	segment.NewQueue,    // 一次性的视频切片作业队列（自带清理函数）
+	NewMailer,           // 邮件投递器 + 有界队列（未配置时为 nil；自带清理函数）
+	NewAccountService,   // 账号用例
+	NewAccountStore,     // 账号存储适配器（唯一碰 gorm 的一层）
+	NewSigner,           // access token 签发器
+	NewTicketStore,      // WS 一次性票据表
+	NewLogRingResources, // 日志环形缓冲 + 退出时恢复标准输出
+	NewDBResources,      // 数据库连接、迁移与事件写入器（最先创建、最后清理）
 )

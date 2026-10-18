@@ -137,6 +137,36 @@ func ToPB(env *Envelope) *pb.Envelope {
 			Reason: env.Distributor.Reason,
 		}
 	}
+	// —— 用户级实时通道（/ws/user）的载荷。wayfinder #31。
+	//
+	// 三个 if 各自独立：一条 dm 帧不会带 friend/presence，反之亦然。
+	// UserChannelReady 是 bool，零值就是"不带"，因此不需要 if。
+	out.UserChannelReady = env.UserChannelReady
+	if env.DM != nil {
+		out.Dm = &pb.DirectMessage{
+			Id:          env.DM.ID,
+			SenderId:    env.DM.SenderID,
+			RecipientId: env.DM.RecipientID,
+			SenderName:  env.DM.SenderName,
+			Body:        env.DM.Body,
+			CreatedAt:   env.DM.CreatedAt,
+			ReadAt:      env.DM.ReadAt,
+		}
+	}
+	if env.Friend != nil {
+		out.Friend = &pb.FriendEvent{
+			RelationshipId: env.Friend.RelationshipID,
+			UserId:         env.Friend.UserID,
+			DisplayName:    env.Friend.DisplayName,
+			Status:         env.Friend.Status,
+		}
+	}
+	if env.Presence != nil {
+		out.Presence = &pb.PresenceState{
+			UserId: env.Presence.UserID,
+			Online: env.Presence.Online,
+		}
+	}
 
 	return out
 }
@@ -237,6 +267,33 @@ func FromPB(msg *pb.Envelope) *Envelope {
 			FromID: d.GetFromId(),
 			ToID:   d.GetToId(),
 			Reason: d.GetReason(),
+		}
+	}
+	// —— 用户级实时通道（/ws/user）的载荷。wayfinder #31。
+	out.UserChannelReady = msg.GetUserChannelReady()
+	if d := msg.GetDm(); d != nil {
+		out.DM = &DirectMessage{
+			ID:          d.GetId(),
+			SenderID:    d.GetSenderId(),
+			RecipientID: d.GetRecipientId(),
+			SenderName:  d.GetSenderName(),
+			Body:        d.GetBody(),
+			CreatedAt:   d.GetCreatedAt(),
+			ReadAt:      d.GetReadAt(),
+		}
+	}
+	if f := msg.GetFriend(); f != nil {
+		out.Friend = &FriendEvent{
+			RelationshipID: f.GetRelationshipId(),
+			UserID:         f.GetUserId(),
+			DisplayName:    f.GetDisplayName(),
+			Status:         f.GetStatus(),
+		}
+	}
+	if p := msg.GetPresence(); p != nil {
+		out.Presence = &PresenceState{
+			UserID: p.GetUserId(),
+			Online: p.GetOnline(),
 		}
 	}
 
