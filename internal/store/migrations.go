@@ -442,4 +442,67 @@ END $$`,
 		// 好友列表（accepted）按任一方取：对称查询的两个入口都走这条。
 		`CREATE INDEX IF NOT EXISTS friendships_status_idx ON friendships (status)`,
 	}},
+
+	// 0012：私聊消息（messages）。wayfinder #31，docs/ACCOUNTS.md §4 / §7.2。
+	//
+	// # 为什么 `kind` 与 `room_id` 现在就要有（尽管本期只写 `dm`）
+	//
+	// 因为"房间内聊天落库"（§7.4，`kind=room`）已经被判定为**同一张表的同一个模型**，
+	// 只差一个清理协程。先加列、后加写入路径，代价是两条 NULL/CHECK 约束；
+	// 反过来（先只建 dm 表、以后再 ALTER）则要在一个已经有数据的表上补
+	// `kind NOT NULL` 与两条索引 —— 那时"历史行怎么回填 kind"就成了一个
+	// 没有正确答案的迁移。列在这里是廉价的，缺列不是。
+	//
+	// # 为什么用 CHECK 表达"哪一列必填"，而不是靠代码自觉
+	//
+	// `kind=dm` 必须有 recipient_id 且没有 room_id；`kind=room` 反之。
+	// 这两种形态一旦被写坏（比如 dm 行没有收件人），症状是"消息永久停在库里
+	// 谁也看不到"—— 没有任何查询会报错，只是一条数据消失了。
+	// 约束是唯一能在写入那一刻就失败的地方（代码里的 if 会被下一个调用点忘掉）。
+	//
+	// # 为什么 `read_at` 可空而不是 `is_read` 布尔
+	//
+	// 已读位置需要一个**时刻**：`POST /api/messages/read` 上报的是"读到哪一条"，
+	// 服务端据此把该条及更早的未读置已读。布尔只能表达"这一条读了没"，
+	// 于是批量已读要逐行 UPDATE（且"读到哪"这个语义丢失）。
+	//
+	// # 为什么不做软删除、也不建"会话"表
+	//
+	// 会话是 `(kind, 双方)` 上的派生视图：它没有独立于消息的生命周期
+	//（删光消息的会话不该存在），而"空会话"对用户没有意义。
+	// 建一张 conversations 表就要维护"最后一条消息 id / 未读数"两份反范式计数，
+	// 而那两份计数一旦漂移就没有对账路径（#27 的血泪）。
+	// 未读数因此**每次按索引 COUNT** —— 它天然正确，代价见下面的索引注释。
+	{version: "0012_messages", statements: []string{
+		`CREATE TABLE IF NOT EXISTS messages (
+	id           bigserial PRIMARY KEY,
+	kind         varchar(4) NOT NULL,
+	room_id      varchar(12) NULL,
+	sender_id    bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	recipient_id bigint NULL REFERENCES users(id) ON DELETE CASCADE,
+	body         text NOT NULL,
+	created_at   timestamptz NOT NULL DEFAULT now(),
+	read_at      timestamptz NULL,
+	CONSTRAINT messages_kind_valid CHECK (kind IN ('dm', 'room')),
+	CONSTRAINT messages_target_shape CHECK (
+		(kind = 'dm'   AND recipient_id IS NOT NULL AND room_id IS NULL) OR
+		(kind = 'room' AND room_id IS NOT NULL AND recipient_id IS NULL)
+	),
+	CONSTRAINT messages_body_not_blank CHECK (btrim(body) <> '')
+)`,
+		// 未读计数与"进会话先看有几条没读"的**唯一热路径**：
+		// `WHERE kind='dm' AND recipient_id = ? AND read_at IS NULL`。
+		// 部分索引（WHERE read_at IS NULL）比全列索引小一个数量级 ——
+		// 已读行永远不进这个索引，而它恰好是永远不被查的那一半。
+		`CREATE INDEX IF NOT EXISTS messages_dm_unread_idx
+	ON messages (recipient_id, id DESC) WHERE kind = 'dm' AND read_at IS NULL`,
+		// 历史分页：`WHERE kind='dm' AND (sender_id=? AND recipient_id=? OR sender_id=? AND recipient_id=?) AND id < ?`
+		// 走不了上面那个部分索引（它只覆盖未读）。这两条是"某一侧发出的 dm"的入口，
+		// 两端各一条，让 OR 的两个分支都能各自走索引（PostgreSQL 会 BitmapOr 合并）。
+		`CREATE INDEX IF NOT EXISTS messages_dm_sender_idx ON messages (sender_id, recipient_id, id DESC) WHERE kind = 'dm'`,
+		`CREATE INDEX IF NOT EXISTS messages_dm_recipient_idx ON messages (recipient_id, sender_id, id DESC) WHERE kind = 'dm'`,
+		// 房间内聊天（§7.4，本期不写）：进房拉最近 50 条 + 30 天清理协程都靠它。
+		// 现在就建的理由与列相同 —— 它是"这张表打算怎么被查"的声明。
+		`CREATE INDEX IF NOT EXISTS messages_room_idx ON messages (room_id, id DESC) WHERE kind = 'room'`,
+	}},
 }

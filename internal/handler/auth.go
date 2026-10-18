@@ -487,7 +487,28 @@ func (h *authHandler) me(c *gin.Context) {
 		writeAccountError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"user": p})
+	// unread 是未读私聊数（wayfinder #31，§7.2 的"登录时按未读拉取"）。
+	//
+	// 为什么挂在 me 上而不是单开一个 `/api/messages/unread`：登录后的第一次渲染
+	// 本来就要打 me，多一个字段省掉一发请求，也让"登录后立刻能看到几条没读"
+	// 不需要两段式加载。代价是 me 多一次 COUNT —— 它走部分索引（只扫未读行），
+	// 与历史总量无关（见 store.CountUnreadDM）。
+	//
+	// Store 为 nil（账号能力关闭/装配缺失）时不编造 0：直接不返回这个键，
+	// 前端据此显示"服务端未返回"而不是"你没有未读"。这与
+	// `AuthUser.emailVerified` 是可选键的理由完全一致。
+	resp := gin.H{"user": p}
+	if h.deps.Store != nil {
+		n, err := h.deps.Store.CountUnreadDM(c.Request.Context(), u.ID)
+		if err != nil {
+			// 未读计数是**显示**用的派生值：它查不出来不该让"取回我的档案"失败
+			//（那会把一次浏览变成一次错误页）。记日志、不返回这个键。
+			log.Printf("[WARN] 统计未读私聊失败（user=%d）：%v", u.ID, err)
+		} else {
+			resp["unread"] = n
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // wsTicket 签发一张 WS 一次性票据（成功 200）。

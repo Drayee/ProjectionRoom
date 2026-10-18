@@ -69,18 +69,24 @@ func TestMigrateFirstRunAppliesAllThenSecondRunIsNoop(t *testing.T) {
 // TestMigrateCreatesPhaseOneTablesOnly 断言表边界。
 //
 // ⚠ 这条用例的历史比迁移本身更早：它最初钉住"一期只建 5 张表"。但 #27（posts）、
-// #37（anime）、#29（friendships）按地图逐个落地，表边界随之扩张。这里不再维护
-// 一张"已建表"清单（那正是 truncateAll 曾经踩过的坑——手写清单会过时），只保留
-// "本期确实**不该**建"的负向断言：messages / room_snapshots 仍属后续票。
+// #37（anime）、#29（friendships）、#31（messages）按地图逐个落地，表边界随之扩张。
+// 这里不再维护一张"已建表"清单（那正是 truncateAll 曾经踩过的坑——手写清单会过时），
+// 只保留"本期确实**不该**建"的负向断言：room_snapshots 仍属后续票。
+//
+// #31 落地时 `messages` 从负向名单移到了正向名单：它在 0012 里建了（含
+// `kind=room` 的列与索引，见那段 DDL 注释），但 `kind=room` 的**写入路径**
+// 与 30 天清理协程仍属 Not yet specified —— 表在、写入路径不在，这正是
+// 那条注释想表达的边界。`room_snapshots` 与它无关（那是 §9 的快照类表），
+// 继续留在负向名单里。
 func TestMigrateCreatesPhaseOneTablesOnly(t *testing.T) {
 	s := requireTestDB(t)
 
-	for _, name := range []string{"schema_migrations", "users", "sessions", "rooms_meta", "admin_audit", "password_resets", "posts", "anime", "friendships"} {
+	for _, name := range []string{"schema_migrations", "users", "sessions", "rooms_meta", "admin_audit", "password_resets", "posts", "anime", "friendships", "messages"} {
 		if !tableExists(t, s, name) {
 			t.Fatalf("表 %s 应该存在（它已由相应票落地）", name)
 		}
 	}
-	for _, name := range []string{"messages", "room_snapshots"} {
+	for _, name := range []string{"room_snapshots"} {
 		if tableExists(t, s, name) {
 			t.Fatalf("表 %s 仍属后续票，本期不该建", name)
 		}
@@ -137,7 +143,11 @@ func TestMigrationPlanIsOrderedAndAdditiveOnly(t *testing.T) {
 		}
 	}
 	sql := all.String()
-	for _, forbidden := range []string{"messages", "room_snapshots"} {
+	// 负向名单只留真正的"后续票"表。`messages` 已在 0012 落地（wayfinder #31），
+	// 因此从这份名单里移除 —— 但**不是**删掉这条护栏：它是"别提前建表"的
+	// 静态防线，只是名单要跟着地图走（与 truncateAll 的教训同源：
+	// 手写清单会过时，所以清单本身必须被显式更新，而不是被绕过）。
+	for _, forbidden := range []string{"room_snapshots"} {
 		if strings.Contains(sql, forbidden) {
 			t.Fatalf("迁移 DDL 里出现了 %q：仍属后续票，本期不该建", forbidden)
 		}

@@ -349,8 +349,18 @@ func (s *Store) BlockUser(ctx context.Context, actorID, targetID int64) (*Friend
 // 这是给 #31（私聊）留的窄出口：发消息前要判"被拉黑方发不进消息"。
 // 返回 (blocked bool, blockedByID int64)；blocked=false 时 blockedByID 无意义。
 func (s *Store) BlockStatusBetween(ctx context.Context, a, b int64) (bool, int64, error) {
+	return blockStatusBetweenIn(ctx, s.db, a, b)
+}
+
+// blockStatusBetweenIn 是 BlockStatusBetween 的**语句级唯一 owner**。
+//
+// 单独暴露一个吃 *gorm.DB 的版本，是为了让"发消息前的拉黑判断"能跑在**同一个事务**
+// 里（见 store/messages.go 的 SendDM）：用连接池做这次判断、再回事务插入，
+// 两条语句之间对方刚好拉黑就会漏掉一次拦截 —— 而"被拉黑方发不进消息"
+// 是 §7.1 要求**服务端强制**的性质，不该留这个窗口。
+func blockStatusBetweenIn(ctx context.Context, db *gorm.DB, a, b int64) (bool, int64, error) {
 	var f Friendship
-	err := s.db.WithContext(ctx).
+	err := db.WithContext(ctx).
 		Where(`status = ? AND ((requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?))`,
 			FriendshipBlocked, a, b, b, a).
 		Take(&f).Error
@@ -368,4 +378,25 @@ func derefInt64(p *int64) int64 {
 		return 0
 	}
 	return *p
+}
+
+// areFriendsIn 判断 a 与 b 之间是否有一条 accepted 的好友关系（任一方向）。
+//
+// 与 blockStatusBetweenIn 同一条纪律：吃 *gorm.DB 而不是连接池，让"发消息前的
+// 关系校验"能跑在 SendDM 的**同一个事务**里 —— 否则"先查是好友"与"再插入消息"
+// 之间，对方刚删了好友，消息就发给了已经不再是好友的人。
+// accepted 是**对称**的（§7.1），所以一条查询两个方向都认。
+func areFriendsIn(ctx context.Context, db *gorm.DB, a, b int64) (bool, error) {
+	var f Friendship
+	err := db.WithContext(ctx).
+		Where(`status = ? AND ((requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?))`,
+			FriendshipAccepted, a, b, b, a).
+		Take(&f).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: 查询好友关系失败: %w", err)
+	}
+	return true, nil
 }

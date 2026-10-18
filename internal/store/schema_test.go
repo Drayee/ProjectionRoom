@@ -114,6 +114,20 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			"created_at":   {"timestamp with time zone", 0, false},
 			"expires_at":   {"timestamp with time zone", 0, false},
 		},
+		// 0012 新增：私聊消息（wayfinder #31）。列定义逐条对齐 ACCOUNTS §4，
+		// 尤其是两处"必须可空"：`room_id`（kind=dm 时必为 NULL）与
+		// `recipient_id`（kind=room 时必为 NULL）—— 把它们写成 NOT NULL
+		// 会让另一种 kind 永远写不进去，而那是 CHECK 约束要表达的事实。
+		"messages": {
+			"id":           {"bigint", 0, false},
+			"kind":         {"character varying", 4, false},
+			"room_id":      {"character varying", 12, true},
+			"sender_id":    {"bigint", 0, false},
+			"recipient_id": {"bigint", 0, true},
+			"body":         {"text", 0, false},
+			"created_at":   {"timestamp with time zone", 0, false},
+			"read_at":      {"timestamp with time zone", 0, true},
+		},
 	}
 
 	for table, want := range expected {
@@ -201,6 +215,14 @@ func TestSchemaIndexesExist(t *testing.T) {
 		"users_email_lower_key",
 		"password_resets_user_id_idx",
 		"password_resets_expires_at_idx",
+		// 0012（wayfinder #31）：私聊的未读计数与历史分页各自依赖一条部分索引。
+		// 它们不是"顺带加的"：未读计数靠 messages_dm_unread_idx 才与历史总量无关，
+		// 历史分页靠 sender/recipient 那两条才不必全表扫。丢了任何一条，
+		// 功能照旧"能跑"、只是慢 —— 而这正是索引最容易被悄悄删掉的原因。
+		"messages_dm_unread_idx",
+		"messages_dm_sender_idx",
+		"messages_dm_recipient_idx",
+		"messages_room_idx",
 	} {
 		var exists bool
 		const q = `SELECT EXISTS (
