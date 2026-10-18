@@ -3,13 +3,17 @@
  * 帖子列表（/posts）。票 #15 定稿形态：瀑布流 masonry + 无限滚动 +
  * 最新/热门 pill tab。卡片悬停触发故障（无常驻循环动画，遵守票 #13 ≤5）。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { RouterLink } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import * as postsApi from '../api/posts'
-import { isCapabilityUnavailable } from '../api/mode'
+import { usePostFailure } from '../components/features/posts/usePostFailure'
 import type { Post } from '../types/posts'
+
+const route = useRoute()
+const { failure, run } = usePostFailure(() => route.fullPath)
 
 const posts = ref<Post[]>([])
 const sort = ref<'latest' | 'hot'>('latest')
@@ -22,7 +26,15 @@ const hasMore = ref(false)
  * 与「加载失败」分开：前者是能力未上线，后者才是错误。
  */
 const capabilityMissing = ref(false)
-const failed = ref('')
+
+/** 失败态的一行文案（分诊结果，见 usePostFailure）。 */
+const failureText = computed(() => {
+  const f = failure.value
+  if (!f) return ''
+  if (f.kind === 'unauthorized') return '需要登录后才能继续'
+  if (f.kind === 'forbidden' || f.kind === 'ratelimited' || f.kind === 'error') return f.message
+  return ''
+})
 
 const sentinel = ref<HTMLElement | null>(null)
 let observer: IntersectionObserver | undefined
@@ -40,46 +52,39 @@ function excerpt(content: string, max = 72): string {
 async function load() {
   if (busy.value) return
   busy.value = true
-  failed.value = ''
-  try {
-    const r = await postsApi.listPosts({ sort: sort.value, page: 1 })
-    posts.value = r.items
-    page.value = 1
-    hasMore.value = r.hasMore
-    capabilityMissing.value = false
-  } catch (err) {
-    // 整域 404 → 降级空态；其余才是真错误（服务端拒绝 / 网络不可达）。
-    if (isCapabilityUnavailable(err)) {
+  const r = await run(() => postsApi.listPosts({ sort: sort.value, page: 1 }))
+  busy.value = false
+  if (r === null) {
+    // 整域 404 → 降级空态（把已渲染的列表清掉，否则空态与旧内容同屏很怪）。
+    if (failure.value?.kind === 'capability') {
       capabilityMissing.value = true
       posts.value = []
       hasMore.value = false
-    } else {
-      failed.value = err instanceof Error ? err.message : '加载失败'
     }
-  } finally {
-    busy.value = false
+    return
   }
+  posts.value = r.items
+  page.value = 1
+  hasMore.value = r.hasMore
+  capabilityMissing.value = false
 }
 
 async function loadMore() {
   if (busy.value || loadingMore.value || !hasMore.value) return
   loadingMore.value = true
-  try {
-    const next = page.value + 1
-    const r = await postsApi.listPosts({ sort: sort.value, page: next })
-    posts.value = posts.value.concat(r.items)
-    page.value = next
-    hasMore.value = r.hasMore
-  } catch (err) {
-    if (isCapabilityUnavailable(err)) {
+  const next = page.value + 1
+  const r = await run(() => postsApi.listPosts({ sort: sort.value, page: next }))
+  loadingMore.value = false
+  if (r === null) {
+    if (failure.value?.kind === 'capability') {
       capabilityMissing.value = true
       hasMore.value = false
-    } else {
-      failed.value = err instanceof Error ? err.message : '加载失败'
     }
-  } finally {
-    loadingMore.value = false
+    return
   }
+  posts.value = posts.value.concat(r.items)
+  page.value = next
+  hasMore.value = r.hasMore
 }
 
 function switchSort(next: 'latest' | 'hot') {
@@ -129,7 +134,7 @@ onBeforeUnmount(() => {
         retryable
         @retry="load"
       />
-      <p v-else-if="failed" class="alert" role="alert">{{ failed }}</p>
+      <p v-else-if="failureText" class="alert" role="alert">{{ failureText }}</p>
       <p v-else-if="posts.length === 0" class="dim">还没有帖子。</p>
       <div v-else class="masonry">
         <RouterLink v-for="p in posts" :key="p.id" class="card" :to="{ name: 'post-detail', params: { id: String(p.id) } }">

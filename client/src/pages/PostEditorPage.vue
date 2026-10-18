@@ -4,17 +4,20 @@
  * localStorage 草稿 + 退出确认（抄 YachiyoWeb 编辑体验）。
  * 草稿键沿用 pr:post-draft（逻辑契约，不属展示层）。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { onBeforeRouteLeave, useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
-import { isCapabilityUnavailable } from '../api/mode'
+import { isCapabilityUnavailable, isMock } from '../api/mode'
+import { usePostFailure, ensureLoggedInForWrite } from '../components/features/posts/usePostFailure'
 
 const DRAFT_KEY = 'pr:post-draft'
 
+const route = useRoute()
 const router = useRouter()
+const { failure, run } = usePostFailure(() => route.fullPath)
 
 const title = ref('')
 const content = ref('')
@@ -26,7 +29,25 @@ const error = ref('')
 /** 该分区后端未上线：整个表单降级成空态（没有可提交的目标，留着表单只会让人白填一遍）。 */
 const capabilityMissing = ref(false)
 
+/**
+ * 进入页面时探测一次"域在不在"（真实模式下）。
+ *
+ * 为什么要探测而不是等提交才发现：用户可能填三分钟才点发布——那时的降级
+ * 等于告诉他"刚才白写了"。探测走 `listPosts`（该域必然存在的读路径，一条
+ * 兜底分页），代价是真实模式下每次进页面多一个轻量 GET；mock 模式永远有
+ * "后端"，一次都不打。401/403/429 都算"域在"——只有整域 404 才换空态。
+ */
+async function probeCapability() {
+  if (isMock('posts')) return
+  try {
+    await postsApi.listPosts({ page: 1 })
+  } catch (err) {
+    if (isCapabilityUnavailable(err)) capabilityMissing.value = true
+  }
+}
+
 onMounted(() => {
+  void probeCapability()
   try {
     const raw = localStorage.getItem(DRAFT_KEY)
     if (raw) {
@@ -81,22 +102,37 @@ async function submit() {
   }
   busy.value = true
   error.value = ''
-  try {
-    await postsApi.createPost({ title: t, content: c, images: cover.value.trim() ? [cover.value.trim()] : [] })
-    clearDraft()
-    saved.value = true
-    await router.push({ name: 'posts' })
-  } catch (err) {
-    if (isCapabilityUnavailable(err)) {
+  // 发帖前先过本地登录闸门：省掉一次注定 401 的往返，也省掉"填完三分钟才发现要登录"。
+  // 服务端那边仍有 RequireAuth 兜底（I3），这里只是体验前置。
+  if (!ensureLoggedInForWrite()) {
+    busy.value = false
+    return
+  }
+  const made = await run(() =>
+    postsApi.createPost({ title: t, content: c, images: cover.value.trim() ? [cover.value.trim()] : [] }),
+  )
+  busy.value = false
+  if (made === null) {
+    if (failure.value?.kind === 'capability') {
       // 后端该域未上线：表单已经没有意义，直接换成降级空态。
       capabilityMissing.value = true
-    } else {
-      error.value = err instanceof Error ? err.message : '发布失败'
     }
-  } finally {
-    busy.value = false
+    // 其它失败由 failure 驱动的那行文案说明（401 已经跳了登录页）。
+    return
   }
+  clearDraft()
+  saved.value = true
+  await router.push({ name: 'posts' })
 }
+
+/** 失败态的一行文案（与 PostsPage / PostDetailPage 同一套分诊）。 */
+const failureText = computed(() => {
+  const f = failure.value
+  if (!f) return ''
+  if (f.kind === 'unauthorized') return '需要登录后才能发帖'
+  if (f.kind === 'forbidden' || f.kind === 'ratelimited' || f.kind === 'error') return f.message
+  return ''
+})
 
 function discard() {
   clearDraft()
@@ -137,6 +173,7 @@ function discard() {
         <MarkdownView v-if="mode === 'preview'" class="preview" :source="content" label="正文预览" />
 
         <p v-if="error" class="alert" role="alert">{{ error }}</p>
+        <p v-else-if="failureText" class="alert" role="alert">{{ failureText }}</p>
         <div class="row">
           <button class="primary" type="submit" :disabled="busy">发布</button>
           <button class="ghost" type="button" @click="discard">丢弃草稿</button>

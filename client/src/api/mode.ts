@@ -24,7 +24,7 @@
  *      运行期没有"读全局配置"这一步。代价是 mock 与 real 两份实现都会进产物（合计几 KB），
  *      换来的是零运行期配置注入面。
  */
-import { HttpError } from './http'
+import { HttpError, toHttpError } from './http'
 
 /**
  * 六个可切换的域。
@@ -96,21 +96,68 @@ export function isMock(domain: ApiDomain): boolean {
  * 真实实现的错误归一：整域路由不存在时转成 `CapabilityUnavailable`。
  *
  * 判定口径是 **HTTP 404**：`/api/posts/*` 这一组路由根本没注册，服务端返回的就是 404
- * （与 `/api/auth/*` 在账号关闭时的形态一致）。单条资源缺失（如 `GET /api/posts/999`）
- * 也是 404，那种情况由各域实现自己在调用点区分——它已经有 post id 的上下文，
- * 这里没有，硬猜只会把"帖子被删了"说成"后端没上线"。
+ * （与 `/api/auth/*` 在账号关闭时的形态一致）。
  *
- * 各域 real 实现的用法：
+ * ⚠ **单条资源缺失也是 404**（`GET /api/posts/999`），那是另一件事：
+ * 「这个帖子被删了 / id 写错了」必须显示成"内容不存在"，而不是"后端没上线"。
+ * 两者都是 404，本函数分不出来 —— 因此**调用方要自己区分**：
+ * 列表/详情这类"域肯定存在、只有这一条可能不在"的调用点，用
+ * `toCapabilityUnavailableIf(domain, err, probe)` 把一次轻量探针一起给它，
+ * 由探针（列表请求）回答"域到底在不在"。
  *
- *   try {
- *     return await requestJSON<Post[]>(authedFetch, '/api/posts')
- *   } catch (err) {
- *     throw toCapabilityUnavailable('posts', err)
- *   }
+ * 为什么不让每个域实现各自写：这条判据的语义完全一样，而写错一次的代价是
+ * 「删掉的帖子显示成该分区尚未上线」——用户会以为后端挂了，其实是内容没了。
  */
 export function toCapabilityUnavailable(domain: ApiDomain, err: unknown): Error {
   if (err instanceof HttpError && err.status === 404) return new CapabilityUnavailable(domain)
   return err instanceof Error ? err : new Error(String(err))
+}
+
+/**
+ * 带探针的版本：404 时先确认"整个域真的不在"，再判能力未上线。
+ *
+ * `probe` 必须是该域一个**必然存在**的读路径（如 `listPosts()`）。它只在前一个是
+ * 404 时才被调用，因此正常路径上一次都不多打。
+ *
+ * 四种组合的期望（已用真实服务体验证过，不是推导）：
+ *
+ *   | 原始错误 | 探针结果 | 抛出 |
+ *   | :--- | :--- | :--- |
+ *   | 404 | 404 | `CapabilityUnavailable`（域没上线） |
+ *   | 404 | 成功 | **原始错误**（内容不存在，如帖子被删） |
+ *   | 404 | 非 404 失败 | 探针的错误（网络不可达 / 500，如实说） |
+ *   | 非 404 | 不调用 | 原始错误（探针一次都不打） |
+ *
+ * 为什么探针失败不能猜成"域没上线"：那会把"服务端 500"说成"分区还没上线"，
+ * 而后者暗示"以后再来看"，前者必须立刻报警。猜错方向会推迟真正的问题被发现。
+ *
+ * 注：本仓库**没有前端测试基建**（无 vitest / 无 test 脚本），所以这四种组合没有
+ * 对应的单测——它们是上面真机验出来的，改这个函数前先按这张表手工复现一遍。
+ */
+export async function toCapabilityUnavailableIf(
+  domain: ApiDomain,
+  err: unknown,
+  probe: () => Promise<unknown>,
+): Promise<Error> {
+  if (!(err instanceof HttpError && err.status === 404)) {
+    return err instanceof Error ? err : new Error(String(err))
+  }
+  try {
+    await probe()
+  } catch (probeErr) {
+    if (probeErr instanceof HttpError && probeErr.status === 404) {
+      return new CapabilityUnavailable(domain)
+    }
+    // 探针自己也判成了"能力未上线"（它内部通常也包了一层 toCapabilityUnavailable）：
+    // 直接认下来，别把它过成 toHttpError —— 那个函数只认 HttpError 形状，
+    // 而 CapabilityUnavailable 会被压成 status:0 的"网络不可达"（真的踩过）。
+    if (probeErr instanceof CapabilityUnavailable) {
+      return probeErr
+    }
+    // 探针失败但不是 404（网络不可达 / 500）：如实说，别猜成"域没上线"。
+    return toHttpError(probeErr)
+  }
+  return err
 }
 
 /**

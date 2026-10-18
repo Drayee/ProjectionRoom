@@ -1,66 +1,108 @@
 <script setup lang="ts">
 /**
- * 帖子详情（/posts/:id）。骨架阶段最小实现：正文纯文本插值。
- * 票 #15：#19 引入 Markdown 消毒出口（ui/MarkdownView.vue）后切换渲染。
+ * 帖子详情（/posts/:id）。#26 切真：写操作按 401/403/429 分诊，点赞做乐观更新 +
+ * 失败回滚，评论可删（仅作者，服务端判）。
  */
-import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
 import { isCapabilityUnavailable } from '../api/mode'
+import { usePostFailure, ensureLoggedInForWrite } from '../components/features/posts/usePostFailure'
+import { useAuthStore } from '../stores/auth'
 import type { Comment, Post } from '../types/posts'
 
 const props = defineProps<{ id: string }>()
+const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
+const { failure, run } = usePostFailure(() => route.fullPath)
 
 const post = ref<Post | null>(null)
 const comments = ref<Comment[]>([])
 const draft = ref('')
-const failed = ref('')
 /** 该分区后端未上线：渲染降级空态，而不是「帖子不存在」。 */
 const capabilityMissing = ref(false)
+/** 正在取消点赞的那一条（用于把按钮按下去的视觉反馈）。 */
+const likingBusy = ref(false)
 
-async function load() {
-  capabilityMissing.value = false
-  failed.value = ''
-  try {
-    post.value = await postsApi.getPost(Number(props.id))
-    comments.value = await postsApi.listComments(Number(props.id))
-  } catch (err) {
-    if (isCapabilityUnavailable(err)) {
-      capabilityMissing.value = true
-    } else {
-      failed.value = err instanceof Error ? err.message : '帖子不存在'
-    }
-  }
+/** 这条评论是不是当前登录用户发的（决定显不显示删除按钮）。 */
+function isMine(c: Comment): boolean {
+  return auth.profile?.id === c.authorId
 }
 
+/** 失败态 → 一行文案（模板统一渲染）。 */
+const failureText = computed(() => {
+  const f = failure.value
+  if (!f) return ''
+  if (f.kind === 'unauthorized') return '需要登录后才能继续'
+  if (f.kind === 'forbidden' || f.kind === 'ratelimited' || f.kind === 'error') return f.message
+  return ''
+})
+
+async function load() {
+  const id = Number(props.id)
+  const made = await run(async () => {
+    post.value = await postsApi.getPost(id)
+    comments.value = await postsApi.listComments(id)
+    return true
+  })
+  // 分诊已经置好 failure；这里只补 capability 这个特殊分支（它要换成空态）。
+  if (made === null && failure.value?.kind === 'capability') capabilityMissing.value = true
+}
+
+/**
+ * 点赞：**先改本地、再发请求、失败回滚**。
+ *
+ * 乐观更新是必要的（点赞是最频繁的互动，等一次往返会让按钮"慢半拍"），
+ * 但回滚同样必要 —— 否则一次 429 会让界面停在谎言的计数上，而下次刷新就对不上了。
+ * 回滚值从服务端响应里取（权威计数），不从"减一"推：服务端才是真相。
+ */
 async function toggleLike() {
-  if (!post.value) return
-  try {
-    const r = await postsApi.toggleLike(post.value.id)
-    post.value.liked = r.liked
-    post.value.likeCount = r.likeCount
-  } catch (err) {
-    if (isCapabilityUnavailable(err)) capabilityMissing.value = true
-    else failed.value = err instanceof Error ? err.message : '操作失败'
+  if (!post.value || likingBusy.value) return
+  if (!ensureLoggedInForWrite()) return
+
+  const before = { liked: post.value.liked, likeCount: post.value.likeCount }
+  // 显式取 1 / -1：三元里混 boolean 会让 TS 推断成 boolean + number。
+  const delta = before.liked ? -1 : 1
+  post.value.liked = !before.liked
+  post.value.likeCount = before.likeCount + delta
+
+  likingBusy.value = true
+  const r = await run(() => postsApi.toggleLike(post.value!.id))
+  likingBusy.value = false
+
+  if (r === null) {
+    // 失败：先退回原值，若服务端给了权威计数则优先用它。
+    post.value.liked = before.liked
+    post.value.likeCount = before.likeCount
+    return
   }
+  post.value.liked = r.liked
+  post.value.likeCount = r.likeCount
 }
 
 async function addComment() {
   const c = draft.value.trim()
   if (!c || !post.value) return
-  try {
-    const made = await postsApi.addComment({ postId: post.value.id, content: c })
-    comments.value.push(made)
-    post.value.commentCount += 1
-    draft.value = ''
-  } catch (err) {
-    if (isCapabilityUnavailable(err)) capabilityMissing.value = true
-    else failed.value = err instanceof Error ? err.message : '评论失败'
-  }
+  if (!ensureLoggedInForWrite()) return
+
+  const made = await run(() => postsApi.addComment({ postId: post.value!.id, content: c }))
+  if (made === null) return
+  comments.value.push(made)
+  post.value.commentCount += 1
+  draft.value = ''
+}
+
+/** 删评论：服务端判"只能删自己的"（403 的文案就是它给的），前端不预判。 */
+async function removeComment(c: Comment) {
+  if (!post.value) return
+  const made = await run(() => postsApi.deleteComment(c.id))
+  if (made === null) return
+  comments.value = comments.value.filter((x) => x.id !== c.id)
+  post.value.commentCount = Math.max(0, post.value.commentCount - 1)
 }
 
 onMounted(load)
@@ -69,7 +111,7 @@ onMounted(load)
 <template>
   <div class="page">
     <main class="body">
-      <p v-if="failed" class="alert" role="alert">{{ failed }}</p>
+      <p v-if="failureText" class="alert" role="alert">{{ failureText }}</p>
       <CapabilityNotice
         v-else-if="capabilityMissing"
         domain="posts"
@@ -82,7 +124,10 @@ onMounted(load)
         <p class="meta dim">{{ post.author.displayName }} · {{ post.createdAt }}</p>
         <MarkdownView class="content" :source="post.content" label="帖子正文" />
         <div class="acts">
-          <button :class="{ liked: post.liked }" type="button" @click="toggleLike">赞 {{ post.likeCount }}</button>
+          <button :class="{ liked: post.liked }" type="button" :disabled="likingBusy" @click="toggleLike">
+            <BrandIcon v-if="likingBusy" name="load-spinner" decorative :size="14" />
+            <span>{{ post.liked ? '已赞' : '赞' }} {{ post.likeCount }}</span>
+          </button>
           <button type="button" @click="router.back()">返回</button>
         </div>
         <section class="comments">
@@ -90,6 +135,9 @@ onMounted(load)
           <div v-for="c in comments" :key="c.id" class="cmt">
             <strong>{{ c.author.displayName }}</strong>
             <p>{{ c.content }}</p>
+            <!-- 删除按钮只给自己的评论；但**真正能不能删由服务端判**（403），
+                 这里的显隐只是少一次注定失败的往返。 -->
+            <button v-if="isMine(c)" class="del" type="button" @click="removeComment(c)">删除</button>
           </div>
           <form class="add" @submit.prevent="addComment">
             <input v-model="draft" placeholder="说点什么…" />
@@ -112,10 +160,14 @@ onMounted(load)
 .acts button { padding: 8px 18px; border: 1px solid var(--line); color: var(--dim); }
 .acts button.liked { color: var(--glitch-p); border-color: var(--glitch-p); }
 .acts button:hover { color: var(--text); border-color: var(--accent); }
+.acts button:disabled { opacity: 0.6; cursor: progress; }
 .comments { border-top: 1px solid var(--line); padding-top: 16px; }
 .comments h2 { margin: 0 0 10px; font-size: 15px; }
 .cmt { padding: 8px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
 .cmt p { margin: 4px 0 0; white-space: pre-wrap; }
+/* 删除自己的评论：低调但可点（红色 hover 才显形，避免一排红字抢焦点）。 */
+.cmt .del { margin-top: 4px; padding: 2px 8px; border: 1px solid transparent; color: var(--dim); font-size: 11px; }
+.cmt .del:hover { color: var(--danger); border-color: var(--danger); }
 .add { display: flex; gap: 8px; margin-top: 12px; }
 .add button { flex: none; padding: 8px 18px; background: var(--accent); color: var(--accent-ink); font-weight: 700; }
 .add button:disabled { opacity: 0.5; }

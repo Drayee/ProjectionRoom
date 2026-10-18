@@ -6,10 +6,13 @@
 # 用法：
 #   powershell -File scripts/run-local.ps1              # 默认 127.0.0.1:8888
 #   powershell -File scripts/run-local.ps1 -Port 8090   # 换端口（会自动补 Origin 白名单）
+#   powershell -File scripts/run-local.ps1 -StaticDir client/dist-real -SkipBuild
+#                                                       # 服务另一份产物（例如 VITE_MOCK_POSTS=0 的 real bundle）
 #
 # 前置：先跑一次 scripts/setup-local-db.ps1 建库建角色并生成 .env.local。
 param(
     [int]$Port = 0,
+    [string]$StaticDir = '',
     [switch]$SkipBuild
 )
 
@@ -49,7 +52,7 @@ if ($Port -gt 0) {
 Write-Host "[run-local] 监听   : $($env:PR_ADDR)"
 Write-Host "[run-local] 数据库 : $(([regex]::Match($env:PR_DB_DSN, 'host=\S+ port=\S+ user=\S+').Value)) dbname=$(([regex]::Match($env:PR_DB_DSN, 'dbname=\S+').Value -replace 'dbname=',''))"
 Write-Host "[run-local] 账号能力: $(if ($env:PR_DB_DSN) { '已启用' } else { '未配置（启动会失败）' })"
-Write-Host "[run-local] 静态产物: client/dist（若缺请先 npm --prefix client run build）"
+Write-Host "[run-local] 静态产物: $staticDir"
 
 # 启动完整性提示：缺任何一项必需配置都会在启动期被拒绝（不是运行期 503）。
 # 这里先做一次预检，把"等它编译完再报错"变成"现在就说清缺什么"。
@@ -60,7 +63,11 @@ if (-not $env:PR_PUBLIC_BASE_URL) { $missing += 'PR_PUBLIC_BASE_URL' }
 $smtpReady = $env:PR_SMTP_HOST -and $env:PR_SMTP_USER -and $env:PR_SMTP_PASS
 $devEcho = $env:PR_OTP_DEV_ECHO -in @('1', 'true', 'True')
 if (-not $smtpReady -and -not $devEcho) { $missing += 'SMTP 三件套 或 PR_OTP_DEV_ECHO=1' }
-if (-not (Test-Path (Join-Path $root 'client/dist/index.html'))) { $missing += 'client/dist（先 npm --prefix client run build）' }
+
+# 静态产物：-StaticDir 可指定另一份（默认 client/dist）。
+# 预检只校验**指定的那一份**——切到 dist-real 做验收时不该被 dist 缺不缺失影响。
+$staticDir = if ($StaticDir) { $StaticDir } else { 'client/dist' }
+if (-not (Test-Path (Join-Path $root "$staticDir/index.html"))) { $missing += "$staticDir（先构建那一份产物）" }
 
 if ($missing.Count -gt 0) {
     Write-Host ''
@@ -77,6 +84,8 @@ if (-not $SkipBuild) {
     & go build -o (Join-Path $root 'bin/pr-local.exe') ./cmd
     if ($LASTEXITCODE -ne 0) { Write-Error '编译失败' }
 }
+
+if ($StaticDir) { $env:PR_STATIC_DIR = $StaticDir }
 
 Write-Host '[run-local] 启动（Ctrl+C 停止）'
 & (Join-Path $root 'bin/pr-local.exe')

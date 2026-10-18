@@ -11,8 +11,10 @@
 vendor/
 
 # ---- Node / Vue ----
+node_modules/
 client/node_modules/
 client/dist/
+client/dist-real/
 client/.vite/
 npm-debug.log*
 pnpm-debug.log*
