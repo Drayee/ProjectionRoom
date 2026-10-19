@@ -59,3 +59,8 @@ pnpm-debug.log*
 
 # 调试钩子构建产物（真机验收用，不进仓库）
 client/dist-debug/
+
+# 构建产物与迁移临时文件
+projectionroom.exe
+projectionroom_linux
+_migrate/dump/mapped.sql
