@@ -100,7 +100,7 @@ func newWSAccountEnv(t *testing.T, mutate func(*config.Config)) *wsAccountEnv {
 		Tickets:  tickets,
 		RoomMeta: meta,
 	}
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, deps, AdminDeps{}))
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, nil, deps, AdminDeps{}))
 	t.Cleanup(func() {
 		srv.Close()
 		rooms.Stop()
@@ -272,7 +272,7 @@ func TestCreateRoomWithoutMetaSinkStillWorks(t *testing.T) {
 		t.Fatalf("签发 access token 失败: %v", err)
 	}
 	// RoomMeta 故意留 nil。
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, AuthDeps{Service: svc}, AdminDeps{}))
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, nil, AuthDeps{Service: svc}, AdminDeps{}))
 	t.Cleanup(func() { srv.Close(); rooms.Stop(); cleanup() })
 
 	resp := postJSONAuth(t, srv.URL+"/api/rooms", map[string]any{}, access)
@@ -458,7 +458,7 @@ func TestWSTicketRequiresAccountCapability(t *testing.T) {
 	}
 	rooms := service.NewManager(cfg, hub)
 	// 空的 AuthDeps：Tickets/Service 都是 nil。
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{}))
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, nil, AuthDeps{}, AdminDeps{}))
 	t.Cleanup(func() { srv.Close(); rooms.Stop(); cleanup() })
 
 	room, _, err := rooms.Create("", "", 0)
@@ -521,7 +521,7 @@ func TestWSGuestWorksWhenAccountsDisabled(t *testing.T) {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
 	rooms := service.NewManager(cfg, hub)
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{}))
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, nil, AuthDeps{}, AdminDeps{}))
 	t.Cleanup(func() { srv.Close(); rooms.Stop(); cleanup() })
 
 	room, _, err := rooms.Create("", "", 0)

@@ -835,7 +835,7 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 	fakeHub := &fakeAdminHub{connections: 5, distinctUsers: 2}
 	roomStore := newFakeAdminRoomStore()
 
-	engine := NewRouter(cfg, hub, rooms, nil,
+	engine := NewRouter(cfg, hub, rooms, nil, nil,
 		AuthDeps{
 			Service: svc,
 			Session: SessionConfig{
@@ -1674,7 +1674,7 @@ func TestAdminRoutesNotRegisteredWithoutDSN(t *testing.T) {
 
 	// 依赖故意给全：只要 DSN 为空，它们就不该被用上。
 	deps := AdminDeps{Users: newFakeAdminStore(), Hub: &fakeAdminHub{}}
-	engine := NewRouter(cfg, hub, rooms, nil, AuthDeps{}, deps)
+	engine := NewRouter(cfg, hub, rooms, nil, nil, AuthDeps{}, deps)
 
 	for _, path := range []string{"/api/admin/users", "/api/admin/metrics", "/api/admin/logs"} {
 		w := doJSON(t, engine, http.MethodGet, path, "", "")

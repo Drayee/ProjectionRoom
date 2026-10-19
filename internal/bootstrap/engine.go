@@ -8,6 +8,7 @@ import (
 	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/service/auth"
 	"ProjectionRoom/internal/service/segment"
+	"ProjectionRoom/internal/storage"
 )
 
 // —— handler 依赖与 gin 引擎的装配 ——
@@ -98,8 +99,9 @@ func NewEngine(
 	hub *service.Hub,
 	rooms *service.Manager,
 	seg *segment.Queue,
+	fileStore *storage.Client,
 	accountDeps handler.AuthDeps,
 	adminDeps handler.AdminDeps,
 ) (*gin.Engine, error) {
-	return handler.NewRouter(cfg, hub, rooms, seg, accountDeps, adminDeps), nil
+	return handler.NewRouter(cfg, hub, rooms, seg, fileStore, accountDeps, adminDeps), nil
 }

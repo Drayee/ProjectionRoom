@@ -17,6 +17,7 @@ import (
 	"ProjectionRoom/internal/service/ice"
 	"ProjectionRoom/internal/service/limiter"
 	"ProjectionRoom/internal/service/segment"
+	"ProjectionRoom/internal/storage"
 	"ProjectionRoom/internal/store"
 )
 
@@ -132,6 +133,7 @@ func NewRouter(
 	hub *service.Hub,
 	rooms *service.Manager,
 	seg *segment.Queue,
+	fileStore *storage.Client,
 	accountDeps AuthDeps,
 	adminDeps AdminDeps,
 ) *gin.Engine {
@@ -217,6 +219,9 @@ func NewRouter(
 
 	// 服务端切片端点（一次性预处理，不参与直播链路，因此不违反不变量 I1）。
 	registerSegmentRoutes(api, seg)
+
+	// 图片上传（对象存储未配置时内部直接 return → 404，与账号层同一条约定）。
+	registerUploadRoutes(api, fileStore, accountDeps.Service)
 
 	// 账号层的认证路由（ACCOUNTS §10）。
 	//

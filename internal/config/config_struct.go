@@ -15,6 +15,7 @@ type Config struct {
 	Security  SecurityConfig
 	Auth      AuthConfig
 	IPC       IPCConfig
+	Storage   StorageConfig
 	LogLevel  string
 	// MemoryLimitBytes 是进程软内存上限（PR_MEMORY_LIMIT，默认 512 MiB）。
 	//
@@ -492,8 +493,43 @@ type SegmentConfig struct {
 	FFmpegPath string
 }
 
-// ICEConfig 控制下发给浏览器的 ICE 配置。
+// StorageConfig 控制对象存储（MinIO / S3 兼容）—— 图片等静态附件的落点。
 //
+// # 为什么图片要进对象存储而不是本地磁盘
+//
+// 本地磁盘方案在多实例部署下立刻失效（A 实例上传的图，B 实例读不到），
+// 而对象存储天然共享。本项目当前是单实例，但"图片路径"一旦写进数据库，
+// 将来换存储就要迁移全部历史数据 —— 现在定对，比以后改便宜得多。
+//
+// # 与不变量 I1 无关
+//
+// I1 约束的是**直播链路**（视频分片只在 peer 之间走）。这里只存图片。
+// 任何"把视频也存进桶"的想法都要先读 docs/ALGORITHM.md §0。
+//
+// # 关闭时的行为
+//
+// Endpoint 为空即"对象存储未启用"：上传路由**不注册**（返回 404），
+// 而帖子/番剧仍然只接受 http(s) 外链（既有行为不变）。
+// 这与账号层"DSN 为空即不注册 /api/auth/*"是同一条约定。
+type StorageConfig struct {
+	// Endpoint 是 S3 API 地址，形如 127.0.0.1:9000（**不带 scheme**）。
+	Endpoint string
+	// AccessKey / SecretKey 是凭据（PR_STORAGE_ACCESS_KEY / _SECRET_KEY）。
+	AccessKey string
+	SecretKey string
+	// Bucket 是桶名（PR_STORAGE_BUCKET，默认 pr-files）。
+	Bucket string
+	// UseSSL 表示走 https（PR_STORAGE_USE_SSL）。
+	UseSSL bool
+	// PublicBaseURL 是浏览器访问对象的对外前缀（PR_STORAGE_PUBLIC_BASE_URL）。
+	//
+	// 为什么与 Endpoint 分开：Endpoint 常是回环地址（127.0.0.1:9000），
+	// 浏览器根本访问不到；对外前缀则是经 nginx 反代的公网地址。
+	// 两者混用会得到"上传成功但图片显示不出来"这种最难查的现象。
+	PublicBaseURL string
+}
+
+// ICEConfig 控制下发给浏览器的 ICE 配置。
 // 这里**只有 STUN，没有 TURN**：TURN 已彻底退役，字段与 PR_TURN_* 环境变量一并删除
 // （原因、以及"什么条件下才该重新引入"见 README「为什么不再有 TURN」）。
 // 退役后列表里每一个条目都由服务端周期性实测打分，只把此刻真的能用的前 MaxSTUN 条下发，

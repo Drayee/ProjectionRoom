@@ -27,6 +27,14 @@ const (
 	envICEProbeInterval = "PR_ICE_PROBE_INTERVAL"
 	envICETTL           = "PR_ICE_TTL"
 
+	// 对象存储（MinIO / S3 兼容）—— 图片等静态附件的落点。
+	envStorageEndpoint      = "PR_STORAGE_ENDPOINT"
+	envStorageAccessKey     = "PR_STORAGE_ACCESS_KEY"
+	envStorageSecretKey     = "PR_STORAGE_SECRET_KEY"
+	envStorageBucket        = "PR_STORAGE_BUCKET"
+	envStorageUseSSL        = "PR_STORAGE_USE_SSL"
+	envStoragePublicBaseURL = "PR_STORAGE_PUBLIC_BASE_URL"
+
 	// 服务端切片服务的环境变量（前缀 PR_SEGMENT_，ffmpeg 路径单独用 PR_FFMPEG）。
 	envSegmentConcurrency   = "PR_SEGMENT_CONCURRENCY"
 	envSegmentQueueLength   = "PR_SEGMENT_QUEUE_LENGTH"
@@ -667,6 +675,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	if err := applyStorageEnv(&cfg.Storage); err != nil {
+		return nil, err
+	}
+
 	if err := applyRoomEnv(&cfg.Room); err != nil {
 		return nil, err
 	}
@@ -909,6 +921,56 @@ func parseBool(name, v string) (bool, error) {
 	default:
 		return false, fmt.Errorf("config: %s 必须是布尔值（1/0/true/false/yes/no/on/off）, got %q", name, v)
 	}
+}
+
+// applyStorageEnv 应用 PR_STORAGE_* 覆盖。
+//
+// 关键约定：**Endpoint 为空 = 对象存储未启用**，这是合法状态而不是错误。
+// 此时上传路由不注册（404），帖子/番剧仍只接受 http(s) 外链。
+// 这与账号层"PR_DB_DSN 为空即不注册 /api/auth/*"是同一条约定。
+//
+// 但另外三个（AccessKey / SecretKey / Bucket）在 Endpoint 非空时**必须齐全** ——
+// 配了地址却没配凭据，症状是"上传时 500"，那比启动期报错难查得多。
+func applyStorageEnv(sc *StorageConfig) error {
+	sc.Endpoint = strings.TrimSpace(os.Getenv(envStorageEndpoint))
+	if sc.Endpoint == "" {
+		// 未启用：其余字段一并清空，避免"残留的旧凭据让 Enabled() 误判"
+		*sc = StorageConfig{}
+		return nil
+	}
+
+	// Endpoint 不该带 scheme：SDK 要的是 host:port，带 scheme 会解析失败，
+	// 而报错信息（"invalid endpoint"）不会提示"你是不是多写了 http://"。
+	if strings.Contains(sc.Endpoint, "://") {
+		return fmt.Errorf("config: %s 不能带 scheme（应写 host:port，如 127.0.0.1:9000）, got %q",
+			envStorageEndpoint, sc.Endpoint)
+	}
+
+	sc.AccessKey = strings.TrimSpace(os.Getenv(envStorageAccessKey))
+	sc.SecretKey = os.Getenv(envStorageSecretKey)
+	if sc.AccessKey == "" || sc.SecretKey == "" {
+		return fmt.Errorf("config: 已配置 %s 时必须同时配置 %s 与 %s",
+			envStorageEndpoint, envStorageAccessKey, envStorageSecretKey)
+	}
+
+	sc.Bucket = strings.TrimSpace(os.Getenv(envStorageBucket))
+	if sc.Bucket == "" {
+		sc.Bucket = "pr-files"
+	}
+
+	useSSL := false
+	if v := os.Getenv(envStorageUseSSL); v != "" {
+		b, err := parseBool(envStorageUseSSL, v)
+		if err != nil {
+			return err
+		}
+		useSSL = b
+	}
+	sc.UseSSL = useSSL
+
+	sc.PublicBaseURL = strings.TrimSpace(os.Getenv(envStoragePublicBaseURL))
+
+	return nil
 }
 
 // applySegmentEnv 应用 PR_SEGMENT_* / PR_FFMPEG 覆盖。

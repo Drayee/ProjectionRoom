@@ -35,6 +35,12 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
+	client, err := bootstrap.NewFileStore(cfg)
+	if err != nil {
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
 	dbResources, cleanup3, err := bootstrap.NewDBResources(cfg)
 	if err != nil {
 		cleanup2()
@@ -107,7 +113,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
-	engine, err := bootstrap.NewEngine(cfg, hub, manager, queue, authDeps, adminDeps)
+	engine, err := bootstrap.NewEngine(cfg, hub, manager, queue, client, authDeps, adminDeps)
 	if err != nil {
 		cleanup6()
 		cleanup5()

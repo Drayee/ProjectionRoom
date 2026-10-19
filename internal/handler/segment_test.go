@@ -53,7 +53,7 @@ func segmentServer(t *testing.T, mutate func(*config.Config)) (*httptest.Server,
 	}
 
 	// 切片用例不碰账号面：空 AuthDeps（DSN 仍为空 → 认证与管理端路由都不注册）。
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, queue, AuthDeps{}, AdminDeps{}))
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, queue, nil, AuthDeps{}, AdminDeps{}))
 	t.Cleanup(func() {
 		srv.Close()
 		// NewRouter 会启动房间清扫协程（S-3）：测试结束必须停掉，避免用例间互相干扰。

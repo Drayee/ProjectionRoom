@@ -274,7 +274,7 @@ func newRoomMetaEnv(t *testing.T, mutate func(*config.Config)) *roomMetaEnv {
 	names.set(owner.ID, "房主小明")
 	names.set(other.ID, "别人")
 
-	engine := NewRouter(cfg, hub, rooms, nil,
+	engine := NewRouter(cfg, hub, rooms, nil, nil,
 		AuthDeps{
 			Service:      svc,
 			Session:      SessionConfig{AccessTTL: cfg.Auth.AccessTTL, RefreshTTL: cfg.Auth.RefreshTTL, WSTicketTTL: cfg.Auth.WSTicketTTL},
@@ -990,7 +990,7 @@ func TestRoomMetaGetRouteNotRegisteredWithoutDSN(t *testing.T) {
 	rooms := service.NewManager(cfg, hub)
 	t.Cleanup(func() { rooms.Stop(); cleanup() })
 
-	engine := NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{})
+	engine := NewRouter(cfg, hub, rooms, nil, nil, AuthDeps{}, AdminDeps{})
 	w := doJSON(t, engine, http.MethodGet, "/api/rooms/ABCD1234/meta", "", "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("账号能力关闭时该路由不该存在，实际 %d（%s）", w.Code, w.Body.String())
@@ -1030,7 +1030,7 @@ func TestRoomMetaRouteNotRegisteredWithoutDSN(t *testing.T) {
 	rooms := service.NewManager(cfg, hub)
 	t.Cleanup(func() { rooms.Stop(); cleanup() })
 
-	engine := NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{})
+	engine := NewRouter(cfg, hub, rooms, nil, nil, AuthDeps{}, AdminDeps{})
 	w := doJSON(t, engine, http.MethodPatch, "/api/rooms/ABCD1234/meta", `{"title":"x"}`, "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("账号能力关闭时该路由不该存在，实际 %d（%s）", w.Code, w.Body.String())

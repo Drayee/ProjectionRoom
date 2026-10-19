@@ -216,7 +216,7 @@ func newMsgEnv(t *testing.T) *msgEnv {
 	rooms := service.NewManager(cfg, hub)
 	t.Cleanup(func() { rooms.Stop(); cleanup() })
 
-	engine := NewRouter(cfg, hub, rooms, nil,
+	engine := NewRouter(cfg, hub, rooms, nil, nil,
 		AuthDeps{
 			Service: svc,
 			Session: SessionConfig{

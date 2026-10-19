@@ -71,6 +71,7 @@ var ProviderSet = wire.NewSet(
 	// 不会改变"DBResources 最后创建"这条约束。
 	service.NewUserHub,
 	segment.NewQueue,    // 一次性的视频切片作业队列（自带清理函数）
+	NewFileStore,        // 对象存储客户端（未配置时为 nil；启动时建桶 + 设策略）
 	NewMailer,           // 邮件投递器 + 有界队列（未配置时为 nil；自带清理函数）
 	NewAccountService,   // 账号用例
 	NewAccountStore,     // 账号存储适配器（唯一碰 gorm 的一层）

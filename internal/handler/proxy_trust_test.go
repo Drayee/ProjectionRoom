@@ -137,7 +137,7 @@ func newRouterForTest(t *testing.T, cfg *config.Config) *gin.Engine {
 		t.Fatalf("构造 Hub 失败: %v", err)
 	}
 	rooms := service.NewManager(cfg, hub)
-	engine := NewRouter(cfg, hub, rooms, nil, roomTestAccountDeps(t, cfg), AdminDeps{})
+	engine := NewRouter(cfg, hub, rooms, nil, nil, roomTestAccountDeps(t, cfg), AdminDeps{})
 	t.Cleanup(func() {
 		rooms.Stop()
 		cleanup()

@@ -156,7 +156,7 @@ func newFriendEnv(t *testing.T) *frEnv {
 	// 于是"解除拉黑有没有投递审计"可以在同一个断言里看到。
 	auditSink := &fakeAdminWriter{}
 	auditWriter := &recordingAuditWriter{}
-	engine := NewRouter(cfg, hub, rooms, nil,
+	engine := NewRouter(cfg, hub, rooms, nil, nil,
 		AuthDeps{
 			Service: svc,
 			Session: SessionConfig{

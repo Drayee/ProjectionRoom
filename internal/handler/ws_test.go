@@ -61,7 +61,7 @@ func startTestServerWithManager(t *testing.T, cfg *config.Config) (*httptest.Ser
 	rooms := service.NewManager(cfg, hub)
 
 	// 信令用例不涉及切片端点，这里传 nil 跳过 /api/v1/segment/* 的注册。
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, roomTestAccountDeps(t, cfg), AdminDeps{}))
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, nil, roomTestAccountDeps(t, cfg), AdminDeps{}))
 	t.Cleanup(func() {
 		srv.Close()
 		// 后台清扫协程属于 Manager：测试结束必须停掉，否则用例之间会互相干扰。

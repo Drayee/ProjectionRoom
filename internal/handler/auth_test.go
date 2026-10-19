@@ -851,7 +851,7 @@ func TestAuthRoutesNotRegisteredWithoutDSN(t *testing.T) {
 		cleanup()
 	})
 
-	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, AuthDeps{}, AdminDeps{}))
+	srv := httptest.NewServer(NewRouter(cfg, hub, rooms, nil, nil, AuthDeps{}, AdminDeps{}))
 	t.Cleanup(srv.Close)
 
 	for _, path := range []string{"/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/api/auth/me"} {

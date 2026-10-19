@@ -119,7 +119,7 @@ func newUserWSEnv(t *testing.T) *userWSEnv {
 
 	pusher := service.NewRealtimePusher(userHub, st)
 
-	engine := NewRouter(cfg, hub, rooms, nil,
+	engine := NewRouter(cfg, hub, rooms, nil, nil,
 		AuthDeps{
 			Service: svc,
 			Session: SessionConfig{
