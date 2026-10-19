@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -9,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"ProjectionRoom/internal/config"
+	"ProjectionRoom/internal/storage"
 )
 
 // 客户端切片器二进制的只读清单。
@@ -72,6 +75,48 @@ type SegmenterDownloads struct {
 	Version string `json:"version"`
 	// Platforms 是可用平台列表；一个文件都没有时为空数组（绝不是 null，也不是 404）。
 	Platforms []SegmenterDownload `json:"platforms"`
+}
+
+// newSegmenterDownloadsFromStore 从对象存储读清单（优先路径）。
+//
+// 为什么优先对象存储而不是磁盘目录：
+//   - 5 个二进制合计 82 MB，打进镜像会让**每次部署都要重下这一层** ——
+//     实测在跨境链路上要 15+ 分钟且经常中途僵死（Broken pipe / 零字节停滞）。
+//   - 放进桶之后，镜像里只剩代码与前端（约 60 MB），部署快得多；
+//     二进制只在 CI 发布新版时上传一次，且不随每次构建重复传输。
+//
+// 返回 (nil, false) 表示"桶里没有清单"，调用方回落到磁盘扫描（本地开发用）。
+func newSegmenterDownloadsFromStore(ctx context.Context, store *storage.Client) (SegmenterDownloads, bool) {
+	empty := SegmenterDownloads{Version: downloadsVersion, Platforms: []SegmenterDownload{}}
+	if store == nil || !store.Enabled() {
+		return empty, false
+	}
+
+	m, err := store.FetchSegmenterManifest(ctx)
+	if err != nil {
+		// 传输/解析失败：记日志但不致命，回落到磁盘。
+		log.Printf("[WARN] 读取对象存储里的切片器清单失败：%v；尝试本地目录", err)
+		return empty, false
+	}
+	if m == nil {
+		// 清单不存在 = CI 还没发布过。这是合法状态。
+		return empty, false
+	}
+
+	d := SegmenterDownloads{Version: downloadsVersion, Platforms: []SegmenterDownload{}}
+	for _, p := range m.Platforms {
+		d.Platforms = append(d.Platforms, SegmenterDownload{
+			OS:     p.OS,
+			Arch:   p.Arch,
+			File:   p.File,
+			URL:    store.SegmenterPublicURL(p.File),
+			Bytes:  p.Bytes,
+			SHA256: p.SHA256,
+		})
+	}
+	log.Printf("切片器下载清单已就绪（对象存储）：%d/%d 个平台可用",
+		len(d.Platforms), len(segmenterDownloadTargets))
+	return d, true
 }
 
 // newSegmenterDownloads 扫描下载目录并构造清单（在注册路由时调用一次）。
@@ -180,7 +225,26 @@ func downloadsHandler(d SegmenterDownloads) gin.HandlerFunc {
 //
 // 注意边界：这条路由只回 JSON。二进制本身由静态托管（/downloads/<file>）送出，
 // 所以它必须在 registerStatic 之前注册，保住「业务路由全部先注册」的既有约定。
-func registerDownloadRoutes(api *gin.RouterGroup, cfg *config.Config) {
+//
+// 两条来源，优先级从高到低：
+//  1. **对象存储**（生产）：CI 构建完二进制后上传到桶，这里读清单并把 URL
+//     指向 <publicBase>/<bucket>/segmenter/<file>。镜像里不再含 82MB 二进制，
+//     部署只需拉代码与前端（约 60MB），跨境链路上从 15 分钟降到 2~3 分钟。
+//  2. **本地目录**（开发/兜底）：跑过 scripts/build-segmenter.ps1 后从磁盘扫。
+func registerDownloadRoutes(api *gin.RouterGroup, cfg *config.Config, fileStore *storage.Client) {
+	var manifest SegmenterDownloads
+
+	// 启动时读一次并缓存：清单很小，但每请求都去对象存储拉一次没有意义。
+	// 用独立 ctx 与短超时：MinIO 挂了不应该拖住启动（回落到磁盘即可）。
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if m, ok := newSegmenterDownloadsFromStore(ctx, fileStore); ok {
+		manifest = m
+	} else {
+		manifest = newSegmenterDownloads(cfg.DownloadsDir())
+	}
+
 	// 用 Any 而不是 GET：非 GET/HEAD 才能走到我们的中文提示，而不是引擎默认的 404 页。
-	api.Any("/downloads/segmenter", downloadsHandler(newSegmenterDownloads(cfg.DownloadsDir())))
+	api.Any("/downloads/segmenter", downloadsHandler(manifest))
 }

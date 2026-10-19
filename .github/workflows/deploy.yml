@@ -131,6 +131,60 @@ jobs:
         if: steps.probe.outputs.method == 'password'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
 
+      # 从构建工作流取回切片器二进制，传进服务器再导入 MinIO。
+      #
+      # 为什么不直接在 CI 里连 MinIO：它只监听回环（安全考虑），runner 连不上。
+      # 绕法是把文件交给本步骤，由它在服务器本地执行 mc cp —— 这样
+      # 既保持了 MinIO 不对公网暴露，又不需要为 CI 单独开一个端口。
+      - name: Download segmenter artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: segmenter-binaries
+          path: segmenter-out
+        continue-on-error: true   # 没有 artifact 时（旧 run / 手动触发）跳过即可
+
+      - name: Publish segmenter to MinIO on server
+        env:
+          METHOD: ${{ steps.probe.outputs.method }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # 没有 artifact 就跳过（手动触发部署、或构建未产出时）
+          if ! ls segmenter-out/segmenter-* >/dev/null 2>&1; then
+            echo "没有 segmenter artifact，跳过发布"
+            exit 0
+          fi
+
+          SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=20
+                    -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
+          if [ "$METHOD" = "key" ]; then
+            SSH_CMD=(ssh -i ~/.ssh/deploy_key "${SSH_OPTS[@]}"
+                     "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
+            SCP_CMD=(scp -i ~/.ssh/deploy_key "${SSH_OPTS[@]}")
+          else
+            SSH_CMD=(sshpass -p "$SSH_PASSWORD" ssh "${SSH_OPTS[@]}"
+                     "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
+            SCP_CMD=(sshpass -p "$SSH_PASSWORD" scp "${SSH_OPTS[@]}")
+          fi
+
+          # 先把二进制传到服务器（82MB，走 SCP）
+          "${SSH_CMD[@]}" "mkdir -p /tmp/pr-segmenter && rm -f /tmp/pr-segmenter/*"
+          echo "上传二进制到服务器…"
+          "${SCP_CMD[@]}" segmenter-out/segmenter-* \
+            "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}:/tmp/pr-segmenter/"
+
+          # 上传发布脚本（在服务器上执行，避免 heredoc 里嵌 python 的多层引号问题）
+          "${SCP_CMD[@]}" scripts/publish-segmenter.sh \
+            "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}:/tmp/publish-segmenter.sh"
+
+          # 在服务器本地执行：mc 导入桶 + 生成清单
+          "${SSH_CMD[@]}" bash -s << 'REMOTE'
+          set -euo pipefail
+          chmod +x /tmp/publish-segmenter.sh
+          /tmp/publish-segmenter.sh
+          REMOTE
+
       - name: Deploy
         env:
           METHOD: ${{ steps.probe.outputs.method }}

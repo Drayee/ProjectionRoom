@@ -40,6 +40,15 @@ WORKDIR /app
 COPY --from=builder /build/projectionroom .
 
 # Copy client dist (前端产物由 CI 的 npm 步骤生成后一起打进镜像)
+#
+# ⚠ 这里**排除 downloads/**：切片器二进制（5 个平台共 82MB）不进镜像，
+# 改由 CI 上传到 MinIO 桶，清单端点直接返回指向对象存储的 URL。
+#
+# 为什么必须排除：这 82MB 落在"每次代码变都会重新生成"的那一层里，
+# 于是**每次部署都要重下 82MB**。在跨境链路上实测要 15 分钟以上，
+# 而且经常中途僵死（Broken pipe / 零字节停滞数十分钟），
+# 表现为 Deploy 工作流莫名其妙失败。排除后镜像从 384MB 降到约 300MB，
+# 变化层从约 140MB 降到约 60MB。
 COPY --from=builder /build/client/dist ./client/dist
 
 # Expose port

@@ -283,7 +283,7 @@ func NewRouter(
 
 	// 客户端切片器二进制的只读清单：只回 JSON（平台/大小/sha256），
 	// 二进制本身由静态托管 /downloads/<file> 送出，所以这里先于 registerStatic 注册。
-	registerDownloadRoutes(api, cfg)
+	registerDownloadRoutes(api, cfg, fileStore)
 
 	// T8：/ws 支持一次性票据（绑定账号 + 封禁拦截）；无票据时是**逐字不变**的游客路径。
 	r.GET("/ws", wsHandler(cfg, hub, rooms, joinLimiter, accountDeps))

@@ -10,6 +10,23 @@
 # —— 本地切片产物（体积巨大，且不属于发布内容）——
 client/dist/downloads/room-media/
 
+# —— 切片器二进制：不进镜像 ——
+#
+# 5 个平台共 82MB。它们落在"每次代码变都会重新生成"的那一层里，
+# 导致每次部署都要重下 82MB —— 跨境链路上实测 15 分钟以上且经常僵死。
+#
+# 改为：CI 构建完后上传到 MinIO 桶的 segmenter/ 前缀，
+# 清单端点（/api/downloads/segmenter）直接返回指向对象存储的 URL。
+# 详见 internal/storage/segmenter.go 与 docs/STORAGE-MINIO.md。
+#
+# ⚠ 必须逐文件列出而不是 `client/dist/downloads/`：
+# 那个目录里还有别的静态资源需要进镜像（若有），整体排除会一起带走。
+client/dist/downloads/segmenter-windows-amd64.exe
+client/dist/downloads/segmenter-linux-amd64
+client/dist/downloads/segmenter-linux-arm64
+client/dist/downloads/segmenter-darwin-amd64
+client/dist/downloads/segmenter-darwin-arm64
+
 # —— 版本控制与 CI ——
 .git/
 .github/

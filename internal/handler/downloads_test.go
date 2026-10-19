@@ -35,7 +35,9 @@ func newTestDownloadsEngine(t *testing.T, dir string) *gin.Engine {
 	cfg.Downloads.Dir = dir
 
 	r := gin.New()
-	registerDownloadRoutes(r.Group("/api"), cfg)
+	// 第三个参数传 nil = 不启用对象存储，走磁盘扫描路径
+	// （这些用例验证的正是本地目录的行为）。
+	registerDownloadRoutes(r.Group("/api"), cfg, nil)
 	return r
 }
 

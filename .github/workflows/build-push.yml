@@ -79,6 +79,19 @@ jobs:
           chmod +x scripts/build-segmenter.sh
           ./scripts/build-segmenter.sh
 
+      # 把二进制作为 artifact 交给 deploy 工作流（后者在服务器本地导入 MinIO）。
+      #
+      # 这样绕开了"MinIO 只监听回环"的限制：runner 不需要连 MinIO，
+      # 只需把文件交给 deploy，由它在服务器上执行 mc cp。
+      - name: Upload segmenter artifacts for deploy job
+        uses: actions/upload-artifact@v4
+        with:
+          name: segmenter-binaries
+          path: |
+            client/dist/downloads/segmenter-*
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Verify frontend output
         run: |
           test -f client/dist/index.html || (echo "client/dist/index.html missing" && exit 1)
