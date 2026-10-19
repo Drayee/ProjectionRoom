@@ -2,13 +2,25 @@
 #
 # 两种用法：
 #   A. CI 部署（推荐）：镜像由 GitHub Actions 构建推到 GHCR，
-#      部署时通过 `IMAGE_REF` 环境变量指定具体标签（按提交号精确回滚）：
+#      部署时通过 `IMAGE_REF` 指定具体标签（按提交号精确回滚）：
 #        IMAGE_REF=ghcr.io/drayee/projectionroom:abc1234 docker compose up -d
 #   B. 本地构建：不传 IMAGE_REF 时回落到 `build:` 分支自行构建。
 #
-# ⚠ 数据库不放在 compose 里：本机已有 PostgreSQL 16（回环 5432）且存着生产数据，
-#    再起一个 pg 容器会争抢 5432 端口并让"数据在哪"变成两个答案。
-#    app 通过 host.docker.internal 访问宿主机数据库（见下方 extra_hosts）。
+# ⚠ 三条关键设计（都踩过坑）：
+#
+#  1. **用 host 网络，不用 bridge**。
+#     宿主机 PostgreSQL 只监听 127.0.0.1（`listen_addresses = 'localhost'`），
+#     bridge 网络里的容器通过网关 IP 连不上它，而 `host.docker.internal`
+#     在 Linux 上还需要额外配置 DNS。host 模式下容器与宿主机共享网络栈，
+#     DSN 里的 `127.0.0.1` 就是宿主机本身 —— 不需要改 PG 配置、不需要开端口。
+#     代价：容器不能再做端口映射（`ports:` 必须删掉），8080 直接落在宿主机上，
+#     这与裸机部署时的口径完全一致（应用只监听回环，公网经 nginx 进来）。
+#
+#  2. **数据库不放进 compose**。本机已有 PostgreSQL 16 且存着生产数据，
+#     再起一个 pg 容器会争抢 5432 端口，并让"数据到底在哪"变成两个答案。
+#
+#  3. **镜像标签由外部注入**。CI 部署时传 IMAGE_REF（按提交号），
+#     回滚就是再跑一次旧 sha；本地开发不传则用 build 分支现构。
 
 services:
   app:
@@ -18,14 +30,9 @@ services:
       dockerfile: Dockerfile
     container_name: projectionroom-app
     restart: unless-stopped
+    network_mode: host
     env_file:
       - .env
-    # 让容器内的 127.0.0.1 指向宿主机，从而复用宿主机上的 PostgreSQL
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      # 只绑回环：公网流量一律经 nginx 进来（与裸机部署时的口径一致）
-      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
       interval: 30s
