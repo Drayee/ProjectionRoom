@@ -1,15 +1,22 @@
 # GitHub Actions: 部署到生产服务器（60.205.212.25）
 #
 # 前置条件（缺任一项都会失败）：
-#  1. Secret `REGISTRY_TOKEN`  —— 用于登录 GHCR 拉镜像（与 build-push 共用）
-#  2. Secret `SSH_PRIVATE_KEY` —— 部署用的私钥（推荐，替代密码）
-#     或 Secret `SSH_PASSWORD`  —— 密码认证（不推荐：会出现在 runner 环境里）
+#  1. Secret `REGISTRY_TOKEN`  —— 登录 GHCR 拉镜像（与 build-push 共用）
+#  2. Secret `SSH_PRIVATE_KEY` —— 部署私钥（**必须是完整 PEM/OpenSSH 私钥**，
+#     含 `-----BEGIN ... PRIVATE KEY-----` 与 `-----END ...-----` 两行）
+#     或 Secret `SSH_PASSWORD`  —— 密码认证（备选）
 #
 # 设计取舍：
-#  - **不在 runner 上编译**：镜像已由 build-push 工作流构建好并推到 GHCR，
-#    这里只负责"让服务器换成那个镜像"。runner 上重复编译既慢又容易版本漂移。
-#  - **按 sha 精确部署**：用提交号作镜像标签，回滚就是再跑一次旧 sha。
+#  - **不在 runner 上编译**：镜像已由 build-push 构建推到 GHCR，这里只负责
+#    "让服务器换成那个镜像"。runner 上重复编译既慢又容易版本漂移。
+#  - **按 sha 精确部署**：用提交号作标签，回滚就是再跑一次旧 sha。
 #  - **部署后必须过健康检查**：拉起来不算成功，/healthz 返回 200 才算。
+#  - **认证方式靠实测决定，不靠"Secret 非空"**：
+#    踩过的坑 —— 只要 SSH_PRIVATE_KEY 有内容就走 key 分支，哪怕内容是密码或
+#    残缺私钥（症状是 `error in libcrypto` + `Permission denied`），
+#    而密码分支永远被跳过。现在先用私钥**真跑一次 `ssh true`**，失败才回退。
+#  - **不 `docker compose down`**：down 会让服务空窗几秒。`up -d` 自带
+#    重建语义（镜像变了就换容器），nginx 与用户侧无感。
 
 name: Deploy to Production
 
@@ -17,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: '要部署的镜像标签（默认 latest）'
+        description: '要部署的镜像标签（默认 latest；建议填提交号前 7 位）'
         required: false
         default: 'latest'
   workflow_run:
@@ -45,93 +52,136 @@ jobs:
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
           else
             SHA="${{ github.event.workflow_run.head_sha }}"
-            echo "tag=${SHA:0:7}" >> $GITHUB_OUTPUT
+            echo "tag=${SHA:0:7}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Show target
         run: |
-          echo "server=${{ env.SERVER_HOST }}"
-          echo "image=${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}"
+          echo "server = ${{ env.SERVER_HOST }}"
+          echo "image  = ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}"
 
-      - name: Prepare SSH key
+      - name: Probe SSH authentication
+        id: probe
         run: |
+          set -uo pipefail
           mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ env.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          METHOD=none
+
+          # —— 先试私钥 ——
           if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
-            echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+            printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
             chmod 600 ~/.ssh/deploy_key
-            echo "SSH_KEY_READY=1" >> $GITHUB_ENV
+
+            # 关键：先看它是不是一个**结构完整**的私钥，再实际握手。
+            # 只看"Secret 非空"是不够的 —— 那是上一次失败的原因。
+            if ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null 2>&1; then
+              echo "私钥格式有效，尝试握手…"
+              if ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=15 \
+                     "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}" true 2>/dev/null; then
+                echo "私钥认证成功"
+                METHOD=key
+              else
+                echo "::warning::私钥有效但服务器拒绝（公钥未装进 authorized_keys？）"
+              fi
+            else
+              echo "::warning::SSH_PRIVATE_KEY 不是有效的私钥（缺 BEGIN/END 行，或填成了密码）"
+            fi
           else
-            echo "SSH_KEY_READY=0" >> $GITHUB_ENV
-            echo "::warning::未配置 SSH_PRIVATE_KEY，将尝试密码认证"
+            echo "未配置 SSH_PRIVATE_KEY"
           fi
-          ssh-keyscan -H ${{ env.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Deploy via SSH (key auth)
-        if: env.SSH_KEY_READY == '1'
-        run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} << 'REMOTE'
-            set -e
-            cd /opt/projectionroom
+          # —— 私钥不可用则回退密码 ——
+          if [ "$METHOD" = "none" ] && [ -n "${{ secrets.SSH_PASSWORD }}" ]; then
+            echo "回退到密码认证"
+            METHOD=password
+          fi
 
-            # 登录 GHCR 拉取私有镜像（token 由 Actions 注入）
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-
-            docker pull "$IMAGE_REF"
-
-            # 用拉下来的镜像重启（compose 文件里用 image: ${IMAGE_REF}）
-            export IMAGE_REF
-            docker compose down || true
-            docker compose up -d
-
-            # 健康检查：不通过就失败，避免"容器起来了但服务是坏的"被当成成功
-            for i in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
-                echo "healthz OK after ${i}s"
-                exit 0
-              fi
-              sleep 1
-            done
-            echo "healthz FAILED after 30s"
-            docker compose logs --tail 50
+          if [ "$METHOD" = "none" ]; then
+            echo "::error::没有任何可用的 SSH 认证方式。请在仓库 Secrets 里配置 SSH_PRIVATE_KEY（完整私钥）或 SSH_PASSWORD。"
             exit 1
-          REMOTE
-        env:
-          GHCR_TOKEN: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_REGISTRY_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
-          IMAGE_REF: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+          fi
 
-      - name: Deploy via SSH (password auth)
-        if: env.SSH_KEY_READY == '0'
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
-          sshpass -p "${{ secrets.SSH_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
-            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} << 'REMOTE'
-            set -e
-            cd /opt/projectionroom
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            docker pull "$IMAGE_REF"
-            export IMAGE_REF
-            docker compose down || true
-            docker compose up -d
-            for i in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
-                echo "healthz OK after ${i}s"; exit 0
-              fi
-              sleep 1
-            done
-            echo "healthz FAILED"; docker compose logs --tail 50; exit 1
-          REMOTE
+          echo "method=$METHOD" >> "$GITHUB_OUTPUT"
+          echo "选用认证方式：$METHOD"
+
+      - name: Install sshpass (password fallback only)
+        if: steps.probe.outputs.method == 'password'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+
+      - name: Deploy
         env:
+          METHOD: ${{ steps.probe.outputs.method }}
           GHCR_TOKEN: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_REGISTRY_TOKEN }}
           GHCR_USER: ${{ github.actor }}
           IMAGE_REF: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # 组装 SSH 命令（两种认证只在这里分叉，下面的远程脚本完全共用）
+          if [ "$METHOD" = "key" ]; then
+            SSH_CMD=(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no
+                     -o ConnectTimeout=20 "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
+          else
+            SSH_CMD=(sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no
+                     -o ConnectTimeout=20 "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
+          fi
+
+          "${SSH_CMD[@]}" bash -s << 'REMOTE'
+          set -euo pipefail
+          cd /opt/projectionroom
+
+          # GHCR 登录：私有镜像必须。token 由 Actions 注入，不落盘。
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+          echo "拉取 $IMAGE_REF"
+          docker pull "$IMAGE_REF"
+
+          # MinIO 的凭据在 /opt/minio/.env（root:600），compose 里用 ${MINIO_ROOT_*}
+          # 引用。这里 source 一下再 up，否则 compose 会因变量缺失而报错。
+          set -a; . /opt/minio/.env; set +a
+
+          # 把镜像标签写进 .env，让下次手工 `docker compose up -d` 也用同一个版本
+          # （避免"CI 部署了新版，手工重启又回到 latest"的漂移）。
+          if grep -q '^IMAGE_REF=' .env; then
+            sed -i "s|^IMAGE_REF=.*|IMAGE_REF=$IMAGE_REF|" .env
+          else
+            echo "IMAGE_REF=$IMAGE_REF" >> .env
+          fi
+          export IMAGE_REF
+
+          # 用 up -d 而不是 down+up：down 会有几秒服务空窗。
+          # 镜像变了 compose 会重建容器，没变则原地不动。
+          docker compose up -d
+
+          # 健康检查：不通过就失败。容器"起来了"不等于"服务是好的"。
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+              echo "healthz OK（${i}s）"
+              echo "--- 当前容器 ---"
+              docker ps --format '{{.Names}} | {{.Status}} | {{.Image}}'
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "healthz 超时未通过，输出最近日志："
+          docker compose logs --tail 40
+          exit 1
+          REMOTE
 
       - name: Deployment summary
+        if: always() && steps.probe.outcome == 'success'
         run: |
-          echo "### 部署完成" >> $GITHUB_STEP_SUMMARY
-          echo "- 镜像：\`${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- 服务器：\`${{ env.SERVER_HOST }}\`" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### 部署结果"
+            echo "- 镜像：\`${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}\`"
+            echo "- 服务器：\`${{ env.SERVER_HOST }}\`"
+            echo "- 认证：\`${{ steps.probe.outputs.method }}\`"
+            echo "- 状态：\`${{ job.status }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
