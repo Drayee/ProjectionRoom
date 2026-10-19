@@ -1,128 +1,137 @@
-# GitHub Actions CI/CD for ProjectionRoom
-# Deploy to server: 60.205.212.25
+# GitHub Actions: 部署到生产服务器（60.205.212.25）
+#
+# 前置条件（缺任一项都会失败）：
+#  1. Secret `REGISTRY_TOKEN`  —— 用于登录 GHCR 拉镜像（与 build-push 共用）
+#  2. Secret `SSH_PRIVATE_KEY` —— 部署用的私钥（推荐，替代密码）
+#     或 Secret `SSH_PASSWORD`  —— 密码认证（不推荐：会出现在 runner 环境里）
+#
+# 设计取舍：
+#  - **不在 runner 上编译**：镜像已由 build-push 工作流构建好并推到 GHCR，
+#    这里只负责"让服务器换成那个镜像"。runner 上重复编译既慢又容易版本漂移。
+#  - **按 sha 精确部署**：用提交号作镜像标签，回滚就是再跑一次旧 sha。
+#  - **部署后必须过健康检查**：拉起来不算成功，/healthz 返回 200 才算。
 
 name: Deploy to Production
 
 on:
-  push:
-    branches: [main, master]
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '要部署的镜像标签（默认 latest）'
+        required: false
+        default: 'latest'
+  workflow_run:
+    workflows: ["Build & Push Docker Image"]
+    types: [completed]
+    branches: [master, main]
 
 env:
   SERVER_HOST: ${{ secrets.SERVER_HOST || '60.205.212.25' }}
   SERVER_USER: root
   DEPLOY_PATH: /opt/projectionroom
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/drayee/projectionroom
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+    # 只在构建成功时自动部署；手动触发不受此限
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-      
-      - name: Install dependencies
+      - name: Resolve image tag
+        id: tag
         run: |
-          sudo apt-get update
-          sudo apt-get install -y sshpass docker.io
-      
-      - name: Build and Test
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            SHA="${{ github.event.workflow_run.head_sha }}"
+            echo "tag=${SHA:0:7}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Show target
         run: |
-          echo "Running tests..."
-          go test ./... -count=1
-          
-          echo "Building binary..."
-          CGO_ENABLED=0 GOOS=linux go build -o projectionroom ./cmd
-      
-      - name: Build frontend
+          echo "server=${{ env.SERVER_HOST }}"
+          echo "image=${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}"
+
+      - name: Prepare SSH key
         run: |
-          npm --prefix client install
-          npm --prefix client run build
-      
-      - name: Backup old deployment
+          mkdir -p ~/.ssh
+          if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+            chmod 600 ~/.ssh/deploy_key
+            echo "SSH_KEY_READY=1" >> $GITHUB_ENV
+          else
+            echo "SSH_KEY_READY=0" >> $GITHUB_ENV
+            echo "::warning::未配置 SSH_PRIVATE_KEY，将尝试密码认证"
+          fi
+          ssh-keyscan -H ${{ env.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy via SSH (key auth)
+        if: env.SSH_KEY_READY == '1'
         run: |
-          sshpass -p '${{ secrets.SERVER_PASSWORD }}' ssh root@${{ env.SERVER_HOST }} << EOF
-            cd ${{ env.DEPLOY_PATH }}
-            if [ -d "backup-$(date +%Y%m%d-%H%M%S)" ]; then
-              echo "Backup already exists"
-            else
-              mv projectionroom projectionroom.backup.$(date +%Y%m%d-%H%M%S)
-              mv client client.backup.$(date +%Y%m%d-%H%M%S)
-              echo "Backup created"
-            fi
-          EOF
-      
-      - name: Upload new files via SFTP
-        run: |
-          scp -o StrictHostKeyChecking=no \
-            -i ~/.ssh/id_rsa \
-            projectionroom root@${{ env.SERVER_HOST }}:${{ env.DEPLOY_PATH }}/
-          
-          scp -o StrictHostKeyChecking=no \
-            -r client/dist/* root@${{ env.SERVER_HOST }}:${{ env.DEPLOY_PATH }}/client/
-      
-      - name: Restart service on server
-        run: |
-          sshpass -p '${{ secrets.SERVER_PASSWORD }}' ssh root@${{ env.SERVER_HOST }} << EOF
-            cd ${{ env.DEPLOY_PATH }}
-            
-            # Check if systemd is used
-            if systemctl list-unit-files | grep -q projectionroom.service; then
-              echo "Restarting systemd service..."
-              systemctl restart projectionroom.service
-              
-              # Wait for health check
-              for i in {1..30}; do
-                if curl -s http://localhost:8080/healthz > /dev/null 2>&1; then
-                  echo "Service healthy!"
-                  exit 0
-                fi
-                echo "Waiting for service to be healthy... ($i/30)"
-                sleep 2
-              done
-              
-              echo "ERROR: Service failed to start"
-              exit 1
-            else
-              # Direct binary execution fallback
-              echo "Killing old process..."
-              pkill -f projectionroom || true
-              
-              echo "Starting new binary..."
-              nohup ./projectionroom > /var/log/projectionroom.log 2>&1 &
-              
-              echo "Waiting for startup..."
-              sleep 5
-              
-              if pgrep -f projectionroom > /dev/null; then
-                echo "Process started successfully!"
-              else
-                echo "ERROR: Failed to start process"
-                cat /var/log/projectionroom.log
-                exit 1
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} << 'REMOTE'
+            set -e
+            cd /opt/projectionroom
+
+            # 登录 GHCR 拉取私有镜像（token 由 Actions 注入）
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+            docker pull "$IMAGE_REF"
+
+            # 用拉下来的镜像重启（compose 文件里用 image: ${IMAGE_REF}）
+            export IMAGE_REF
+            docker compose down || true
+            docker compose up -d
+
+            # 健康检查：不通过就失败，避免"容器起来了但服务是坏的"被当成成功
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+                echo "healthz OK after ${i}s"
+                exit 0
               fi
-            fi
-          EOF
-      
-      - name: Verify deployment
+              sleep 1
+            done
+            echo "healthz FAILED after 30s"
+            docker compose logs --tail 50
+            exit 1
+          REMOTE
+        env:
+          GHCR_TOKEN: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_REGISTRY_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE_REF: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+
+      - name: Deploy via SSH (password auth)
+        if: env.SSH_KEY_READY == '0'
         run: |
-          HEALTH_URL="http://${{ env.SERVER_HOST }}:8080/healthz"
-          echo "Checking health endpoint: $HEALTH_URL"
-          
-          for i in {1..30}; do
-            if curl -s "$HEALTH_URL" | grep -q "ok"; then
-              echo "✅ Deployment successful! Health check passed."
-              exit 0
-            fi
-            
-            echo "Health check not ready yet ($i/30)"
-            sleep 3
-          done
-          
-          echo "❌ Deployment verification failed"
-          exit 1
+          sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} << 'REMOTE'
+            set -e
+            cd /opt/projectionroom
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker pull "$IMAGE_REF"
+            export IMAGE_REF
+            docker compose down || true
+            docker compose up -d
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+                echo "healthz OK after ${i}s"; exit 0
+              fi
+              sleep 1
+            done
+            echo "healthz FAILED"; docker compose logs --tail 50; exit 1
+          REMOTE
+        env:
+          GHCR_TOKEN: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_REGISTRY_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE_REF: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+
+      - name: Deployment summary
+        run: |
+          echo "### 部署完成" >> $GITHUB_STEP_SUMMARY
+          echo "- 镜像：\`${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 服务器：\`${{ env.SERVER_HOST }}\`" >> $GITHUB_STEP_SUMMARY
