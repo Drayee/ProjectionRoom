@@ -136,11 +136,19 @@ jobs:
       # 为什么不直接在 CI 里连 MinIO：它只监听回环（安全考虑），runner 连不上。
       # 绕法是把文件交给本步骤，由它在服务器本地执行 mc cp —— 这样
       # 既保持了 MinIO 不对公网暴露，又不需要为 CI 单独开一个端口。
+      #
+      # ⚠ 关键：本工作流由 `workflow_run` 触发，**不是**与构建同一个 run。
+      # `download-artifact` 默认只在**当前** run 里找，而这里当前 run 里什么都没有
+      # （本 job 不产出 artifact）。必须显式给 `run-id` 指向那个构建 run，
+      # 否则会静默拿到空目录 —— 表现是"发布步骤被跳过，桶里没有文件"。
       - name: Download segmenter artifacts
         uses: actions/download-artifact@v4
         with:
           name: segmenter-binaries
           path: segmenter-out
+          # 自动触发时用触发本次的构建 run；手动触发时退回最近一次成功构建
+          run-id: ${{ github.event.workflow_run.id || '' }}
+          github-token: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_TOKEN }}
         continue-on-error: true   # 没有 artifact 时（旧 run / 手动触发）跳过即可
 
       - name: Publish segmenter to MinIO on server
