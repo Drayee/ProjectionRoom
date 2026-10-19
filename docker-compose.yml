@@ -1,26 +1,26 @@
 # ProjectionRoom 生产部署（Docker Compose）
 #
-# 两种用法：
-#   A. CI 部署（推荐）：镜像由 GitHub Actions 构建推到 GHCR，
-#      部署时通过 `IMAGE_REF` 指定具体标签（按提交号精确回滚）：
-#        IMAGE_REF=ghcr.io/drayee/projectionroom:abc1234 docker compose up -d
-#   B. 本地构建：不传 IMAGE_REF 时回落到 `build:` 分支自行构建。
+# 两个服务：应用 + 对象存储（MinIO）。PostgreSQL 在宿主机上（不在 compose 里）。
 #
-# ⚠ 三条关键设计（都踩过坑）：
+# ⚠ 四条关键设计（每条都踩过坑）：
 #
-#  1. **用 host 网络，不用 bridge**。
-#     宿主机 PostgreSQL 只监听 127.0.0.1（`listen_addresses = 'localhost'`），
-#     bridge 网络里的容器通过网关 IP 连不上它，而 `host.docker.internal`
-#     在 Linux 上还需要额外配置 DNS。host 模式下容器与宿主机共享网络栈，
-#     DSN 里的 `127.0.0.1` 就是宿主机本身 —— 不需要改 PG 配置、不需要开端口。
-#     代价：容器不能再做端口映射（`ports:` 必须删掉），8080 直接落在宿主机上，
-#     这与裸机部署时的口径完全一致（应用只监听回环，公网经 nginx 进来）。
+#  1. **两个服务都用 host 网络，不用 bridge**。
+#     宿主机 PostgreSQL 只监听 127.0.0.1，bridge 网络里的容器通过网关 IP 连不上它，
+#     而 `host.docker.internal` 在 Linux 上还需要额外配 DNS。
+#     host 模式下容器与宿主机共享网络栈：DSN 里的 127.0.0.1 就是宿主机本身，
+#     应用连 MinIO 的 127.0.0.1:9000 也就是同一个 MinIO。不需要改任何 PG/MinIO 配置。
+#     代价：容器不能再做端口映射（`ports:` 必须删掉）—— 端口直接落在宿主机上，
+#     这与裸机部署的口径完全一致（服务只监听回环，公网经 nginx 进来）。
 #
 #  2. **数据库不放进 compose**。本机已有 PostgreSQL 16 且存着生产数据，
 #     再起一个 pg 容器会争抢 5432 端口，并让"数据到底在哪"变成两个答案。
 #
 #  3. **镜像标签由外部注入**。CI 部署时传 IMAGE_REF（按提交号），
 #     回滚就是再跑一次旧 sha；本地开发不传则用 build 分支现构。
+#
+#  4. **MinIO 的内存限额是硬性的**。服务器总共 1.6 GiB，实测 MinIO 空载约 71 MiB，
+#     但导入大图或并发上传时会涨。给 256 MiB 上限，超了由内核 OOM 杀容器
+#     （restart: unless-stopped 会让它自己起来），而不是拖垮整台机器。
 
 services:
   app:
@@ -33,6 +33,9 @@ services:
     network_mode: host
     env_file:
       - .env
+    depends_on:
+      minio:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
       interval: 30s
@@ -47,5 +50,33 @@ services:
     deploy:
       resources:
         limits:
-          # 服务器只有 1.6 GiB 内存，且 PG/nginx 也在上面跑
           memory: 700M
+
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    container_name: pr-minio
+    restart: unless-stopped
+    network_mode: host
+    command: server /data --console-address ":9001"
+    environment:
+      # 凭据从 /opt/minio/.env 读（root:600），不写进本文件 ——
+      # 这个文件在版本库里，而凭据不应该。
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?缺少 MINIO_ROOT_USER，请先 source /opt/minio/.env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?缺少 MINIO_ROOT_PASSWORD}
+    volumes:
+      - /opt/minio/data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M

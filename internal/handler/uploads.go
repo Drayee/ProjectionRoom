@@ -79,10 +79,13 @@ func uploadImageHandler(store *storage.Client) gin.HandlerFunc {
 		// 真正的保障是"只存位图 + 匿名只读 + 不走同源执行"这三条。
 		// 若将来要支持 SVG 或需要更强的保证，必须改成嗅探 + 转码。
 		mime := part.Header.Get("Content-Type")
-		size := c.Request.ContentLength
-		if size < 0 {
-			size = -1 // 未知，交给 SDK 分块
-		}
+
+		// ⚠ 这里**不能**用 c.Request.ContentLength：那是整个 multipart 请求的长度
+		// （含 boundary、各段头、其它表单字段），比文件本身大得多。
+		// 用它当 PutObject 的 size 会让 SDK 期待 N 字节却只读到 M 字节，
+		// 报 "ContentLength=N with Body length M" 并 500。
+		// 传 -1 让 SDK 自己分块上传（它会边读边发，不需要预先知道长度）。
+		size := int64(-1)
 
 		url, err := store.PutImage(c.Request.Context(), part, size, mime)
 		switch {
