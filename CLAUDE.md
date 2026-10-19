@@ -39,6 +39,7 @@
 | `internal/model/` | 领域模型、错误码、`wire.go`(解码前预算)、`pb_convert.go`(protobuf ↔ 领域) |
 | `internal/pb/` | **生成代码**（勿手改）；真源是 `proto/projection_room.proto`，重新生成用 `scripts/gen-proto.ps1` |
 | `internal/utils/` | 小工具（`rand.go` 的 crypto/rand 封装等） |
+| `internal/storage/` | **对象存储的唯一出口**（MinIO / S3 兼容）：`minio.go` 的 `PutImage`/`Remove`/`EnsureBucket`。只服务图片等静态附件，**不得**把视频分片塞进来（不变量 I1）。上层（handler）不认识 S3 SDK，换实现只动这个包。`Endpoint` 为空即未启用 → `/api/uploads` 不注册（404），与账号层"DSN 为空即不注册 /api/auth/*"同一条约定 |
 | `cmd/` | **根包只有三个文件**：`main.go`(最薄骨架：读配置 → `InitializeApp` → 起服务 → 优雅退出，无业务代码) · `wire.go`(**只有** `//go:build wireinject` 头 + `InitializeApp`，`wire.Build(bootstrap.ProviderSet)`，无业务代码) · `wire_gen.go`(`go tool wire ./cmd` 生成)。**provider 全在 `internal/bootstrap/`**。另有独立 main 包 `cmd/segmenter/`(本地切片器 CLI，被 `scripts/build-segmenter.ps1` 交叉编译成用户下载的 exe；它的改动会影响构建脚本与 `docs/SEGMENT.md`) |
 | `client/` | Vue 3 + TS + Vite（月夜故障 · B 重建后）：`src/pages/`、`src/components/{ui,features}/`、`src/styles/{tokens,base}.css`、`src/stores/`、`src/api/`、`src/utils/`、`src/gen/`(生成的原型代码)、`public/icons/`(**本地 SVG 图标，用多少复制多少**)、`public/fonts/`、`scripts/prune-dist.mjs`(构建后清理陈旧产物)。旧 `src/views/` 与根级 `src/components/` 已删（零残留） |
 | `test/script/` | 真机验收脚本（headless Chrome，见 §6） |
@@ -138,12 +139,19 @@ CSP 会拦住"跨源本机媒体服务器"的注入路径（脚手架用法）�
 
 ## 8. 部署事实（生产）
 
-- 服务器 **60.205.212.25**（阿里云 ECS，Ubuntu 24.04，2 vCPU / 1.6 GB）。访问入口：nginx 80 反代到 `127.0.0.1:8080`。
-- `systemd` 单元 `projectionroom.service`：**非 root**（`User=projectionroom`）、沙箱（`ProtectSystem=strict`/`PrivateTmp`/`NoNewPrivileges`/`RestrictAddressFamilies`）、cgroup 限额（`MemoryMax=700M`/`CPUQuota=150%`）、`EnvironmentFile=/opt/projectionroom/.env`（**root:600**，含 `PR_DB_DSN` 与 `PR_JWT_SECRET`）。
-- 应用**只监听回环**（公网只能经 nginx）；8080 曾有安全组规则，现已无害。
-- PostgreSQL 16 在本机（回环），库 `projectionroom`（生产）+ `projectionroom_test`（测试）；角色 `pr_app`（最小权限）。
-- 回滚点：`/root/pr-backup-20261007-161941/`（nginx 站点配置、旧 unit、schema 备份、旧二进制与 dist）。
-- **已知缺口**：无 TLS（refresh Cookie 因此不带 `Secure`，token/密码明文过网）；`client/dist/downloads/room-media`（约 3.95 GB）仍在静态根里，**对公网可下载**。
+**2026-10-19 起改为 Docker Compose 部署**（原 systemd 单元已 `disable`，二进制仍留在 `/opt/projectionroom` 作回滚）。
+
+- 服务器 **60.205.212.25**（阿里云 ECS，Ubuntu 24.04，2 vCPU / 1.6 GB）。对外只有 **80** 一个入口：nginx 反代到 `127.0.0.1:8080`。详见 `docs/DEPLOY-SINGLE-PORT.md`。
+- **两个容器，都用 `network_mode: host`**（宿主机 PG 只监听回环，bridge 网络连不上）：
+  - `projectionroom-app`：镜像 `ghcr.io/drayee/projectionroom:<sha>`，内存限额 700M。
+  - `pr-minio`：`minio/minio:latest`，内存限额 256M（实测空载 71 MiB），数据在 `/opt/minio/data`。
+  - ⚠ **宿主机连不上 Docker Hub**（`registry-1.docker.io` 超时）。MinIO 镜像是经 `docker save` + SFTP + `docker load` 送进去的；应用的镜像走 GHCR（可达）。**新镜像要么推 GHCR，要么同样手工 load**。
+- **`/opt/projectionroom/.env`（root:600）** 含 `PR_DB_DSN`、`PR_JWT_SECRET`、SMTP、`PR_ADDR=127.0.0.1:8080`、`PR_ALLOWED_ORIGINS`（含 `http://60.205.212.25` 与 `:80` 两种形态）、以及 `PR_STORAGE_*` 六项。
+- **`/opt/minio/.env`（root:600）** 含 `MINIO_ROOT_USER/_PASSWORD`，被 compose 的 minio 服务消费，也被应用侧的 `PR_STORAGE_ACCESS_KEY/_SECRET_KEY` 引用（轮换时两处都要改）。
+- **对象存储**：桶 `pr-files`，匿名只读（只给 `s3:GetObject`，不给 ListBucket）。浏览器经 `http://60.205.212.25/files/pr-files/...` 访问（nginx `location /files/` 反代到 9000）。详见 `docs/STORAGE-MINIO.md`。
+- PostgreSQL 16 在宿主机（回环），库 `projectionroom`（生产）+ `projectionroom_test`（测试）；角色 `pr_app`。**`pg_hba.conf` 曾临时改过 trust 用于导入，已从 `.bak` 恢复**。
+- CI：`.github/workflows/build-push.yml` 推镜像到 GHCR（Secret 名 **`REGISTRY_TOKEN`**，classic PAT 带 `write:packages`）；`deploy.yml` 从 GHCR 拉镜像部署。⚠ Dockerfile **不能**带 `-tags wireinject`（会选中空壳 `cmd/wire.go`，`InitializeApp` 返回 nil → 启动即 SIGSEGV）。
+- **已知缺口**：无 TLS（refresh Cookie 因此不带 `Secure`，token/密码明文过网）；`client/dist/downloads/room-media` 本地约 3.95 GB，但 **`.dockerignore` 已排除**，镜像内不存在（该缺口在 Docker 部署下已消解）。
 
 ## 9. 工作约定（人与 AI 都适用）
 
