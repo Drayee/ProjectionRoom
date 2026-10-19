@@ -42,6 +42,9 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # 整条 job 的硬上限。远程拉镜像最多等 15 分钟，健康检查最多 60 秒，
+    # 加上 checkout/探测的开销，25 分钟足够；超过说明卡死了，让它失败而不是挂到 6 小时。
+    timeout-minutes: 25
     # 只在构建成功时自动部署；手动触发不受此限
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -124,12 +127,20 @@ jobs:
           set -euo pipefail
 
           # 组装 SSH 命令（两种认证只在这里分叉，下面的远程脚本完全共用）
+          #
+          # ⚠ 必须带 ServerAliveInterval：这台服务器的 docker pull 可能跑几分钟，
+          # 而链路上的中间设备（NAT/防火墙）会掐掉"长时间无数据"的连接。
+          # 踩过的现场：pull 到 4 分 15 秒时 `client_loop: send disconnect: Broken pipe`，
+          # exit 255 —— 看起来像部署失败，实际只是 SSH 空闲被断。
+          # ServerAliveInterval=30 每 30 秒发一个保活包，让连接始终"有数据"。
+          SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=20
+                    -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
           if [ "$METHOD" = "key" ]; then
-            SSH_CMD=(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no
-                     -o ConnectTimeout=20 "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
+            SSH_CMD=(ssh -i ~/.ssh/deploy_key "${SSH_OPTS[@]}"
+                     "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
           else
-            SSH_CMD=(sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no
-                     -o ConnectTimeout=20 "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
+            SSH_CMD=(sshpass -p "$SSH_PASSWORD" ssh "${SSH_OPTS[@]}"
+                     "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
           fi
 
           # ⚠ 变量传递：`ssh host bash -s << 'EOF'` 这种写法里，远程 shell 拿不到
@@ -155,8 +166,51 @@ jobs:
           # GHCR 登录：私有镜像必须。token 由 Actions 注入，不落盘。
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
-          echo "拉取 $IMAGE_REF"
-          docker pull "$IMAGE_REF"
+          # —— 拉镜像：后台跑 + 轮询 ——
+          #
+          # 为什么不直接 `docker pull`：
+          # 这台服务器拉镜像可能要 4~10 分钟（跨境链路），而**任何**前台阻塞都会
+          # 让整条 SSH 会话暴露在"空闲超时"和"中间设备掐连接"之下。
+          # 踩过两次：pull 到 4 分 15 秒时 Broken pipe，exit 255。
+          #
+          # 改成 nohup 后台拉 + 每 5 秒轮询一次完成标记。这样：
+          #  - 单条 SSH 命令都是毫秒级，不存在长时间空闲；
+          #  - 即使这条 SSH 断了，后台的 pull 仍在服务器上继续跑；
+          #  - 重跑工作流时若镜像已在本地，`docker image inspect` 立刻返回，秒过。
+          PULL_LOG=/tmp/pr-pull.log
+          PULL_DONE=/tmp/pr-pull.done
+          rm -f "$PULL_LOG" "$PULL_DONE"
+
+          echo "后台拉取 $IMAGE_REF（日志 $PULL_LOG）"
+          nohup bash -c "
+            docker pull '$IMAGE_REF' > '$PULL_LOG' 2>&1
+            echo \$? > '$PULL_DONE'
+          " > /dev/null 2>&1 &
+
+          # 最多等 15 分钟（180 × 5s）。超时按失败处理，但会打印日志尾部。
+          for i in $(seq 1 180); do
+            if [ -f "$PULL_DONE" ]; then
+              RC=$(cat "$PULL_DONE")
+              if [ "$RC" != "0" ]; then
+                echo "拉取失败（exit=$RC），日志尾部："
+                tail -30 "$PULL_LOG"
+                exit 1
+              fi
+              echo "拉取完成（${i}×5s）"
+              break
+            fi
+            # 每 12 次（1 分钟）打印一次进度，避免日志一片空白
+            if [ $((i % 12)) -eq 0 ]; then
+              echo "  …仍在拉取（$((i * 5))s），最近一行：$(tail -1 "$PULL_LOG" 2>/dev/null)"
+            fi
+            sleep 5
+          done
+
+          if [ ! -f "$PULL_DONE" ]; then
+            echo "拉取超时（15 分钟），日志尾部："
+            tail -30 "$PULL_LOG"
+            exit 1
+          fi
 
           # MinIO 的凭据在 /opt/minio/.env（root:600），compose 里用 ${MINIO_ROOT_*}
           # 引用。这里 source 一下再 up，否则 compose 会因变量缺失而报错。
@@ -176,7 +230,7 @@ jobs:
           docker compose up -d
 
           # 健康检查：不通过就失败。容器"起来了"不等于"服务是好的"。
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
               echo "healthz OK（${i}s）"
               echo "--- 当前容器 ---"
