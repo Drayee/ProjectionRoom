@@ -734,4 +734,36 @@ form.two-col .row {
 .ghost:active {
   transform: scale(0.98);
 }
+
+/* ---------- 矮屏收紧（1280×720、1366×768 的 125% 缩放都会落进这一档） ----------
+
+   窗口高度由外层 LandingView 按视口算出，这里只负责"把面板本身压短一点"：
+   注册页签是最长的一屏（433px），720 高的机器上刚好差 30 多像素 ——
+   差这一点就会在**窗口内部**出现滚动条（页面级滚动条已由 LandingView 锁死）。
+   收紧的都是留白，字号与可点面积不变。 */
+@media (max-height: 720px) {
+  .panel {
+    padding: 16px;
+  }
+
+  .tabs {
+    margin-bottom: 12px;
+  }
+
+  .steps {
+    margin-bottom: 10px;
+  }
+
+  .bar-track {
+    margin-bottom: 12px;
+  }
+
+  .row {
+    margin-top: 12px;
+  }
+
+  .rule {
+    margin: 10px 0 8px;
+  }
+}
 </style>
