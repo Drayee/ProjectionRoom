@@ -10,6 +10,7 @@ import ResetPasswordPage from './pages/ResetPasswordPage.vue'
 import VerifyEmailPage from './pages/VerifyEmailPage.vue'
 import ComingSoonPage from './pages/ComingSoonPage.vue'
 import FriendsPage from './pages/FriendsPage.vue'
+import MessagesPage from './pages/MessagesPage.vue'
 import PostsPage from './pages/PostsPage.vue'
 import PostDetailPage from './pages/PostDetailPage.vue'
 import PostEditorPage from './pages/PostEditorPage.vue'
@@ -29,8 +30,8 @@ import AdminOpsPage from './pages/admin/AdminOpsPage.vue'
  * 18 条 path/name 与旧表逐字一致（票 #12 契约平移：`/room/:roomId`、
  * `/login`（负向判据）、`/reset`、`/verify`（邮件链接写死）不可改）。
  * 做/占位的分配来自票 #16：
- *   - 真做：/ /room /login /register /reset /verify /help /rooms /user /posts×3 /friends
- *   - 占位（ComingSoonPage，props 驱动）：/official /forum /messages /about
+ *   - 真做：/ /room /login /register /reset /verify /help /rooms /user /posts×3 /friends /messages
+ *   - 占位（ComingSoonPage，props 驱动）：/official /forum /about
  *   - 管理端三屏（#23/#24/#25）：/admin /admin/rooms /admin/ops
  *
  * **`meta.header` 决定全局顶栏形态**（App.vue 常驻外壳，顶栏不属于任何页面）：
@@ -115,21 +116,15 @@ export const router = createRouter({
     { path: '/posts', name: 'posts', component: PostsPage, meta: { header: 'page' } },
     { path: '/posts/new', name: 'post-editor', component: PostEditorPage, meta: { header: 'page' } },
     { path: '/posts/:id', name: 'post-detail', component: PostDetailPage, props: true, meta: { header: 'page' } },
+    // 消息（票 #30）：会话列表 / 聊天窗 / 已读上报，全部走 api/messages.ts 门面。
+    // **会话是 URL 的一部分**：`/messages?peer=<id>`（utils/dmRoute.ts 的跨票契约）。
+    // 页面据此从 URL 恢复会话，因此刷新、新标签页、`/friends` 的「发消息」、
+    // 浏览器后退键都自然成立 —— 页面里没有"只改内存的选中态"。
     {
       path: '/messages',
       name: 'messages',
-      component: ComingSoonPage,
-      props: {
-        title: '消息',
-        icon: 'msg',
-        summary: '私聊与系统通知：会话列表、未读计数、进房邀请。',
-        bullets: [
-          '会话列表 + 未读计数（账号档案里的 unread 字段早就预留好了，现在恒为 0）。',
-          '系统通知：房间被关闭、被下架、账号状态变更这类事件。',
-          '实时投递：与好友在线状态共用一条用户级通道。',
-        ],
-        depends: ['messages 表的读写接口', '用户级实时通道（/ws/user）'],
-      },
+      component: MessagesPage,
+      meta: { header: 'page' },
     },
   ],
   /**

@@ -40,6 +40,18 @@ export interface AuthUser {
    * 归一成字符串：缺失/类型不对一律空串，界面上显示"服务端未返回"而不是 `undefined`。
    */
   createdAt: string
+  /**
+   * 未读私聊数（wayfinder #31 把它挂在 `/me` 上，#30 消费）。
+   *
+   * **可选**的理由与 `emailVerified` 相同：服务端在 Store 缺失（账号能力关闭 /
+   * 装配缺失）时**不返回这个键**，而不是回一个 0 —— 「你没有未读」与「我不知道
+   * 你有几条未读」在界面上必须可分辨，后者要能被看见。
+   *
+   * 注意 `login` / `register` / `refresh` 三个端点的响应**不带**它（它们走
+   * `usecase.Session`，不是 `me`）。所以登录后要显示真值必须再打一次 `/me`，
+   * 这条由 `stores/auth.ts` 的 `refreshProfile()` 负责。
+   */
+  unread?: number
 }
 
 /** register / login / refresh 三个端点的统一响应。 */
@@ -185,6 +197,11 @@ function normalizeUser(raw: unknown): AuthUser {
   // 而不是把"字段不存在"谎报成"未验证"。
   if (typeof user.emailVerified === 'boolean') {
     normalized.emailVerified = user.emailVerified
+  }
+  // unread 同理：只有服务端真的给了数字才带上。0 是**合法值**（"确实没有未读"），
+  // 所以判断条件是 `typeof === 'number'` 而不是"真值"。
+  if (typeof user.unread === 'number') {
+    normalized.unread = user.unread
   }
   return normalized
 }

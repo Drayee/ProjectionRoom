@@ -65,6 +65,23 @@ const NAV = [
   { name: 'messages', icon: 'msg', label: '消息' },
   { name: 'help', icon: 'help', label: '帮助' },
 ] as const
+
+/**
+ * 「消息」入口上的未读角标（wayfinder #30）。
+ *
+ * 只读 `auth.unread` 这一个来源（`stores/auth.ts` 的 `setUnread` 是唯一写入点）：
+ * 顶栏角标、消息页的会话徽标、"读完清零"必须是同一个数字，各存一份必然出现
+ * "顶栏 3 条、页面 0 条"。
+ *
+ * `null`（服务端没返回未读数）时**不显示**角标 —— 显示 0 等于替服务端断言
+ * "你没有未读"，而那正是 #30 要避免的谎言。超过 99 显示 `99+`：
+ * 三位数会把 36px 的图标位撑变形。
+ */
+const unreadLabel = computed(() => {
+  const n = auth.unread
+  if (n === null || n <= 0) return ''
+  return n > 99 ? '99+' : String(n)
+})
 </script>
 
 <template>
@@ -82,10 +99,14 @@ const NAV = [
         :key="item.name"
         class="nav-btn"
         :to="{ name: item.name }"
-        :aria-label="item.label"
+        :aria-label="item.name === 'messages' && unreadLabel ? `消息（${unreadLabel} 条未读）` : item.label"
         v-tip="item.label"
       >
         <BrandIcon :name="item.icon" decorative :size="18" />
+        <!-- 未读角标：只在有数字时出现（`null` 与 0 都不显示，理由见 unreadLabel）。 -->
+        <span v-if="item.name === 'messages' && unreadLabel" class="dot" aria-hidden="true">
+          {{ unreadLabel }}
+        </span>
       </RouterLink>
     </nav>
 
@@ -229,6 +250,8 @@ const NAV = [
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* 未读角标用绝对定位挂在右上角（见 .dot），所以要有个定位上下文。 */
+  position: relative;
   width: 36px;
   height: 36px;
   color: var(--dim);
@@ -239,6 +262,25 @@ const NAV = [
     color var(--dur-micro) var(--ease),
     border-color var(--dur-micro) var(--ease),
     background var(--dur-micro) var(--ease);
+}
+
+/* 未读角标：极小、贴在图标右上角。`pointer-events: none` 让它不吃点击 ——
+   点角标的本意一定是"打开消息"，不是"点这个角标"。 */
+.dot {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
 }
 
 .nav-btn:hover {

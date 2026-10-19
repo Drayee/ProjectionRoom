@@ -3,6 +3,9 @@ import { defineStore } from 'pinia'
 import * as api from '../api/auth'
 import { AuthApiError, toAuthError } from '../api/auth'
 import type { AuthSession, AuthUser, LoginInput, RegisterInput } from '../api/auth'
+// 未读数的来源判据（wayfinder #30）：mock 态的会话数据是前端内存里的假数据，
+// 而 `/me` 打的是真后端 —— 它的 `unread` 与界面上的数字不同源，不能覆盖。
+import { isMock } from '../api/mode'
 // 用户级实时通道的 token 注入点（wayfinder #31）。只 import 这两个函数而不是整个
 // 通道模块：通道的生命周期由页面的组合式函数管，store 只负责"token 变了"这一个事实。
 import { setUserChannelToken } from '../api/userChannel'
@@ -36,10 +39,25 @@ export type AuthStatus = 'anonymous' | 'restoring' | 'authenticated'
 /** 本地缓存的档案 = 服务端的 user + 本地派生的未读数。 */
 export interface AuthProfile extends AuthUser {
   /**
-   * 未读私聊数。三期（好友/私聊 + `/ws/user`）落地后才会有非零值；
-   * 现阶段恒为 0，只是把这层缓存的形状一次定好，避免将来改 localStorage 的 schema。
+   * 未读私聊数（wayfinder #30 起是真的）。
+   *
+   * 三个写入点，都在本文件里：
+   *   1. `/me` 的响应（服务端算的权威值，走 `applyUser`）；
+   *   2. 消息页读完一屏后的本地递减（`setUnread`，省一次往返；下一次 `/me` 会纠正它）；
+   *   3. 登录/注册/刷新 —— 那三个响应**不带** `unread`，所以沿用缓存里的旧值，
+   *      并在登录后由 `refreshProfile()` 补一次真值。
+   *
+   * 为什么它在这里而不是消息页自己存：顶栏徽标、页面内徽标、"读完清零"是同一个
+   * 数字的三个显示位置，各存一份必然出现"顶栏 3 条、页面 0 条"。
    */
   unread: number
+  /**
+   * 服务端是否**明确**返回过未读数。
+   *
+   * `false` 时界面显示"服务端未返回未读数"，而不是显示 0 —— 「你没有未读」与
+   * 「我不知道你有几条」必须可分辨（与 `AuthUser.emailVerified` 同一条纪律）。
+   */
+  unreadKnown: boolean
 }
 
 // ---------- 存储读写（都自己兜异常：隐私模式下 sessionStorage 可能直接抛错）----------
@@ -106,6 +124,9 @@ function readStoredProfile(): AuthProfile | null {
     // 而不是把它当成"用户不存在"。下一次 /me 或刷新会把真值补回来。
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : '',
     unread: typeof value.unread === 'number' && value.unread > 0 ? value.unread : 0,
+    // 老缓存里没有这个键（它是 #30 加的）：缺就保持 false，界面据此说"服务端未返回"。
+    // 绝不把"缓存里没有"当成"未读数已知且为 0"。
+    unreadKnown: value.unreadKnown === true,
   }
 }
 
@@ -146,10 +167,75 @@ export const useAuthStore = defineStore('auth', () => {
   /** 显示用昵称：优先 displayName，其次 username，都没有就是空串（匿名）。 */
   const displayName = computed(() => profile.value?.displayName || profile.value?.username || '')
 
+  /**
+   * 把一份用户档案落进 store。
+   *
+   * **未读数不在这里更新**（wayfinder #30）：`/me` 虽然带 `unread`，但它的权威
+   * 写入点是 `setUnread()`，而消息页在 mock 态下用的是前端内存里的计数
+   * （那里根本没有服务端）。两处都写会让"谁后跑谁赢"，表现为徽标偶尔跳回 0。
+   * 这里只**保留**上一次的值，让"登录/刷新"不把已知的未读数抹掉。
+   */
   function applyUser(user: AuthUser): void {
-    const next: AuthProfile = { ...user, unread: profile.value?.unread ?? 0 }
+    const next: AuthProfile = {
+      ...user,
+      unread: profile.value?.unread ?? 0,
+      unreadKnown: profile.value?.unreadKnown ?? false,
+    }
     profile.value = next
     writeStoredProfile(next)
+  }
+
+  /**
+   * 更新未读私聊数（`null` = 服务端没告诉我们）。
+   *
+   * 顶栏徽标、消息页会话徽标、"读完清零"三处都读 `profile.unread`，所以写入点
+   * 必须唯一 —— 这就是它。传 `null` 时置 `unreadKnown=false`，界面显示
+   * "服务端未返回未读数"，而不是显示一个会被误读成"你没有未读"的 0。
+   */
+  function setUnread(count: number | null): void {
+    const p = profile.value
+    if (!p) return
+    const next: AuthProfile = {
+      ...p,
+      unread: count === null ? p.unread : Math.max(0, count),
+      unreadKnown: count !== null,
+    }
+    profile.value = next
+    writeStoredProfile(next)
+  }
+
+  /**
+   * 把 `/me` 响应里的未读数落进 store —— **只在 real 域生效**。
+   *
+   * mock 域的会话数据是前端内存里的假数据，而 `/me` 打到真后端（库里没有那些消息），
+   * 它回的 `unread: 0` 与界面上的 3 条未读直接矛盾。两个数字都写进同一个 ref，
+   * 谁后跑谁赢，症状是顶栏角标时而出现时而消失（#30 第一次真机验收就是这个）。
+   *
+   * 所以 mock 域下这个函数什么都不做：未读数由会话列表的合计决定（`setUnread` 的直接调用）。
+   */
+  function applyServerUnread(user: AuthUser): void {
+    if (isMock('messages')) return
+    setUnread(typeof user.unread === 'number' ? user.unread : null)
+  }
+
+  /**
+   * 重新拉一次 `/me`，把档案（含未读数）刷成服务端的真值。
+   *
+   * 为什么登录后要单独补一次：`login` / `register` / `refresh` 三个端点的响应
+   * 走的是 `usecase.Session`，**不带** `unread`（只有 `/me` 带，因为它要算一次 COUNT）。
+   * 少了这一步，"登录后顶栏徽标一直是 0，刷新页面才对"会成为一个只在登录时出现的幽灵 bug。
+   *
+   * 失败静默：未读徽标是显示用的派生值，取不到不该让登录流程看起来失败了。
+   */
+  async function refreshProfile(): Promise<void> {
+    if (accessToken.value === '') return
+    try {
+      const user = await api.me(accessToken.value)
+      applyUser(user)
+      applyServerUnread(user)
+    } catch {
+      // 同上：静默。401 由下一次业务请求的 authedFetch 去处理。
+    }
   }
 
   /** 一次成功的登录/注册/刷新之后的统一落地。 */
@@ -206,11 +292,16 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(input: LoginInput): Promise<void> {
     notice.value = ''
     applySession(await api.login(input))
+    // 登录响应不带 `unread`（见 AuthUser.unread 的说明），补一次 `/me` 拿真值。
+    // 刻意**不放进 `applySession`**：那条路也被 `refreshSession()` 用，
+    // 而 refresh 会在每次 401 重试时触发 —— 在那里多发一发 `/me` 是白烧请求。
+    void refreshProfile()
   }
 
   async function register(input: RegisterInput): Promise<void> {
     notice.value = ''
     applySession(await api.register(input))
+    void refreshProfile()
   }
 
   /**
@@ -297,7 +388,11 @@ export const useAuthStore = defineStore('auth', () => {
       if (accessToken.value !== '') {
         status.value = 'authenticated'
         try {
-          applyUser(await api.me(accessToken.value))
+          const user = await api.me(accessToken.value)
+          applyUser(user)
+          // 刷新页面时这一次 `/me` 就是未读数的真值来源（real 域）；
+          // mock 域跳过 —— 那里的未读数只能由会话列表算（见 applyServerUnread）。
+          applyServerUnread(user)
         } catch (err) {
           const e = toAuthError(err)
           // 只有明确 401（过期/被撤销/被封禁）才值得去换新 token。网络不可达、
@@ -382,6 +477,8 @@ export const useAuthStore = defineStore('auth', () => {
     isLoggedIn,
     restoring,
     displayName,
+    /** 未读私聊数（`null` = 服务端没告诉我们；界面据此说"未读数不可知"）。 */
+    unread: computed(() => (profile.value?.unreadKnown ? profile.value.unread : null)),
     // 动作
     bootstrap,
     login,
@@ -392,5 +489,7 @@ export const useAuthStore = defineStore('auth', () => {
     authedFetch,
     ensureLoggedIn,
     redirectToLogin,
+    setUnread,
+    refreshProfile,
   }
 })
