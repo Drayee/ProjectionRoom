@@ -39,6 +39,21 @@ env:
   REGISTRY: ghcr.io
   IMAGE: ghcr.io/drayee/projectionroom
 
+# ⚠ 同一时间只允许一个部署在跑。
+#
+# 踩过的现场：build-push 与 deploy 都由 push 触发，而我连着推了两次提交，
+# 于是**两个 deploy 并行**（09:40 与 09:41 各一个）。两个都在远程执行
+# `sed -i IMAGE_REF=...` 和 `docker compose up -d`，结果后完成的那个
+# 把 IMAGE_REF 覆盖成自己的值 —— 最终容器跑的版本与最后一次提交不一致，
+# 而两个 run 都显示 success。这种"双绿但状态错"比直接失败难查得多。
+#
+# cancel-in-progress: false 而不是 true：**不能**取消正在进行的部署。
+# 取消可能停在"镜像已 pull、容器还没 up"的中间态，那比串行等更糟。
+# 串行 + 排队让每次部署完整走完，最后一次提交的部署最终胜出。
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest

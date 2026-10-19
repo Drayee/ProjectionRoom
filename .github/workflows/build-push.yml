@@ -34,6 +34,16 @@ env:
   GO_VERSION: '1.26'
   NODE_VERSION: '20'
 
+# 同一分支的多次 push 只保留最后一次构建。
+#
+# cancel-in-progress: true 在这里是对的（与 deploy 相反）：
+# 构建是幂等的纯产出动作，取消它不会留下中间态；
+# 而两个构建同时跑会争抢同一个 `latest` 标签与 gha 缓存，
+# 先完成的可能反而把 latest 指到旧代码上。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
