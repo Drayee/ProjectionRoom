@@ -182,10 +182,29 @@ jobs:
           rm -f "$PULL_LOG" "$PULL_DONE"
 
           echo "后台拉取 $IMAGE_REF（日志 $PULL_LOG）"
-          nohup bash -c "
-            docker pull '$IMAGE_REF' > '$PULL_LOG' 2>&1
-            echo \$? > '$PULL_DONE'
-          " > /dev/null 2>&1 &
+
+          # 把拉取动作写成**独立脚本文件**再 nohup 执行。
+          #
+          # 为什么不用 `nohup bash -c "... \$? ..."`：那是三层引号嵌套
+          # （Actions 的 run → ssh 的 heredoc → bash -c 的双引号），
+          # 任何一层多一个或少一个反斜杠，`$?` 就会被提前展开成空串，
+          # 结果是"完成标记文件存在但内容为空"——看起来拉取成功，
+          # 实际无法判断退出码。写文件执行让每一层都只有一种引号语义。
+          #
+          # 为什么用 printf 而不是 `cat > file << 'EOF'`：
+          # 这段代码本身就在一个 heredoc 里（REMOTE），再嵌一层 heredoc 时
+          # 前导空格**不会被剥离**，`#!/bin/bash` 会变成"缩进的 shebang"
+          # 从而失效（内核只认行首的 #!）。printf 逐行写没有这个问题。
+          {
+            printf '%s\n' '#!/bin/bash'
+            printf '%s\n' '# $1=镜像引用 $2=日志路径 $3=完成标记路径'
+            printf '%s\n' 'docker pull "$1" > "$2" 2>&1'
+            printf '%s\n' 'rc=$?'
+            printf '%s\n' 'printf "%s" "$rc" > "$3"'
+          } > /tmp/pr-pull.sh
+          chmod +x /tmp/pr-pull.sh
+
+          nohup /tmp/pr-pull.sh "$IMAGE_REF" "$PULL_LOG" "$PULL_DONE" > /dev/null 2>&1 &
 
           # 最多等 15 分钟（180 × 5s）。超时按失败处理，但会打印日志尾部。
           for i in $(seq 1 180); do
