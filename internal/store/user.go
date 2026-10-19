@@ -24,7 +24,7 @@ func (s *Store) CreateUser(ctx context.Context, u *User) error {
 	if u.Username == "" {
 		return errors.New("store: username 不能为空")
 	}
-	if len(u.Username) > maxUsernameLen {
+	if len([]rune(u.Username)) > maxUsernameLen {
 		return fmt.Errorf("store: username 超过 %d 个字符", maxUsernameLen)
 	}
 	u.DisplayName = strings.TrimSpace(u.DisplayName)

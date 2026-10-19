@@ -100,7 +100,8 @@ var (
 	// 排队会让攻击者用一个恒定的慢响应把正常用户的登录一起拖住。
 	ErrHashingBusy = errors.New("account: 服务繁忙，请稍后重试")
 
-	// ErrBadUsername 表示用户名不符合白名单 `^[A-Za-z0-9_]{3,20}$`（§4）。
+	// ErrBadUsername 表示用户名不符合白名单（新注册用 ASCII+ 数字 + 下划线 3~20；
+	// 旧用户名通过 Login 的兼容路径允许 Unicode）。
 	ErrBadUsername = errors.New("account: 用户名必须是 3-20 位字母、数字或下划线")
 
 	// ErrBadDisplayName 表示昵称清洗后为空或超长。
@@ -156,7 +157,11 @@ const (
 	MaxDisplayNameLen = 32
 )
 
-// UsernamePattern 是用户名的白名单（§4）。服务端统一按**小写**存储。
+// UsernamePattern 是新注册时的白名单：ASCII 字母/数字/下划线，3~20 个字符。
+//
+// ⚠️ 放宽到 Unicode 的逻辑在 **Login** 路径单独实现（不在这层做全局检查），
+// 原因是"允许中文 username"是迁移兼容的**特例**，不是通用规则。新用户注册
+// 仍走这条 ASCII 白名单，避免同形字（西里尔 а vs 拉丁 a）与 Bidi 漏洞带来的风险。
 var UsernamePattern = regexp.MustCompile(`^[A-Za-z0-9_]{3,20}$`)
 
 // 会话与哈希的常量。
@@ -552,6 +557,20 @@ func (s *AccountService) Register(ctx context.Context, username, displayName, pa
 //     本身就把它拆成了两个不同的结果（时序侧信道）；
 //  3. 封禁账号在**口令校验通过之后**才报 ErrUserBanned —— 先判状态会让
 //     "这个账号被封了"变成一条不需要口令的枚举手段。
+//
+// Login 校验口令并建立会话。
+//
+// 三条不变量：
+//  1. "用户不存在"与"口令错误"返回**同一个** ErrInvalidCredentials；
+//  2. 两者都跑一次 bcrypt（用户不存在时跑一个固定的无效哈希）：否则响应耗时
+//     本身就把它拆成了两个不同的结果（时序侧信道）；
+//  3. 封禁账号在**口令校验通过之后**才报 ErrUserBanned —— 先判状态会让
+//     "这个账号被封了"变成一条不需要口令的枚举手段。
+//
+// ⚠ 迁移兼容分支（第 4 条）：库里存的是旧项目（yachiyo）的 MD5 哈希时，先按
+// bcrypt 试（必然失败），再按 MD5 试；MD5 通过后**立刻把明文重新算成 bcrypt 落库**，
+// 于是每一行 MD5 最多被读一次、这条路径会随用户活跃自然清空。它不破上面三条：
+// 分流发生在"已经确认口令正确"之后，不增加任何可区分"账号存在与否"的观测面。
 func (s *AccountService) Login(ctx context.Context, username, password, ip, ua string) (*Session, error) {
 	name := strings.ToLower(strings.TrimSpace(username))
 
@@ -572,11 +591,30 @@ func (s *AccountService) Login(ctx context.Context, username, password, ip, ua s
 	if busyErr != nil {
 		return nil, busyErr
 	}
+	// 旧项目的 MD5 哈希：bcrypt 那条路必然不通，走形状识别出来的第二条路。
+	legacyHit := false
+	if !ok && auth.IsLegacyMD5Hash(u.PasswordHash) {
+		// 上面那次 bcrypt 校验对畸形哈希是**解析阶段就返回**的，耗时远小于一次真实
+		// bcrypt；不补齐的话，"错口令打旧账号"会比"错口令打新账号 / 打不存在的账号"
+		// 快出一个数量级，而那个时间差等于把"哪些账号来自旧项目"变成可枚举的情报
+		// （不变量 1/2 要求的正是这两者不可区分）。所以补一次与 dummy 等价的 CPU 消耗。
+		if busyErr := s.verifyDummy(password); busyErr != nil {
+			return nil, busyErr
+		}
+		legacyHit = auth.VerifyLegacyMD5(u.PasswordHash, password)
+		ok = legacyHit
+	}
 	if !ok {
 		return nil, ErrInvalidCredentials
 	}
 	if u.Status != store.StatusActive {
 		return nil, ErrUserBanned
+	}
+
+	// 迁移升级：口令已确认为明文，就地换成 bcrypt（异步写，I4；
+	// 写失败只记日志，下次登录会再试一次 —— 这个动作是幂等的）。
+	if legacyHit {
+		s.submitLegacyPasswordUpgrade(u.ID, u.Username, password)
 	}
 
 	// last_seen 是"活跃度"而非授权依据 → 异步写（§9）。失败只记日志：
@@ -586,6 +624,29 @@ func (s *AccountService) Login(ctx context.Context, username, password, ip, ua s
 	})
 
 	return s.issueSession(ctx, u, ip, ua)
+}
+
+// submitLegacyPasswordUpgrade 把一行旧项目的 MD5 口令哈希换成 bcrypt。
+//
+// 为什么不改会话与 token_version：这**不是改密**（用户手里那串口令没变），
+// 只是存储格式的升级。若在这里撤销全部会话，用户会在登录成功的那一刻被踢下线。
+//
+// 为什么先哈希再交进队列：哈希是贵的那一步（cost 内），放在闸门里做能复用
+// 既有的并发上限；库里那一行的写入才是丢进异步的部分。
+func (s *AccountService) submitLegacyPasswordUpgrade(userID int64, username, plain string) {
+	hash, err := s.acquireAndHash(plain)
+	if err != nil {
+		// 闸门满 / 哈希失败：保持 MD5 不动，本次登录照常成功（下次再升级）。
+		log.Printf("[WARN] 旧口令升级未哈希（user=%d）：%v", userID, err)
+		return
+	}
+	s.submit("升级旧口令哈希", func(ctx context.Context) error {
+		if err := s.store.SetPasswordHash(ctx, userID, hash); err != nil {
+			return err
+		}
+		log.Printf("[INFO] 旧项目口令已升级为 bcrypt：user=%d username=%s", userID, username)
+		return nil
+	})
 }
 
 // Refresh 用 refresh token 换一对新凭据（轮换 + 重放检测，§5）。

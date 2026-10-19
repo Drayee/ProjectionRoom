@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/md5" //nolint:gosec // test compatibility path
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -129,6 +131,49 @@ func TestVerifyPasswordRejectsMalformedHash(t *testing.T) {
 				t.Errorf("畸形哈希 %q 不应当校验通过", tc.hash)
 			}
 		})
+	}
+}
+
+// MD5 兼容性测试：迁移数据里的 32 位 hex 必须被正确识别并校验，但不干扰 bcrypt
+func TestVerifyLegacyMD5(t *testing.T) {
+	plain := "1234"
+	sum := md5.Sum([]byte(plain)) //nolint:gosec // 只用于兼容旧项目
+	hash := hex.EncodeToString(sum[:])
+
+	// ✅ 形状识别：32 个 hex 字符
+	if !IsLegacyMD5Hash(hash) {
+		t.Fatalf("真实 MD5 摘要应被识别为 legacy hash")
+	}
+
+	// ✅ 校验正确明文
+	if !VerifyLegacyMD5(hash, plain) {
+		t.Fatalf("正确口令应通过 MD5 校验")
+	}
+
+	// ❌ 校验错误明文
+	if VerifyLegacyMD5(hash, "wrong") {
+		t.Fatal("错误口令不应通过")
+	}
+
+	// ❌ 非 32 位 hex → false
+	if IsLegacyMD5Hash("$2a$10$...") {
+		t.Fatal("bcrypt 不应被误认为 MD5")
+	}
+	if IsLegacyMD5Hash("") {
+		t.Fatal("空串不应被识别")
+	}
+	if IsLegacyMD5Hash("not-hex!@#") {
+		t.Fatal("非 hex 字符应拒绝")
+	}
+
+	// 大小写不敏感
+	lower := strings.ToLower(hash)
+	upper := strings.ToUpper(hash)
+	if !VerifyLegacyMD5(lower, plain) {
+		t.Fatal("小写 hex 应通过")
+	}
+	if !VerifyLegacyMD5(upper, plain) {
+		t.Fatal("大写 hex 应通过")
 	}
 }
 

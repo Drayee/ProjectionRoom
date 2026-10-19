@@ -1,0 +1,128 @@
+# GitHub Actions CI/CD for ProjectionRoom
+# Deploy to server: 60.205.212.25
+
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch: # Manual trigger
+
+env:
+  SERVER_HOST: ${{ secrets.SERVER_HOST || '60.205.212.25' }}
+  SERVER_USER: root
+  DEPLOY_PATH: /opt/projectionroom
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass docker.io
+      
+      - name: Build and Test
+        run: |
+          echo "Running tests..."
+          go test ./... -count=1
+          
+          echo "Building binary..."
+          CGO_ENABLED=0 GOOS=linux go build -o projectionroom ./cmd
+      
+      - name: Build frontend
+        run: |
+          npm --prefix client install
+          npm --prefix client run build
+      
+      - name: Backup old deployment
+        run: |
+          sshpass -p '${{ secrets.SERVER_PASSWORD }}' ssh root@${{ env.SERVER_HOST }} << EOF
+            cd ${{ env.DEPLOY_PATH }}
+            if [ -d "backup-$(date +%Y%m%d-%H%M%S)" ]; then
+              echo "Backup already exists"
+            else
+              mv projectionroom projectionroom.backup.$(date +%Y%m%d-%H%M%S)
+              mv client client.backup.$(date +%Y%m%d-%H%M%S)
+              echo "Backup created"
+            fi
+          EOF
+      
+      - name: Upload new files via SFTP
+        run: |
+          scp -o StrictHostKeyChecking=no \
+            -i ~/.ssh/id_rsa \
+            projectionroom root@${{ env.SERVER_HOST }}:${{ env.DEPLOY_PATH }}/
+          
+          scp -o StrictHostKeyChecking=no \
+            -r client/dist/* root@${{ env.SERVER_HOST }}:${{ env.DEPLOY_PATH }}/client/
+      
+      - name: Restart service on server
+        run: |
+          sshpass -p '${{ secrets.SERVER_PASSWORD }}' ssh root@${{ env.SERVER_HOST }} << EOF
+            cd ${{ env.DEPLOY_PATH }}
+            
+            # Check if systemd is used
+            if systemctl list-unit-files | grep -q projectionroom.service; then
+              echo "Restarting systemd service..."
+              systemctl restart projectionroom.service
+              
+              # Wait for health check
+              for i in {1..30}; do
+                if curl -s http://localhost:8080/healthz > /dev/null 2>&1; then
+                  echo "Service healthy!"
+                  exit 0
+                fi
+                echo "Waiting for service to be healthy... ($i/30)"
+                sleep 2
+              done
+              
+              echo "ERROR: Service failed to start"
+              exit 1
+            else
+              # Direct binary execution fallback
+              echo "Killing old process..."
+              pkill -f projectionroom || true
+              
+              echo "Starting new binary..."
+              nohup ./projectionroom > /var/log/projectionroom.log 2>&1 &
+              
+              echo "Waiting for startup..."
+              sleep 5
+              
+              if pgrep -f projectionroom > /dev/null; then
+                echo "Process started successfully!"
+              else
+                echo "ERROR: Failed to start process"
+                cat /var/log/projectionroom.log
+                exit 1
+              fi
+            fi
+          EOF
+      
+      - name: Verify deployment
+        run: |
+          HEALTH_URL="http://${{ env.SERVER_HOST }}:8080/healthz"
+          echo "Checking health endpoint: $HEALTH_URL"
+          
+          for i in {1..30}; do
+            if curl -s "$HEALTH_URL" | grep -q "ok"; then
+              echo "✅ Deployment successful! Health check passed."
+              exit 0
+            fi
+            
+            echo "Health check not ready yet ($i/30)"
+            sleep 3
+          done
+          
+          echo "❌ Deployment verification failed"
+          exit 1

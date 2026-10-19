@@ -1,0 +1,57 @@
+# Docker Compose for ProjectionRoom (Production)
+# Usage: docker-compose up -d && docker logs -f projectionroom-app
+
+version: '3.8'
+
+services:
+  # --- PostgreSQL Database ---
+  postgres:
+    image: postgres:16-alpine
+    container_name: projectionroom-db
+    restart: always
+    environment:
+      POSTGRES_USER: pr_app
+      POSTGRES_PASSWORD: ${PR_DB_PASSWORD:-change_me_please}
+      POSTGRES_DB: projectionroom
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - projectionroom-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pr_app -d projectionroom"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Application Server ---
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: projectionroom-app
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - projectionroom-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    command: ["/app/projectionroom"]
+
+networks:
+  projectionroom-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
