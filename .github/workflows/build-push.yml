@@ -2,7 +2,7 @@
 #
 # Prerequisites:
 # 1. Create Personal Access Token with `read:package` scope
-# 2. Add as Repository Secret: GITHUB_REGISTRY_TOKEN
+# 2. Add as Repository Secret: REGISTRY_TOKEN (or GITHUB_REGISTRY_TOKEN for old name)
 # 3. Server access configured via Secrets: SERVER_PASSWORD (SSH) or SSH_KEY_FILE
 #
 # Usage:
@@ -54,7 +54,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_REGISTRY_TOKEN }}
+          password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_REGISTRY_TOKEN }}
       
       - name: Extract metadata
         id: meta
