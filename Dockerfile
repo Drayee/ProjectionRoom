@@ -21,8 +21,13 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build (wireinject 标签是必需的：cmd/wire.go 只有带这个标签才参与编译)
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o projectionroom -tags wireinject ./cmd
+# Build（**不要加 -tags wireinject**）
+#
+# ⚠ 这是踩过的坑：cmd/wire.go 带 `//go:build wireinject`（里面只有 wire.Build 声明，
+# InitializeApp 体是空的，返回 nil），而 cmd/wire_gen.go 带 `//go:build !wireinject`
+# （这才是真正的装配实现）。带 `-tags wireinject` 编译会选中前者，
+# 结果是 InitializeApp 返回 nil，服务启动后立刻 SIGSEGV —— 而且编译期毫无警告。
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o projectionroom ./cmd
 
 # Stage 2: Runtime
 FROM alpine:3.20
