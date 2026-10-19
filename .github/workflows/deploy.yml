@@ -66,6 +66,18 @@ jobs:
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     steps:
+      # ⚠ 必须 checkout：本工作流由 `workflow_run` 触发时，**默认不拉代码**，
+      # 工作目录里只有 artifact 下载的东西。而下面要 scp `scripts/publish-segmenter.sh`
+      # 到服务器 —— 没有 checkout 就会报
+      # `scp: stat local "scripts/publish-segmenter.sh": No such file or directory`。
+      #
+      # 用 workflow_run 的 head_sha 而不是默认分支：确保"部署的脚本"与
+      # "构建出的镜像"来自同一个提交，不会出现脚本是新的、镜像是旧的。
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
       - name: Resolve image tag
         id: tag
         run: |
