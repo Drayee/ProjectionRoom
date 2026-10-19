@@ -236,13 +236,39 @@ func TestVerifyRejectsTamperedSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 改最后一个字符（保证真的改掉，而不是"原样塞回"）。
-	last := token[len(token)-1]
-	repl := byte('A')
-	if last == 'A' {
-		repl = 'B'
+	// 改签名段的最后一个字符。
+	//
+	// ⚠ 这里有一个**真实存在过**的 flake，修法值得记下来：HS256 的签名是 32 字节
+	// = 256 位，而 base64url 无填充的最后一个字符只携带其中**最后 4 位**（32 字节
+	// 需要 43 个字符，43*6 = 258 位，多出的 2 位是填充位）。也就是说：把一个
+	// 字符换成"低 2 位相同"的另一个字符，解码出来的签名字节**完全一致** ——
+	// 篡改根本没发生，Verify 当然会通过。
+	//
+	// 症状是这条用例大约 5% 概率红（60 次跑里红了 3 次），而它红的时候看起来
+	// 像是"验签有漏洞"。断言没写错，是构造方式错了：只改一个字符**不足以保证**
+	// 字节变了。
+	//
+	// 正确的做法是把签名段整体换掉：换成一个长度相同、内容不同、且**解码后必然
+	// 不同**的字节序列。用 0xFF 填充最直白 —— 它与任何真实的 HMAC 输出几乎不可能
+	// 相同，而长度保持 32 字节让"长度合法但内容错"这个形态被测到（这正是攻击者
+	// 会构造的东西：不是截断，是替换）。
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token 不是三段式：%q", token)
 	}
-	tampered := token[:len(token)-1] + string(repl)
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("解码签名段失败：%v", err)
+	}
+	for i := range sig {
+		sig[i] ^= 0xFF // 逐字节取反：长度不变，每一位都变了
+	}
+	tampered := parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(sig)
+
+	// 自证前提：篡改后的签名必须真的与原来不同（否则这条用例又退化成掷骰子）。
+	if tampered == token {
+		t.Fatalf("构造失败：篡改后的 token 与原来相同")
+	}
 
 	if _, err := s.Verify(tampered); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("签名被篡改必须拒绝，实际 %v", err)

@@ -248,12 +248,40 @@ func (s *Store) UpdateAnime(ctx context.Context, id int64, title *string, aliase
 }
 
 // DeleteAnime 硬删一条。返回 ErrAnimeNotFound 表示本来就没有。
+//
+// wayfinder #38 加了一条准入判据：**这个番剧下还有主题串时不允许删**，
+// 返回 ErrAnimeHasThreads（handler → 409，验收第 2 条）。
+//
+// 为什么在 store 里判而不是 handler：判据是数据事实（posts 里还有没有
+// anime_id = 这个 id 的行），而 store 持有那张表。handler 只翻译状态码。
+//
+// 两层防线的分工：
+//   - 这里的 COUNT 给出**可读的 409**（"这个番剧下还有 3 个主题串"）；
+//   - 迁移 0013 的 `ON DELETE RESTRICT` 兜住竞态（COUNT 通过之后、DELETE 之前
+//     另一个请求刚发了一个主题串）。那时删除会因外键失败，这里把它也翻译成
+//     同一个 ErrAnimeHasThreads —— 于是两种时序给用户**同一个答案**，
+//     而不是一个 409、一个 500。
 func (s *Store) DeleteAnime(ctx context.Context, id int64) error {
 	if id <= 0 {
 		return ErrAnimeNotFound
 	}
+
+	threads, err := s.CountAnimeThreads(ctx, id)
+	if err != nil {
+		return err
+	}
+	if threads > 0 {
+		return ErrAnimeHasThreads
+	}
+
 	res := s.db.WithContext(ctx).Where("id = ?", id).Delete(&Anime{})
 	if res.Error != nil {
+		// 外键 RESTRICT（SQLSTATE 23001，见 isForeignKeyViolation 的注释）：
+		// 竞态下另一请求刚挂上了主题串。与上面那条 COUNT 收敛到**同一个**
+		// 语义错误，见函数头注释。
+		if isForeignKeyViolation(res.Error) {
+			return ErrAnimeHasThreads
+		}
 		return fmt.Errorf("store: 删除番剧失败: %w", res.Error)
 	}
 	if res.RowsAffected == 0 {

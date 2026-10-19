@@ -228,6 +228,42 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
+// isForeignKeyViolation 判断错误是不是外键约束挡住了这次写入。
+//
+// 用途是 wayfinder #38 的"删番剧"：迁移 0013 给 posts.anime_id 加了
+// `ON DELETE RESTRICT`，于是"还有主题串的番剧"在数据库层面就删不掉。
+// store 把它与自己的 COUNT 检查翻译成**同一个**语义错误（ErrAnimeHasThreads），
+// 两种时序因此给用户同一个答案。
+//
+// ⚠ **两个错误码，不是一个**（这条是实测踩出来的，别按直觉只判 23503）：
+//
+//	23503 foreign_key_violation  —— `ON DELETE NO ACTION`（也是不写 ON DELETE 的默认）
+//	23001 restrict_violation     —— `ON DELETE RESTRICT`
+//
+// PostgreSQL 对这两者刻意分开：NO ACTION 允许把检查推迟到语句/事务末尾
+// （所以是 23503），而 RESTRICT **立即**拒绝（23001）。迁移 0013 显式选了
+// RESTRICT（意图可读 + 不给出延迟窗口），于是这里必须认 23001。
+// 第一版只判 23503，用例当场红：`violates RESTRICT setting ... (SQLSTATE 23001)`。
+//
+// 两个码都收，而不是"把 DDL 改成 NO ACTION 让错误码好看"：RESTRICT 的
+// 立即性是这条不变量想要的性质（延迟检查意味着一个事务里可以先删番剧、
+// 再删主题串，于是"不允许删"变成"最终不允许"—— 那不是本票的语义）。
+//
+// gorm 的 TranslateError 对这两种都翻成 ErrForeignKeyViolated，所以三条路径都认。
+func isForeignKeyViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gorm.ErrForeignKeyViolated) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "23503" || pgErr.Code == "23001"
+}
+
 // uniqueViolationConstraint 返回唯一约束冲突的**约束名**（拿不到时返回空串）。
 //
 // 为什么拿得到：gorm 的 postgres 方言把 23505 翻译成

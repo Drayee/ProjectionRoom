@@ -505,4 +505,111 @@ END $$`,
 		// 现在就建的理由与列相同 —— 它是"这张表打算怎么被查"的声明。
 		`CREATE INDEX IF NOT EXISTS messages_room_idx ON messages (room_id, id DESC) WHERE kind = 'room'`,
 	}},
+
+	// 0013：番剧板块与主题串（posts.anime_id 的索引与查询路径）。wayfinder #38。
+	//
+	// # 本票在 schema 上只做两件事：给 `anime_id` 建索引 + 把 `anime_id` 接上外键
+	//
+	// `anime_id` 这一列 0010 就预留了（当时刻意不填、也不建索引：没有查询路径时
+	// 索引是纯负担）。本票让"主题串 = 带 anime_id 的帖子"成立，于是它同时得到
+	// 两条真实查询：
+	//
+	//	① 板块下的主题串列表 `WHERE anime_id = ? ORDER BY <排序键> LIMIT n`；
+	//	② 删番剧前的"这个番剧还有没有主题串"（验收第 2 条：不允许删，409）。
+	//
+	// # 「最新回复优先」为什么选**反范式 `last_reply_at`** 而不是 join 聚合
+	//
+	// 另一个选项是每次查询都 `LEFT JOIN post_comments ... GROUP BY p.id
+	// ORDER BY max(c.created_at) DESC`。它天然正确、没有漂移风险，但代价是：
+	// 排序键来自聚合，**索引服务不了它** —— PostgreSQL 必须先把该番剧下的全部
+	// 主题串连同全部评论取出来、分组、排序，再取前 20 行。也就是说"翻到第 1 页"
+	// 的成本随板块内帖子总数线性增长，而板块列表恰恰是 `/forum` 最热的入口
+	//（与 0010 拒绝查询时聚合 like_count 是同一条理由）。
+	//
+	// 选 `last_reply_at` 后，排序键是一列，可以进索引，`ORDER BY ... LIMIT 20`
+	// 直接走索引扫描。代价是**反范式列必须原子维护** —— 与 like_count /
+	// comment_count 完全同一套纪律（见 0010 的注释与 store/posts.go 的事务）：
+	//
+	//	- 发帖时 `last_reply_at = created_at`（没有回复时它就是发帖时刻，
+	//	  于是"没人回复的新帖"在 latest-reply 下按发帖时间排序，而不是沉到底部）；
+	//	- 加评论时与 comment_count 同一个事务里 `last_reply_at = now()`；
+	//	- 删评论时**不回退**（见下面 §为什么删评论不回退）。
+	//
+	// # 为什么删评论不回退 last_reply_at
+	//
+	// 回退需要"这个帖子剩下的最新一条评论是什么"——那是每删一条评论一次聚合查询，
+	// 而删评论是幂等的轻动作（#27 把它放在只读桶）。更关键的是：回退的语义收益为零。
+	// `last_reply_at` 的唯一用途是**排序**，而"某条评论被作者删了"并不改变
+	// "这个主题串最近有人来过"这件事。宁可让排序键偏新（一条已被删的评论仍把帖子
+	// 顶在前面），也不要为它引入一次聚合 + 一个漂移窗口。
+	//
+	// # 为什么 `anime_id` 要加外键，且 ON DELETE RESTRICT
+	//
+	// 验收第 2 条定了"不允许删有主题串的番剧（409）"。这条产品决定落到数据库上
+	// 就是 `ON DELETE RESTRICT`：应用层的检查（handler 先 COUNT 再删）会与并发发帖
+	// 竞态 —— 检查通过、删番剧、同时另一请求刚把帖子写进 anime_id，于是库里留下
+	// 一批挂在已删番剧上的帖子，谁也看不见、也删不掉。外键把这条不变量交给
+	// 唯一能在写入那一刻裁决的地方。应用层的 COUNT 仍然保留：它负责给出 409 与
+	// 可读的错误，外键负责**不可能被绕过**。
+	//
+	// 0010 里 `anime_id` 是裸 bigint（无外键）是有意的：那时 anime 表刚建、
+	// 主题串还不存在，"这个列指向什么"没有答案。现在有了，所以补上 —— 这是加法。
+	{version: "0013_post_anime_threads", statements: []string{
+		// last_reply_at 可空：NULL 表示"这一行没有'最新回复'这个维度"。
+		// 主题串一旦建出来就必然非 NULL（CreatePost 会设成发帖时刻）。
+		//
+		// # 为什么**不回填**已有行（曾经写过一条 UPDATE，被迁移守卫当场拦下）
+		//
+		// 直觉上应该把老帖子的 last_reply_at 按 created_at 补一遍。但那条 UPDATE
+		// 违反了本仓库的迁移规则第 1 条（只做加法）—— 而这条规则在这里是对的，
+		// 不只是形式主义：
+		//
+		//   - 本步落地时 `posts.anime_id` 全是 NULL（主题串还不存在），
+		//     所以**没有任何一行需要这个值**：回填 100% 是空转；
+		//   - 而它一旦存在，将来某个真正需要回填的场合就会照着抄，于是"迁移会改数据"
+		//     变成一条惯例 —— 那时才真的会有风险（改错了没有回滚路径，
+		//     DDL 事务能回滚结构，但没人会去回滚一份"看起来补得很合理"的数据）。
+		//
+		// 需要排序键的那一行，在它被创建的那一刻就会拿到值。老数据不需要猜。
+		`ALTER TABLE posts ADD COLUMN IF NOT EXISTS last_reply_at timestamptz NULL`,
+
+		// 板块列表的排序键。索引列顺序与 ORDER BY 完全一致
+		//（anime_id 等值 + last_reply_at 倒序 + id 倒序做稳定 tie-break），
+		// 于是 `WHERE anime_id = ? ORDER BY last_reply_at DESC, id DESC LIMIT 20`
+		// 是一次索引范围扫描。
+		// ⚠ 索引里的 `NULLS LAST` 与 store 的 ORDER BY **必须逐字一致**：
+		// 索引是有序结构，"DESC NULLS FIRST" 与 "DESC NULLS LAST" 是两个不同的
+		// 顺序，PostgreSQL 只会为前者匹配后者而放弃索引（退化成取全量再排）。
+		// 而 `DESC` 的默认恰好是 NULLS FIRST —— 所以两处都得显式写。
+		//
+		// 为什么要 NULLS LAST 而不是"干脆 NOT NULL"：迁移 0013 之前的老行是 NULL
+		//（这一版不回填，理由见上面的 ADD COLUMN 注释），加 NOT NULL 就要先填值，
+		// 那就又变成"迁移改数据"了。让 NULL 排到末尾是零成本的正确定序。
+		`CREATE INDEX IF NOT EXISTS posts_anime_last_reply_idx
+	ON posts (anime_id, last_reply_at DESC NULLS LAST, id DESC) WHERE anime_id IS NOT NULL`,
+		// 另一种排序（sort=latest，按发帖时间）。第二条索引而不是复用上面那条：
+		// 两条排序键毫无共同前缀，而板块内翻页是高频路径 —— 让它走排序（sort）
+		// 等于每次把板块全量读出来再排。
+		`CREATE INDEX IF NOT EXISTS posts_anime_created_idx
+	ON posts (anime_id, created_at DESC, id DESC) WHERE anime_id IS NOT NULL`,
+
+		// 外键：RESTRICT（不写 ON DELETE 就是默认的 NO ACTION，语义等价于 RESTRICT
+		// 但检查时机可延迟；这里显式写 RESTRICT 让意图可读）。
+		//
+		// 幂等性：`ADD CONSTRAINT` 不可重复执行（迁移规则第 2 条），所以用 DO 块
+		// 先探测 pg_constraint 再加 —— 与 0008 改 CHECK 的那段同一手法。
+		`DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+     WHERE rel.relname = 'posts'
+       AND con.contype = 'f'
+       AND con.conname = 'posts_anime_id_fkey'
+  ) THEN
+    ALTER TABLE posts ADD CONSTRAINT posts_anime_id_fkey
+      FOREIGN KEY (anime_id) REFERENCES anime(id) ON DELETE RESTRICT;
+  END IF;
+END $$`,
+	}},
 }

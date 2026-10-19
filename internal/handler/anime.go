@@ -13,8 +13,12 @@
 //     否则一个带 Bidi 覆盖的标题能让列表页显示成完全不同的文字。
 //     `cover_url` 只接受 http(s)：`javascript:` / `data:` 一律拒 —— 这也是前端
 //     `utils/safeLink.ts` 的口径，两边必须一致（前端只是第二道，不是唯一一道）。
-//  4. **DELETE 是硬删**。软删除需要"已挂了这个番剧的主题串怎么办"的答案，而主题串
-//     （#38）还没落地；现在加 `deleted_at` 只会把那个问题提前假装解决。
+//  4. **DELETE 是硬删，但带一条准入判据**（#38 落地后补）。软删除需要"已挂了这个
+//     番剧的主题串怎么办"的答案，而当时主题串还没落地；现在有了 —— 票里把处置
+//     定成"不允许删有主题串的番剧，409"（`ANIME_HAS_THREADS`）。于是仍然不需要
+//     `deleted_at`：一个"删不掉"的状态比一个"删了但看不见"的状态诚实得多。
+//     判据在 store（数据事实）+ 数据库外键 `ON DELETE RESTRICT`（兜住竞态）两层，
+//     见 store/anime.go 的 DeleteAnime 与迁移 0013。
 package handler
 
 import (
@@ -49,6 +53,13 @@ const (
 
 // CodeAnimeTitleTaken 是标题重复的错误码（与 409 配对）。
 const CodeAnimeTitleTaken = "ANIME_TITLE_TAKEN"
+
+// CodeAnimeHasThreads 是"这个番剧下还有主题串，不能删"的错误码（与 409 配对）。
+//
+// wayfinder #38 验收第 2 条把处置定成"不允许删，409"。与 CodeAnimeTitleTaken
+// 分成两个码是必要的：两者都是 409，但前端的动作完全不同 ——
+// 标题重复是"换个标题再试"，有主题串是"去处理那些主题串（或干脆别删）"。
+const CodeAnimeHasThreads = "ANIME_HAS_THREADS"
 
 // AnimeStore 是番剧目录的持久化能力（*store.Store 满足它）。
 type AnimeStore interface {
@@ -432,6 +443,17 @@ func (h *animeHandler) writeStoreError(c *gin.Context, err error, what string) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "番剧不存在", "code": codeNotFound})
 	case errors.Is(err, store.ErrAnimeTitleTaken):
 		c.JSON(http.StatusConflict, gin.H{"error": "这个标题已经存在", "code": CodeAnimeTitleTaken})
+	case errors.Is(err, store.ErrAnimeHasThreads):
+		// wayfinder #38 验收第 2 条：不允许删有主题串的番剧。
+		//
+		// 409 而不是 400：请求本身完全合法，是**当前状态**不允许这个动作 ——
+		// 而 400 会让调用方以为参数写错了（去改 id，然后照样失败）。
+		// 文案要给出可执行的下一步（"先处理那些主题串"），因为这条拒绝没有
+		// 客户端能自己解决的替代路径。
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "这个番剧下还有主题串，先处理它们再删",
+			"code":  CodeAnimeHasThreads,
+		})
 	default:
 		log.Printf("[ERROR] %s: %v", what, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": what, "code": model.CodeInternalError})

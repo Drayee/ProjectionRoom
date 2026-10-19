@@ -72,6 +72,10 @@ func registerPostRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Confi
 			api.POST(p, unavailable)
 			api.DELETE(p, unavailable)
 		}
+		// 板块列表只注册 GET：它的 POST 形态（在板块里发帖）走的是
+		// `POST /api/posts` + 请求体里的 animeId，而不是这个子资源路径 ——
+		// 在这里顺手注册一个不存在的 POST 会让客户端以为它存在（503 比 404 更会误导）。
+		api.GET("/animes/:animeId/posts", unavailable)
 		return
 	}
 
@@ -95,6 +99,17 @@ func registerPostRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Confi
 	api.GET("/posts", readLimiter, h.list)
 	api.GET("/posts/:postId", readLimiter, h.detail)
 	api.GET("/posts/:postId/comments", readLimiter, h.listComments)
+
+	// 板块下的主题串列表（wayfinder #38）：`GET /api/animes/:animeId/posts`。
+	//
+	// 为什么是**子资源路径**而不是 `GET /api/posts?animeId=`：
+	// 板块是番剧条目的一部分（票里定"板块即番剧条目"），子资源路径把这条
+	// 归属关系写进 URL；而 `?animeId=` 会让"番剧不存在"与"番剧存在但没有主题串"
+	// 挤在同一个 200 里（前者必须 404，见 handler 的说明）。
+	//
+	// 主题串详情与回复**复用**上面三条 posts 端点，不新建第二套（票里明写）。
+	// 读，因此挂同一个读限速桶。
+	api.GET("/animes/:animeId/posts", readLimiter, h.listAnimeThreads)
 
 	api.POST("/posts", RequireAuth(auth), createLimiter, h.create)
 	api.POST("/posts/:postId/like", RequireAuth(auth), interactLimiter, h.like)
@@ -126,6 +141,16 @@ type postView struct {
 	CommentCount int            `json:"commentCount"`
 	Liked        bool           `json:"liked"`
 	CreatedAt    string         `json:"createdAt"`
+
+	// AnimeID 是主题串所属板块（wayfinder #38）。
+	//
+	// **指针 + omitempty 而不是 int64**：普通帖子（全站信息流里的大多数）
+	// 不属于任何板块，前端据此区分"帖子"与"主题串"。写成 int64 零值会让
+	// 每个普通帖子都声称自己属于 id=0 的板块，而前端只能靠"是不是 0"来猜 ——
+	// 那是把一个可选的归属关系编码成一个魔法值。
+	AnimeID *int64 `json:"animeId,omitempty"`
+	// LastReplyAt 只在主题串上有意义（最新回复优先的排序键，回读给前端做"最后活跃"）。
+	LastReplyAt string `json:"lastReplyAt,omitempty"`
 }
 
 type commentView struct {
@@ -142,6 +167,10 @@ func toPostView(p *store.Post) postView {
 	if images == nil {
 		images = []string{} // 空数组而不是 null：前端直接 .map（同 anime 的理由）
 	}
+	lastReply := ""
+	if p.LastReplyAt != nil {
+		lastReply = p.LastReplyAt.Format(timeLayout)
+	}
 	return postView{
 		ID:        p.ID,
 		Title:     p.Title,
@@ -150,8 +179,10 @@ func toPostView(p *store.Post) postView {
 		Author:    postAuthorView{ID: p.AuthorID, DisplayName: p.AuthorName},
 		Images:    images,
 		LikeCount: p.LikeCount, CommentCount: p.CommentCount,
-		Liked:     p.Liked,
-		CreatedAt: p.CreatedAt.Format(timeLayout),
+		Liked:       p.Liked,
+		CreatedAt:   p.CreatedAt.Format(timeLayout),
+		AnimeID:     p.AnimeID,
+		LastReplyAt: lastReply,
 	}
 }
 
@@ -232,6 +263,12 @@ type createPostRequest struct {
 	Title   string   `json:"title"`
 	Content string   `json:"content"`
 	Images  []string `json:"images"`
+	// AnimeID 非 nil 时这帖是一个**主题串**（挂在某个板块下，wayfinder #38）。
+	//
+	// 指针而不是 int64：`"animeId": null` / 字段缺席 = 普通帖子，
+	// 而 `"animeId": 0` 是一个**明确的错误输入**（不该被静默当成普通帖子 ——
+	// 那样前端传错 id 的 bug 会表现为"发到全站去了"，谁也查不出来）。
+	AnimeID *int64 `json:"animeId"`
 }
 
 // create 是 `POST /api/posts`（登录）。
@@ -270,16 +307,90 @@ func (h *postHandler) create(c *gin.Context) {
 		adminBadRequest(c, err.Error())
 		return
 	}
+	// animeId 给了就必须是正整数：0 / 负数不是"没有板块"，而是前端算错了 id。
+	// 静默当成普通帖子会让这个 bug 表现成"发到全站信息流去了"，而不是一个 400。
+	if req.AnimeID != nil && *req.AnimeID <= 0 {
+		adminBadRequest(c, "animeId 必须是正整数（不发到板块时请省略该字段）")
+		return
+	}
 
-	row := &store.Post{AuthorID: actor.ID, Title: req.Title, Content: req.Content, Images: images}
+	row := &store.Post{AuthorID: actor.ID, Title: req.Title, Content: req.Content, Images: images, AnimeID: req.AnimeID}
 	if err := h.store.CreatePost(c.Request.Context(), row); err != nil {
+		// 番剧不存在 → 404（不是 400）：`animeId` 本身合法，是它指向的东西不在。
+		// 前端据此提示"这个板块已不存在"，与"表单填错了"是两个动作。
+		if errors.Is(err, store.ErrAnimeNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "番剧不存在", "code": codeNotFound})
+			return
+		}
 		h.writeStoreError(c, err, "创建帖子失败")
 		return
 	}
-	c.JSON(http.StatusCreated, toPostView(&store.Post{
-		ID: row.ID, AuthorID: row.AuthorID, Title: row.Title, Content: row.Content,
-		Images: row.Images, CreatedAt: row.CreatedAt, AuthorName: actor.DisplayName,
-	}))
+	// 回读权威行而不是拼一个临时对象：`lastReplyAt` 与 `animeId` 的权威值在库里
+	// （store 会把 animeId 归一、把 lastReplyAt 设成发帖时刻）。拼临时对象的话，
+	// 这里迟早会漏掉一个字段，而症状是"发完帖跳详情页，最后活跃时间是空的"。
+	created, err := h.store.PostByID(c.Request.Context(), row.ID, actor.ID)
+	if err != nil {
+		h.writeStoreError(c, err, "创建帖子后回读失败")
+		return
+	}
+	c.JSON(http.StatusCreated, toPostView(created))
+}
+
+// listAnimeThreads 是 `GET /api/animes/:animeId/posts?sort&limit&offset`（公开）。
+//
+// 排序口径（验收第 1 条：与界面一致）：
+//
+//	sort=latest-reply（默认）→ 最新回复优先
+//	sort=latest              → 按发帖时间
+//
+// 与全站列表的 `?sort=latest|hot` 是**两套**枚举：板块的排序维度里没有"热门"
+// （票里没要求，界面也没有那个按钮），而全站列表没有"最新回复"（它没有板块的概念）。
+// 把两套合成一套会让"sort=hot 在板块里是什么意思"变成一个必须回答的问题。
+//
+// 番剧不存在 → 404（不是空列表）：「这个板块不存在」与「这个板块还没有主题串」
+// 在界面上是两句不同的话。返回空列表会把前者伪装成后者 —— 而用户会一直刷新。
+func (h *postHandler) listAnimeThreads(c *gin.Context) {
+	animeID, ok := animeIDParam(c)
+	if !ok {
+		return
+	}
+
+	var sort store.ListAnimeThreadsSort
+	switch strings.ToLower(strings.TrimSpace(c.Query("sort"))) {
+	case "", "latest-reply", "latest_reply", "reply":
+		sort = store.AnimeThreadsSortLatestReply
+	case "latest", "new":
+		sort = store.AnimeThreadsSortLatest
+	default:
+		adminBadRequest(c, "sort 只支持 latest-reply 或 latest")
+		return
+	}
+
+	limit, err := boundedLimit(c.Query("limit"), defaultPostHTTPLimit, maxPostListHTTPLimit)
+	if err != nil {
+		adminBadRequest(c, err.Error())
+		return
+	}
+	offset, err := boundedOffset(c.Query("offset"))
+	if err != nil {
+		adminBadRequest(c, err.Error())
+		return
+	}
+
+	rows, hasMore, err := h.store.ListAnimeThreads(c.Request.Context(), animeID, sort, limit, offset, h.optionalViewer(c))
+	if err != nil {
+		if errors.Is(err, store.ErrAnimeNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "番剧不存在", "code": codeNotFound})
+			return
+		}
+		postInternal(c, "板块主题串查询失败", err)
+		return
+	}
+	items := make([]postView, 0, len(rows))
+	for i := range rows {
+		items = append(items, toPostView(&rows[i]))
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "hasMore": hasMore})
 }
 
 // like 是 `POST /api/posts/:postId/like`（登录，toggle 语义，回新状态）。
