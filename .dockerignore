@@ -1,0 +1,49 @@
+# Docker 构建上下文排除规则
+#
+# ⚠ 关键：client/dist/downloads/room-media 是**本地切片测试的残留产物**
+# （本地曾达 3.9 GB）。它必须排除，否则每次 docker build 都要上传几个 GB
+# 给 daemon，构建时间从秒级变成分钟级。
+#
+# 但 client/dist/downloads/segmenter-* 是**要发布的**（用户下载切片器），
+# 由 CI 的 scripts/build-segmenter.sh 现场构建，所以不排除 downloads 本身。
+
+# —— 本地切片产物（体积巨大，且不属于发布内容）——
+client/dist/downloads/room-media/
+
+# —— 版本控制与 CI ——
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# —— 依赖与构建缓存 ——
+node_modules/
+client/node_modules/
+*.test
+*.out
+coverage/
+
+# —— 开发态与文档（不进运行时镜像）——
+docs/
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+
+# —— 本地数据库与迁移临时文件 ——
+_migrate/
+reports/
+*.sql
+
+# —— 编辑器与系统文件 ——
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# —— 本地构建产物（由 CI 现构）——
+projectionroom
+projectionroom.exe
+projectionroom_linux
+client/dist-debug/

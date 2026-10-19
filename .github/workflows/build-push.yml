@@ -64,6 +64,11 @@ jobs:
           npm --prefix client ci
           npm --prefix client run build
 
+      - name: Build segmenter binaries (cross-compiled, served by /downloads)
+        run: |
+          chmod +x scripts/build-segmenter.sh
+          ./scripts/build-segmenter.sh
+
       - name: Verify frontend output
         run: |
           test -f client/dist/index.html || (echo "client/dist/index.html missing" && exit 1)
