@@ -1,6 +1,14 @@
 # Multi-stage build for ProjectionRoom (production)
+#
+# ⚠ 两处关键约束（都踩过）：
+#  1. **Go 版本必须与 go.mod 一致**（go.mod 写 1.26.0）。用旧版 builder 镜像会在
+#     `go mod download` 阶段直接报 "errors parsing go.mod" 并让整个构建失败 ——
+#     报错点离真正原因很远，所以这里把版本写死在注释里。
+#  2. 二进制必须交叉编译为 linux/amd64 且 CGO_ENABLED=0（静态链接），
+#     否则运行阶段找不到动态库。
+#
 # Stage 1: Build
-FROM golang:1.23-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -13,7 +21,7 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build with tags
+# Build (wireinject 标签是必需的：cmd/wire.go 只有带这个标签才参与编译)
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o projectionroom -tags wireinject ./cmd
 
 # Stage 2: Runtime
@@ -26,7 +34,7 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/projectionroom .
 
-# Copy client dist (if exists)
+# Copy client dist (前端产物由 CI 的 npm 步骤生成后一起打进镜像)
 COPY --from=builder /build/client/dist ./client/dist
 
 # Expose port

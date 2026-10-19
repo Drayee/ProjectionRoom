@@ -1,13 +1,14 @@
 # GitHub Actions: Build & Push Docker Image to GHCR
 #
 # Prerequisites:
-# 1. Create Personal Access Token with `read:package` scope
-# 2. Add as Repository Secret: REGISTRY_TOKEN (or GITHUB_REGISTRY_TOKEN for old name)
-# 3. Server access configured via Secrets: SERVER_PASSWORD (SSH) or SSH_KEY_FILE
+# 1. Personal Access Token with `write:packages` scope
+# 2. Repository Secret: REGISTRY_TOKEN
 #
-# Usage:
-#   Triggered on push to main branch
-#   Manual trigger also available: workflow_dispatch
+# ⚠ 三个必须做对的点（都踩过）：
+#  1. **Go 版本**必须与 go.mod 一致（1.26），否则 go mod download 直接失败；
+#  2. **前端产物必须先构建**：Dockerfile 的 `COPY client/dist` 在 dist 不存在时会失败，
+#     所以这里先跑 npm ci + npm run build；
+#  3. 推送镜像要带 sha 标签，部署时才能按提交号精确回滚。
 
 name: Build & Push Docker Image
 
@@ -17,8 +18,7 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - '.github/workflows/deploy.yml'
-  
+
   workflow_dispatch:
     inputs:
       tag_override:
@@ -29,33 +29,54 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  DOCKERFILE_PATH: ./Dockerfile
+  GO_VERSION: '1.26'
+  NODE_VERSION: '20'
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    
+
     permissions:
       contents: read
       packages: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Build frontend (required by Dockerfile COPY client/dist)
+        run: |
+          npm --prefix client ci
+          npm --prefix client run build
+
+      - name: Verify frontend output
+        run: |
+          test -f client/dist/index.html || (echo "client/dist/index.html missing" && exit 1)
+          du -sh client/dist
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
+
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_REGISTRY_TOKEN }}
-      
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -63,25 +84,22 @@ jobs:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Default: sha short hash
-            type=sha,prefix=
-            # Latest on main branch
-            type=edge
-            # Release versions (tagged releases)
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
-            # Manual override from workflow_dispatch
             type=raw,value=${{ github.event.inputs.tag_override }},enable=${{ github.event.inputs.tag_override != '' }}
-      
+
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ${{ env.DOCKERFILE_PATH }}
+          file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      
+
       - name: Image digest
-        run: echo ${{ steps.build.outputs.digest }}
+        run: echo "digest=${{ steps.build.outputs.digest }}"
