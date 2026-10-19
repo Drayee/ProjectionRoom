@@ -132,8 +132,24 @@ jobs:
                      -o ConnectTimeout=20 "${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}")
           fi
 
-          "${SSH_CMD[@]}" bash -s << 'REMOTE'
+          # ⚠ 变量传递：`ssh host bash -s << 'EOF'` 这种写法里，远程 shell 拿不到
+          # 本地 env（GitHub Actions 的 env: 只注入到**本地**这一步的进程）。
+          # 之前踩过：远程 `set -u` 直接报 `GHCR_TOKEN: unbound variable`。
+          # 正确做法是把值作为**命令行参数**交给 `bash -s`（$1/$2/$3），
+          # 而不是指望环境继承 —— ssh 默认不 SendEnv，且服务端 AcceptEnv 也未必开。
+          #
+          # 另一个细节：参数里可能有特殊字符（token），必须用单引号包住并转义，
+          # 这里用 printf %q 生成安全的 shell 字面量。
+          TOKEN_Q=$(printf '%q' "$GHCR_TOKEN")
+          USER_Q=$(printf '%q' "$GHCR_USER")
+          IMAGE_Q=$(printf '%q' "$IMAGE_REF")
+
+          "${SSH_CMD[@]}" "bash -s -- $TOKEN_Q $USER_Q $IMAGE_Q" << 'REMOTE'
           set -euo pipefail
+          GHCR_TOKEN="$1"
+          GHCR_USER="$2"
+          IMAGE_REF="$3"
+
           cd /opt/projectionroom
 
           # GHCR 登录：私有镜像必须。token 由 Actions 注入，不落盘。
