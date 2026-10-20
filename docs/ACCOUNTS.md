@@ -167,6 +167,7 @@ schema_migrations
 - 服务端**不信任客户端自报的 `clientId`** 作为身份：`clientId` 只是"同一账号的多端标识"，身份以票据/账号为准（审计 must #1）。
 - **公开房间列表**：实况取自内存（只有真的存在且有主播的房间），元数据（标题/公开性/房主昵称）取自 `rooms_meta`；只列 `is_public` 且**当前有主播**的房间（**含处于离线宽限期的房间**——它们仍可按码进入，列表里会标注"主播离线中"），分页 + 限速。列表**不返回**密码、成员明细、owner 的敏感字段。
 - 列表上线后房间码不再是秘密：密码房仍以密码为准；主播位仍以 `hostToken` 为准（S-7）；管理端有"下架"权限。
+- **官方 / 推荐区**（`GET /api/public-rooms?official=true`）：运营位，只列 `rooms_meta.is_official` 且当前仍在内存里的房间，按 `official_rank` 降序。标记由管理端 `POST /api/admin/rooms/:id/official` 设置或撤销（只 admin，普通房主不能自荐；无申请流）。**官方标记不改变房间的实时状态与进入规则** —— 密码房仍是密码房，只是它在官方区里有一个标识。
 - 房间关闭时更新 `rooms_meta.closed_at`；标题与昵称统一做字符白名单 + 去零宽/Bidi（§7.3）。
 
 ---
@@ -235,10 +236,11 @@ schema_migrations
 消息
   GET    /api/messages?peer&before           POST /api/messages/read
 公开房间
-  GET    /api/public-rooms    PATCH /api/rooms/:id/meta（房主改标题/公开性）
+  GET    /api/public-rooms[?official=true|false]    PATCH /api/rooms/:id/meta（房主改标题/公开性）
 管理端（全部 RequireAdmin）
   GET/POST/PATCH/DELETE /api/admin/users[/:id]
-  POST   /api/admin/rooms/:id/close|unpublish
+  POST   /api/admin/rooms/:id/close|unpublish|official
+  GET    /api/admin/rooms[?public=&official=&search=]
   GET    /api/admin/metrics        GET /api/admin/logs        GET /api/admin/audit
 
 WebSocket

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -110,6 +111,10 @@ type AdminRoomStats interface {
 // 管理端房间列表 = 内存快照 ∪ DB 元数据（T4 明确要求**含未公开**的房间），
 // 所以这里要的是"能带着搜索/公开性筛选翻页查 rooms_meta"，
 // 而不是公开列表那条"按 id 批量取"的路径。
+//
+// OfficialOnly 是本查询条件里的第三个筛选（0014，wayfinder #35）：
+// 管理端房间管理视图要能"只看官方位"，否则运营标了一排房间之后
+// 无法快速核对"现在官方区里是哪几个"。
 type AdminRoomLister interface {
 	QueryRoomMetas(ctx context.Context, q store.RoomMetaQuery) ([]store.RoomMeta, int64, error)
 }
@@ -236,6 +241,9 @@ func registerAdminRoutes(api *gin.RouterGroup, deps AdminDeps, cfg *config.Confi
 	admin.GET("/rooms", h.listRooms)
 	admin.POST("/rooms/:id/close", h.closeRoom)
 	admin.POST("/rooms/:id/unpublish", h.unpublishRoom)
+	// 0014（wayfinder #35）：官方/推荐标记的运营端点。与 close/unpublish 同一组
+	// RequireAdmin 之下，普通房主不能自荐（#35 明确不做申请流）。
+	admin.POST("/rooms/:id/official", h.setOfficial)
 	admin.GET("/audit", h.listAudit)
 }
 
@@ -254,6 +262,7 @@ func registerAdminUnavailable(api *gin.RouterGroup) {
 	api.GET("/admin/rooms", unavailable)
 	api.POST("/admin/rooms/:id/close", unavailable)
 	api.POST("/admin/rooms/:id/unpublish", unavailable)
+	api.POST("/admin/rooms/:id/official", unavailable)
 	api.GET("/admin/audit", unavailable)
 }
 
@@ -532,7 +541,10 @@ type adminRoomItem struct {
 	MaxDepth    int    `json:"maxDepth"`
 	// IsPublic 在"缺元数据行"时为 false，且 MetadataMissing 会置 true ——
 	// 两个字段一起看才能区分"未公开"与"元数据缺失"（后者需要人去查为什么缺）。
-	IsPublic        bool  `json:"isPublic"`
+	IsPublic bool `json:"isPublic"`
+	// IsOfficial 是运营标记（0014，wayfinder #35）。管理端房间视图据此显示开关状态，
+	// 也是"只看官方"筛选的可见反馈（否则筛出一屏行却看不出它们凭什么被选中）。
+	IsOfficial      bool  `json:"isOfficial"`
 	HasPassword     bool  `json:"hasPassword"`
 	HostOnline      bool  `json:"hostOnline"`
 	HostOffline     bool  `json:"hostOffline"`
@@ -579,6 +591,11 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 		adminBadRequest(c, err.Error())
 		return
 	}
+	officialOnly, err := officialFilter(c.Query("official"))
+	if err != nil {
+		adminBadRequest(c, err.Error())
+		return
+	}
 	search := strings.TrimSpace(c.Query("search"))
 
 	if h.deps.Rooms == nil && h.deps.RoomMeta == nil {
@@ -603,11 +620,12 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 		// 它们除了让并集变大之外不提供实时信息，而管理端真正要管的正是"现在还在的房间"。
 		limitRows := max(len(snapshots)+maxAdminPageLimit, maxAdminPageLimit)
 		rows, total, err := h.deps.RoomMeta.QueryRoomMetas(c.Request.Context(), store.RoomMetaQuery{
-			Search:      search,
-			PublicOnly:  publicOnly,
-			PrivateOnly: privateOnly,
-			Limit:       limitRows,
-			Offset:      0,
+			Search:       search,
+			PublicOnly:   publicOnly,
+			PrivateOnly:  privateOnly,
+			OfficialOnly: officialOnly,
+			Limit:        limitRows,
+			Offset:       0,
 		})
 		if err != nil {
 			adminInternalError(c, "查询房间元数据列表", err)
@@ -643,6 +661,11 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 			!strings.Contains(strings.ToLower(m.Title), pattern) {
 			continue
 		}
+		// 官方筛选（0014）：内存侧也要过一遍，否则"只看官方"会把库里的官方行
+		// 与内存里的非官方行混在一起（库侧筛选在 QueryRoomMetas 里已经做了）。
+		if officialOnly && (!hasMeta || !m.IsOfficial) {
+			continue
+		}
 
 		item := adminRoomItem{
 			RoomID:          s.ID,
@@ -651,6 +674,7 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 			MemberCount:     s.MemberCount,
 			MaxDepth:        s.MaxDepth,
 			IsPublic:        m.IsPublic,
+			IsOfficial:      m.IsOfficial,
 			HasPassword:     s.HasPassword,
 			HostOnline:      s.HostOnline,
 			HostOffline:     s.HostInGrace,
@@ -673,6 +697,9 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 		if _, dup := seen[m.RoomID]; dup {
 			continue
 		}
+		if officialOnly && !m.IsOfficial {
+			continue
+		}
 		// 只在库里（房间已销毁）：这些行不可能满足"有主播"这类实时判据，
 		// 但它们是"刚才被关掉的房间"，管理端需要它们来做前后对照。
 		item := adminRoomItem{
@@ -680,6 +707,7 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 			OwnerUserID: m.OwnerUserID,
 			Title:       m.Title,
 			IsPublic:    m.IsPublic,
+			IsOfficial:  m.IsOfficial,
 			HasPassword: m.HasPassword,
 			InMemory:    false,
 		}
@@ -712,9 +740,10 @@ func (h *adminHandler) listRooms(c *gin.Context) {
 		"total":  total,
 		"limit":  limit,
 		"offset": offset,
-		// 回显生效的筛选值：客户端不必猜自己传的 public 被理解成了什么。
-		"search": search,
-		"public": c.Query("public"),
+		// 回显生效的筛选值：客户端不必猜自己传的 public/official 被理解成了什么。
+		"search":   search,
+		"public":   c.Query("public"),
+		"official": officialOnly,
 	})
 }
 
@@ -938,6 +967,201 @@ func (h *adminHandler) unpublishRoom(c *gin.Context) {
 		// 它不影响状态码（两者都是 200），只影响提示文案。
 		"changed": changed,
 	})
+}
+
+// —— 房间官方 / 推荐标记（0014，wayfinder #35）——
+
+// adminRoomOfficialRequest 是 POST /api/admin/rooms/:id/official 的请求体。
+//
+// 两个字段都是指针，用来区分"没传"与"显式传 false/0"：
+//
+//	{}                         撤销官方（语义上的默认，见下面的 official 默认值说明）
+//	{"official": true}         设为官方，rank 缺省 0
+//	{"official": true, "rank": 5}  设为官方并置顶
+//	{"rank": 3}                只调位次，不动"是不是官方"
+//
+// 用指针而不是 bool/int 的原因与 adminUserPatch 逐字相同：零值即忽略会让
+// "想把 rank 调成 0"永远做不到，而 rank=0 恰恰是最常见的合法值
+// （放进官方区但不置顶）。
+//
+// Official 缺省（nil）时的语义是**撤销**，不是"不改"：这条端点的正常用法是
+// 管理端房间行上的一个开关（#35 明确"管理端房间管理视图里加一个开关即可"），
+// 而开关的两态就是开/关。若把缺省解释成"不动"，那"关"这个动作就永远发不出来 ——
+// 客户端只能先传 official=false 再单独发一次 rank=0，那是两次请求表达一个意图。
+type adminRoomOfficialRequest struct {
+	Official *bool `json:"official"`
+	Rank     *int  `json:"rank"`
+}
+
+// maxOfficialRank 是运营位次的上限。
+//
+// 它只防"手滑打了一个天文数字"，不承担业务语义（位次的相对大小才是意义）。
+// 上限取 int16 的量级：官方区一屏最多几十个房间，rank 超过这个数的唯一成因
+// 是输入错误，而 int 常量让"写 999999999 也合法"这种无心失误有一个可读的错误。
+const maxOfficialRank = 9999
+
+// setOfficial 设置/撤销房间的官方标记（成功 200）。
+//
+// 三条判据：
+//
+//  1. **只改库，不动内存**。官方标记是运营事实（rooms_meta），不是房间实时状态
+//     （I2 的分界线在这里很清晰：#35 的验收第 2 条明确"官方标记不改变房间的实时
+//     状态与进入规则"）。动内存的那两个动作是强关与下架，它们走的是另一条端点。
+//  2. **幂等**：撤销一个从未标记过的房间仍然返回 200（与下架同一套语义），
+//     但**审计只在真的发生变更时写一行** —— 否则管理员的双击/重试会把
+//     "到底设过几次官方"淹掉（unpublishRoom 的同一条理由）。
+//  3. **审计行带 knowable 明细**：房间码 + 变更后的 (is_official, official_rank)
+//     + 变更前的值。撤销时同时看到"原来是 true/rank=3"，这条记录才可复盘。
+//
+// 为什么房间不存在时返回 404 而不是"顺手建一行"：与 closeRoom 同口径 ——
+// 管理端操作的是一个**正在发生的房间**。给一个不存在的房间码设官方标记，
+// 只会往库里塞一行没有 owner 事实的孤儿元数据（owner_user_id 写谁？）。
+func (h *adminHandler) setOfficial(c *gin.Context) {
+	actor, ok := CurrentUser(c)
+	if !ok {
+		abortUnauthorized(c, CodeSessionInvalid, "登录状态无效，请重新登录")
+		return
+	}
+	roomID := strings.ToUpper(strings.TrimSpace(c.Param("id")))
+	if roomID == "" {
+		adminBadRequest(c, "路径参数 id 不能为空")
+		return
+	}
+
+	var req adminRoomOfficialRequest
+	// 空 body 是**合法**调用（语义 = 撤销官方），因此不能用"绑定失败即 400"：
+	// ShouldBindJSON 对空 body 返回 EOF，而那正是最常见的一次撤销请求
+	//（管理端的开关拨到"关"时前端发的就是空 body 或 `{}`）。
+	// 只把 EOF 单为例外而不是"先读 body 再判空"：后者会把
+	// "传了半个 JSON"（语法错误）也一并放过，而那必须仍然是 400。
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		adminBadRequest(c, "请求体不是合法 JSON")
+		return
+	}
+	// 空 body 也是合法调用（撤销官方），因此这里不要求至少一个字段。
+	if req.Rank != nil {
+		if *req.Rank < 0 || *req.Rank > maxOfficialRank {
+			adminBadRequest(c, fmt.Sprintf("rank 必须是 0 到 %d 之间的整数", maxOfficialRank))
+			return
+		}
+	}
+
+	// 房间必须在内存里存在：官方的语义是"运营推一个正在进行的房间"。
+	snapshot, exists := h.roomSnapshot(roomID)
+	if !exists {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+			"error": "房间不存在（可能已经被回收或已关闭）",
+			"code":  model.CodeRoomNotFound,
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// 期望的最终态。缺行时按"未标记过"起步（is_official=false, rank=0）——
+	// 那是 0014 的 DEFAULT，语义上等于"这个房间从来没进过官方区"。
+	wantOfficial := false
+	wantRank := 0
+	if req.Official != nil {
+		wantOfficial = *req.Official
+	}
+	if req.Rank != nil {
+		wantRank = *req.Rank
+	}
+	// 撤销时 rank 一并归零（见 RoomMetaPatch 的说明：只改前者会让一个非官方
+	// 房间留着 rank，下次再设官方时它突然跳到老位置上）。
+	if !wantOfficial {
+		wantRank = 0
+	}
+
+	var beforeOfficial bool
+	var beforeRank int
+	var current *store.RoomMeta
+	if h.deps.RoomMeta != nil {
+		row, err := h.deps.RoomMeta.RoomMetaByID(ctx, roomID)
+		switch {
+		case err == nil && row != nil:
+			current = row
+			beforeOfficial, beforeRank = row.IsOfficial, row.OfficialRank
+		case errors.Is(err, service.StoreNotFound):
+			// 缺行：下面用 upsert 以"当前内存事实 + 目标运营态"补一行。
+			// 与下架/房主改元数据是同一条修复路径（自愈），这里补的行
+			// 同时把官方标记写进去。
+		default:
+			adminInternalError(c, "读房间元数据", err)
+			return
+		}
+	} else {
+		adminInternalError(c, "设置官方标记", errors.New("装配里没有房间元数据写能力"))
+		return
+	}
+
+	if current != nil {
+		// 有行时走 **patch**：本端点要改的只有运营两列，而 patch 的语义
+		// 正是"nil 字段不改"——它不会碰到 title / is_public / closed_at，
+		// 于是"设官方顺手把房间改成未公开"这种事在类型层面就不可能发生。
+		//
+		// 为什么不用 upsert：upsert 是整体覆盖，这里必须先读行再原样写回，
+		// 于是读-写之间任何并发改动（房主同时改标题）都会被静默冲掉。
+		// patch 一次 UPDATE 只 SET 两列，没有这个窗口。
+		if err := h.deps.RoomMeta.UpdateRoomMeta(ctx, roomID, store.RoomMetaPatch{
+			IsOfficial:   &wantOfficial,
+			OfficialRank: &wantRank,
+		}); err != nil {
+			adminInternalError(c, "设置官方标记（元数据侧）", err)
+			return
+		}
+	} else {
+		// 缺行时只能 upsert：patch 对不存在的行返回 ErrNotFound，
+		// 而这个端点在"房间在内存里活着、只是元数据缺行"时应当把行补上
+		//（与下架走 upsert 是同一理由：要表达的是"从零开始的一整行期望状态"）。
+		//
+		// 缺行补出来的行按"未公开、标题空"起步：那是建房默认值，而
+		// 一个从未落过库的房间本来就没有标题/公开性可继承。
+		expected := &store.RoomMeta{
+			RoomID:       roomID,
+			OwnerUserID:  snapshot.OwnerUserID,
+			Title:        "",
+			IsPublic:     false,
+			HasPassword:  snapshot.HasPassword,
+			IsOfficial:   wantOfficial,
+			OfficialRank: wantRank,
+		}
+		if err := h.deps.RoomMeta.UpsertRoomMeta(ctx, expected); err != nil {
+			adminInternalError(c, "设置官方标记（元数据侧）", err)
+			return
+		}
+	}
+
+	// 审计只在真的发生变更时写（幂等调用的噪声不应淹没"实际设过几次"）。
+	if wantOfficial != beforeOfficial || wantRank != beforeRank {
+		h.writeRoomAudit(c, actor.ID, "room.official", roomID, map[string]any{
+			"official": wantOfficial,
+			"rank":     wantRank,
+			// before 两个字段让"撤销"也能复盘出原来的位次。
+			"beforeOfficial": beforeOfficial,
+			"beforeRank":     beforeRank,
+		})
+	}
+
+	log.Printf("管理端%s room=%s（管理员 %d，rank=%d，原 official=%t/%d）",
+		officialVerb(wantOfficial), roomID, actor.ID, wantRank, beforeOfficial, beforeRank)
+
+	c.JSON(http.StatusOK, gin.H{
+		"roomId":     roomID,
+		"isOfficial": wantOfficial,
+		"rank":       wantRank,
+		// changed 让客户端区分"这次真的改了"与"本来就是目标态（幂等重试）"。
+		"changed": wantOfficial != beforeOfficial || wantRank != beforeRank,
+	})
+}
+
+// officialVerb 是日志里的动词（设/撤），避免每次读日志都要在 mental model 里翻译布尔值。
+func officialVerb(isOfficial bool) string {
+	if isOfficial {
+		return "设置官方标记"
+	}
+	return "撤销官方标记"
 }
 
 // roomSnapshot 在内存里查一个房间的实时快照。

@@ -105,16 +105,27 @@ type Session struct {
 func (Session) TableName() string { return tableSessions }
 
 // RoomMeta 对应 rooms_meta：房间**元数据**（不变量 I2：实时状态不入库）。
+//
+// 官方标记（0014，wayfinder #35）是**元数据**而不是实时状态：它要活过房间关闭
+// （"这个房间曾经是官方位"要能被审计与列表回答），且它的变化频率是运营节奏
+// （一天几次），而 I2 限制的是"每次同步都写库"的那一类。放进内存快照才是错的
+// —— 那会让"重启后官方区空了"变成一个必然事件。
 type RoomMeta struct {
 	RoomID string `gorm:"column:room_id;primaryKey"`
 	// OwnerUserID 是建房者（§6：建房必须登录并绑定房主）。
-	OwnerUserID int64      `gorm:"column:owner_user_id"`
-	Title       string     `gorm:"column:title"`
-	IsPublic    bool       `gorm:"column:is_public"`
-	HasPassword bool       `gorm:"column:has_password"`
-	CreatedAt   time.Time  `gorm:"column:created_at"`
-	LastSeenAt  time.Time  `gorm:"column:last_seen_at"`
-	ClosedAt    *time.Time `gorm:"column:closed_at"`
+	OwnerUserID int64  `gorm:"column:owner_user_id"`
+	Title       string `gorm:"column:title"`
+	IsPublic    bool   `gorm:"column:is_public"`
+	HasPassword bool   `gorm:"column:has_password"`
+	// IsOfficial 表示运营把这个房间放进了「官方 / 推荐」区（默认 false）。
+	IsOfficial bool `gorm:"column:is_official"`
+	// OfficialRank 是官方区内的排序位次（默认 0）。语义是"大者在前、同值按房间码"，
+	// 因此 0 与正整数都是合法值，只有 **有 IsOfficial=true 时才被读取** ——
+	// 非官方房间的 rank 无意义，也不需要维护（撤销官方时它一并归零）。
+	OfficialRank int        `gorm:"column:official_rank"`
+	CreatedAt    time.Time  `gorm:"column:created_at"`
+	LastSeenAt   time.Time  `gorm:"column:last_seen_at"`
+	ClosedAt     *time.Time `gorm:"column:closed_at"`
 }
 
 // TableName 见 User.TableName 的说明。
@@ -130,6 +141,15 @@ type RoomMetaPatch struct {
 	HasPassword *bool
 	LastSeenAt  *time.Time
 	ClosedAt    *time.Time
+	// IsOfficial / OfficialRank 是运营标记的两个字段（0014，wayfinder #35）。
+	//
+	// 为什么它们与 IsPublic/Title 同一个 patch 类型而不是另开一个：撤销官方
+	// 要**同时**把 IsOfficial 置 false 与 OfficialRank 归零（只改前者会让一个
+	// 非官方房间留着 rank，下次再设官方时它突然跳到老位置上）。同一个 patch
+	// 里两个字段一起改，才有可能在调用方被一次性写全；分成两个参数时
+	// "撤了官方但 rank 没清"是一个不会被任何类型检查发现的调用。
+	IsOfficial   *bool
+	OfficialRank *int
 }
 
 // AdminAudit 对应 admin_audit：管理端写操作的审计行（§8 的 must 落点）。

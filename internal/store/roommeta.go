@@ -50,6 +50,14 @@ func (s *Store) UpsertRoomMeta(ctx context.Context, m *RoomMeta) error {
 
 	// ON CONFLICT 的赋值列表用 map（clause.Assignments 内部会按键名排序，
 	// SQL 文本确定），值一律走参数绑定。
+	//
+	// 这张列表是**可变列的清单**，不是"这次要改的列"：UpsertRoomMeta 的语义是
+	// 整体登记（调用方掌握完整期望状态），因此每一次 upsert 都会重写这些列。
+	// created_at 不在其中（保持首次值）；is_official / official_rank（0014，
+	// wayfinder #35）必须在其中，否则任何一次 upsert（自愈投递、房主改标题、
+	// 管理端下架）都会把已设好的官方标记**静默抹掉** —— 而且那不会报错，
+	// 只是官方区某天突然空了。这是"手工同步两处清单"的典型代价，也是
+	// 为什么新增列时要先在这里加一行。
 	err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "room_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
@@ -57,6 +65,8 @@ func (s *Store) UpsertRoomMeta(ctx context.Context, m *RoomMeta) error {
 			"title":         m.Title,
 			"is_public":     m.IsPublic,
 			"has_password":  m.HasPassword,
+			"is_official":   m.IsOfficial,
+			"official_rank": m.OfficialRank,
 			"last_seen_at":  m.LastSeenAt,
 			"closed_at":     m.ClosedAt,
 		}),
@@ -105,6 +115,22 @@ func (s *Store) UpdateRoomMeta(ctx context.Context, roomID string, patch RoomMet
 	}
 	if patch.ClosedAt != nil {
 		updates["closed_at"] = *patch.ClosedAt
+	}
+	// 运营标记（0014）。两个字段各自独立判定 nil，与上面的公开性改动同一套
+	// 语义：撤销官方时调用方一次传 `IsOfficial=&false, OfficialRank=&0`。
+	//
+	// ⚠ 这里**不做**"把 IsOfficial 置 false 就连带清 rank"的隐式联动：
+	// 隐式联动会让"只改 rank"与"撤销官方"两个意图共用一条代码路径，
+	// 于是想单独降 rank 的调用方看到 rank 没变（被联动覆盖），
+	// 而那种"传了没生效"在本层是查不出来的。要一起改就显式一起传。
+	if patch.IsOfficial != nil {
+		updates["is_official"] = *patch.IsOfficial
+	}
+	if patch.OfficialRank != nil {
+		if *patch.OfficialRank < 0 {
+			return errors.New("store: official_rank 不能为负数")
+		}
+		updates["official_rank"] = *patch.OfficialRank
 	}
 	if len(updates) == 0 {
 		return errors.New("store: RoomMetaPatch 为空（没有任何要更新的字段）")
@@ -198,6 +224,51 @@ func (s *Store) ListRoomMetas(ctx context.Context, ids []string) (map[string]Roo
 	return out, nil
 }
 
+// ListOfficialRoomIDs 返回"元数据侧认为官方且未关闭"的房间码，按运营位次排序
+// （0014，wayfinder #35 的公开读半边）。
+//
+// 与 ListPublicRoomIDs 的分工（**两条独立查询，不是一个参数**）：
+//
+//	ListPublicRoomIDs   is_public = true  ORDER BY last_seen_at DESC   → /rooms 公开列表
+//	ListOfficialRoomIDs  is_official = true ORDER BY rank DESC, room_id → /official 官方区
+//
+// 为什么不是给 ListPublicRoomIDs 加一个 official 参数：两者的排序键毫无共同前缀
+// （最近活跃 vs 运营位次），合成一个函数只会得到"两个分支各自排序"的 if-else；
+// 更重要的是**语义不同**——公开列表回答"现在有什么能进"（实况优先），
+// 官方区回答"运营推了什么"（排序是刻意的人工结果，admin 调 rank 就是为了它）。
+// 把后者按 last_seen_at 排会让"置顶"这个操作失去意义。
+//
+// 三个筛选与排序细节：
+//
+//   - `closed_at IS NULL` 与公开列表同口径：已关闭的房间不在任何"当前列表"里；
+//   - 位次**降序**（大者在前）而不是升序：运营语义是"rank 越大越靠前"，
+//     与 0010/0013 的 created_at DESC 也是同一个方向，少一次认知切换；
+//   - 必须补第二排序键 room_id：official_rank 相同的行极常见（默认值全是 0），
+//     只按它排时 PostgreSQL 的返回顺序不保证稳定 —— 那会让分页出现重复/漏行
+//     （与 QueryRoomMetas 的 last_seen_at+room_id 是同一条理由）。
+//
+// 返回空切片而不是 nil：调用方（JSON 列表）不必再判空。
+func (s *Store) ListOfficialRoomIDs(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = defaultPublicRoomLimit
+	}
+	if limit > maxPublicRoomLimit {
+		limit = maxPublicRoomLimit
+	}
+
+	ids := make([]string, 0, limit)
+	err := s.db.WithContext(ctx).
+		Model(&RoomMeta{}).
+		Where("is_official = ? AND closed_at IS NULL", true).
+		Order("official_rank DESC, room_id ASC").
+		Limit(limit).
+		Pluck("room_id", &ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询官方房间列表失败: %w", err)
+	}
+	return ids, nil
+}
+
 // RoomMetaQuery 是管理端房间列表的查询条件（T1 / §8）。
 //
 // 三个可选筛选各自独立，互不牵连：Search 是子串匹配（房间码或标题），
@@ -210,6 +281,13 @@ type RoomMetaQuery struct {
 	PublicOnly bool
 	// PrivateOnly 只返回 is_public = false 的行。
 	PrivateOnly bool
+	// OfficialOnly 只返回 is_official = true 的行（0014，管理端按官方标记筛选）。
+	//
+	// 与 PublicOnly/PrivateOnly 是**三个并列**的筛选而不是嵌套关系：
+	// 官方标记与公开性是两个正交的维度（一个房间可以又官方又未公开，
+	// 例如运营先标记、等开播前再放出来）。把它们做成"公开性下面的子选项"
+	// 会在语义上排除掉这种形态。
+	OfficialOnly bool
 	// Limit <= 0 取默认值（50），> 200 被截断；Offset < 0 视为 0（与 store.clampPage 同口径）。
 	Limit  int
 	Offset int
@@ -244,6 +322,9 @@ func (s *Store) QueryRoomMetas(ctx context.Context, q RoomMetaQuery) ([]RoomMeta
 			tx = tx.Where("is_public = ?", true)
 		} else if q.PrivateOnly {
 			tx = tx.Where("is_public = ?", false)
+		}
+		if q.OfficialOnly {
+			tx = tx.Where("is_official = ?", true)
 		}
 		return tx
 	}

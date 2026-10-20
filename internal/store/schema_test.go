@@ -55,6 +55,11 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			"owner_user_id": {"bigint", 0, false},
 			"title":         {"character varying", 60, false},
 			"is_public":     {"boolean", 0, false},
+			// 0014（wayfinder #35）：官方标记与运营位次。两列都 NOT NULL DEFAULT，
+			// 于是"没标记过"是一个确定的假值而不是 NULL —— 官方列表的 WHERE
+			// 因此永远不用在"false"与"未知"之间做选择（见 0014 的 DDL 注释）。
+			"is_official":   {"boolean", 0, false},
+			"official_rank": {"integer", 0, false},
 			"has_password":  {"boolean", 0, false},
 			"created_at":    {"timestamp with time zone", 0, false},
 			"last_seen_at":  {"timestamp with time zone", 0, false},

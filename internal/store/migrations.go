@@ -612,4 +612,42 @@ BEGIN
   END IF;
 END $$`,
 	}},
+
+	// 0014：房间的「官方 / 推荐」标记与运营排序位次（wayfinder #35）。
+	//
+	// # 为什么是**两列**而不是一列
+	//
+	// 「是不是官方」与「官方区里排第几」是两个独立变化的事实：
+	// 要把一个房间放进官方区**但不置顶**（is_official=true, official_rank=0）
+	// 是常见形态，而"是不是官方"用布尔、"排第几"用整数各表达一个维度，
+	// 比把它们塞进一个 varchar 状态（`official` / `featured` / `none`）或一个
+	// 可空整数（NULL=非官方、0=置顶第 0 位？）都更耐改。
+	// 后者真正的坑是**语义重叠**：NULL、0、正数三个取值要解释两种维度，
+	// 迟早出现"这个房间到底是官方还是不是"这种没有唯一答案的库状态。
+	//
+	// # 为什么两列都 NOT NULL DEFAULT 而不留可空
+	//
+	// 追加列时既有行（本机/生产库里已有的 rooms_meta）会被 DEFAULT 填上，
+	// 因此 NOT NULL 不违反「只做加法」——它填的是一个**确定的假值**
+	// （false / 0），语义是"这个房间从未被运营标记过"，而不是"不知道"。
+	// 若留可空，"没标记过"与"标记状态未知"在 SQL 里同形，
+	// 而官方列表的 WHERE 必须每天在这两者之间做选择。
+	//
+	// # 为什么不加软删除、也不加 official_at 时间戳
+	//
+	// 这个标记是**运营事实的当前态**，它的历史已经由 admin_audit 承担
+	// （谁在何时把哪个房间设成官方、排第几，`room.official` / `room.unofficial` 两行）。
+	// 再加一列 official_at 只会让"当前态"与"历史"有两个 owner 而对不上账；
+	// 软删除则更远——撤销官方 = 把 is_official 置回 false，那是 UPDATE 不是 DELETE。
+	//
+	// # 为什么不给 is_official 建索引
+	//
+	// 官方列表的查询路径是「内存实况 ∩ 元数据」：候选集合来自 Manager.ListRooms
+	// （内存），元数据按房间码批量取（ListRoomMetas 走主键），is_official 只是
+	// 取回来之后的**内存过滤条件**，从不出现在任何 SQL 的 WHERE 里。
+	// 与 0010 对 posts.anime_id 的判断同一条纪律：没有查询路径时，索引是纯写放大。
+	{version: "0014_rooms_official", statements: []string{
+		`ALTER TABLE rooms_meta ADD COLUMN IF NOT EXISTS is_official boolean NOT NULL DEFAULT false`,
+		`ALTER TABLE rooms_meta ADD COLUMN IF NOT EXISTS official_rank int NOT NULL DEFAULT 0`,
+	}},
 }

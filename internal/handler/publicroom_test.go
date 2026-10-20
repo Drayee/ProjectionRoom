@@ -170,6 +170,12 @@ func (s *fakeRoomMetaStore) UpdateRoomMeta(ctx context.Context, roomID string, p
 	if patch.ClosedAt != nil {
 		m.ClosedAt = patch.ClosedAt
 	}
+	if patch.IsOfficial != nil {
+		m.IsOfficial = *patch.IsOfficial
+	}
+	if patch.OfficialRank != nil {
+		m.OfficialRank = *patch.OfficialRank
+	}
 	s.rows[roomID] = m
 	return nil
 }
@@ -577,6 +583,210 @@ func TestPublicRoomsPaginationBounds(t *testing.T) {
 		if !strings.Contains(w.Body.String(), model.CodeBadRequest) {
 			t.Fatalf("400 应带 %s：%s", model.CodeBadRequest, w.Body.String())
 		}
+	}
+}
+
+// TestPublicRoomsOfficialFilterAndBadge 覆盖 0014（wayfinder #35）的公开读半边：
+// `?official=true` 只列官方房、按运营位次排序、卡片带 isOfficial；
+// 非法 official 值 400（不静默当"不筛选"）。
+func TestPublicRoomsOfficialFilterAndBadge(t *testing.T) {
+	env := newRoomMetaEnv(t, nil)
+
+	// 三个房间：官方 rank=5、官方 rank=9、公开但非官方。
+	low, _, err := env.rooms.CreateOwned("OFF10001", "", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	high, _, err := env.rooms.CreateOwned("OFF10002", "", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	plain, _, err := env.rooms.CreateOwned("PUB10003", "", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	env.meta.seed(store.RoomMeta{RoomID: low.ID, OwnerUserID: env.owner.ID, Title: "低位", IsPublic: true, IsOfficial: true, OfficialRank: 5})
+	env.meta.seed(store.RoomMeta{RoomID: high.ID, OwnerUserID: env.owner.ID, Title: "高位", IsPublic: true, IsOfficial: true, OfficialRank: 9})
+	env.meta.seed(store.RoomMeta{RoomID: plain.ID, OwnerUserID: env.owner.ID, Title: "普通公开", IsPublic: true})
+
+	// 官方区：两个官方房，rank 高者在前。
+	w := doJSON(t, env.engine, http.MethodGet, "/api/public-rooms?official=true", "", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("官方列表应当 200，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	var off struct {
+		Items []struct {
+			RoomID     string `json:"roomId"`
+			IsOfficial bool   `json:"isOfficial"`
+		} `json:"items"`
+		Total    int  `json:"total"`
+		Official bool `json:"official"`
+		Limit    int  `json:"limit"`
+		Offset   int  `json:"offset"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &off); err != nil {
+		t.Fatalf("解析官方列表失败: %v（body=%s）", err, w.Body.String())
+	}
+	if off.Total != 2 || len(off.Items) != 2 {
+		t.Fatalf("官方列表应只含两个官方房，实际 total=%d items=%+v", off.Total, off.Items)
+	}
+	if off.Items[0].RoomID != high.ID || off.Items[1].RoomID != low.ID {
+		t.Fatalf("官方列表应按 official_rank DESC 排序，实际 %+v", off.Items)
+	}
+	for _, it := range off.Items {
+		if !it.IsOfficial {
+			t.Fatalf("官方列表里的房间必须带 isOfficial=true：%+v", it)
+		}
+	}
+	if !off.Official {
+		t.Fatalf("响应应回显 official=true，实际 %+v", off)
+	}
+
+	// 普通列表：三个都在，isOfficial 如实反映（不因为它出现在非官方区而被改判）。
+	w = doJSON(t, env.engine, http.MethodGet, "/api/public-rooms", "", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("公开列表应当 200，实际 %d", w.Code)
+	}
+	var all struct {
+		Items []struct {
+			RoomID     string `json:"roomId"`
+			IsOfficial bool   `json:"isOfficial"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &all); err != nil {
+		t.Fatalf("解析公开列表失败: %v", err)
+	}
+	if all.Total != 3 {
+		t.Fatalf("不带 official 参数时应返回全部公开房（3），实际 %d", all.Total)
+	}
+	officialSeen := 0
+	for _, it := range all.Items {
+		if it.IsOfficial {
+			officialSeen++
+		}
+	}
+	if officialSeen != 2 {
+		t.Fatalf("普通列表里应如实标出 2 个官方房，实际 %d（%+v）", officialSeen, all.Items)
+	}
+
+	// official=false 显式筛选：等价于不筛（口径与 public 参数一致，不产生隐藏集合）。
+	w = doJSON(t, env.engine, http.MethodGet, "/api/public-rooms?official=false", "", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &all); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if all.Total != 3 {
+		t.Fatalf("official=false 应等价于不筛（3 个），实际 %d", all.Total)
+	}
+
+	// 非法值 400：静默当"不筛"会让拼错的查询串悄悄返回全量列表。
+	for _, bad := range []string{"official=1", "official=yes", "official=TRUEISH"} {
+		w = doJSON(t, env.engine, http.MethodGet, "/api/public-rooms?"+bad, "", "")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s 应当 400，实际 %d（%s）", bad, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), model.CodeBadRequest) {
+			t.Fatalf("400 应带 %s：%s", model.CodeBadRequest, w.Body.String())
+		}
+	}
+}
+
+// TestPublicRoomsOfficialExcludesClosedAndMissingMeta 覆盖 0014 的两条边界：
+// 官方房被关闭后从官方区消失；缺元数据行的房间不进官方区（也不被自愈投递污染）。
+func TestPublicRoomsOfficialExcludesClosedAndMissingMeta(t *testing.T) {
+	env := newRoomMetaEnv(t, nil)
+
+	// 官方但库里已有行、内存里有房。
+	alive, _, err := env.rooms.CreateOwned("OFF20001", "", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	env.meta.seed(store.RoomMeta{RoomID: alive.ID, OwnerUserID: env.owner.ID, Title: "在册官方", IsPublic: true, IsOfficial: true, OfficialRank: 1})
+	// 官方行在库里，但内存里没有这个房间（已回收）：不出现（候选集合是内存实况）。
+	env.meta.seed(store.RoomMeta{RoomID: "OFF20002", OwnerUserID: env.owner.ID, Title: "幽灵官方", IsPublic: true, IsOfficial: true, OfficialRank: 99})
+	// 内存里有房但**没有元数据行**：官方区不能把它算进来（is_official 取不到）。
+	if _, _, err := env.rooms.CreateOwned("OFF20003", "", 0, env.owner.ID); err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+
+	w := doJSON(t, env.engine, http.MethodGet, "/api/public-rooms?official=true", "", "")
+	var page struct {
+		Items []struct {
+			RoomID string `json:"roomId"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if page.Total != 1 || page.Items[0].RoomID != alive.ID {
+		t.Fatalf("官方区应只剩内存里存在的那个官方房，实际 %+v", page.Items)
+	}
+
+	// 官方区的缺行房间**不触发自愈投递**：自愈补出来的 is_official 必然是 false，
+	// 投递了也进不了官方区，只会白写一行。缺行只由普通列表的自愈负责。
+	if n := env.meta.submissions(); n != 0 {
+		t.Fatalf("官方区不该为缺行房间投递自愈 upsert，实际 %d 次", n)
+	}
+
+	// 关掉它之后从官方区消失（与公开列表同口径）。
+	if err := env.rooms.CloseRoomByAdmin(alive.ID, "测试结束"); err != nil {
+		t.Fatalf("关闭房间失败: %v", err)
+	}
+	w = doJSON(t, env.engine, http.MethodGet, "/api/public-rooms?official=true", "", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if page.Total != 0 {
+		t.Fatalf("房间回收后官方区应为空，实际 %+v", page.Items)
+	}
+}
+
+// TestPublicRoomsOfficialAlsoRequiresPublic 覆盖 0014 的一条**安全边界**：
+// 官方区也要 is_public。官方与公开性是两个正交维度（可以又官方又未公开 ——
+// 运营先标记、等开播前再放出来），但 `/api/public-rooms` 是**免登录**端点，
+// 未公开的房间出现在任何公众列表里都是"下架/未公开"被绕过。
+// 未公开的官方房只在管理端（带 RequireAdmin）可见。
+func TestPublicRoomsOfficialAlsoRequiresPublic(t *testing.T) {
+	env := newRoomMetaEnv(t, nil)
+
+	// 三个房间：公开官方、未公开官方、公开非官方。
+	onPublic, _, err := env.rooms.CreateOwned("OFF30001", "", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	offPrivate, _, err := env.rooms.CreateOwned("OFF30002", "", 0, env.owner.ID)
+	if err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	if _, _, err := env.rooms.CreateOwned("OFF30003", "", 0, env.owner.ID); err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	env.meta.seed(store.RoomMeta{RoomID: onPublic.ID, OwnerUserID: env.owner.ID, Title: "公开官方", IsPublic: true, IsOfficial: true, OfficialRank: 9})
+	env.meta.seed(store.RoomMeta{RoomID: offPrivate.ID, OwnerUserID: env.owner.ID, Title: "未公开官方", IsPublic: false, IsOfficial: true, OfficialRank: 99})
+	env.meta.seed(store.RoomMeta{RoomID: "OFF30003", OwnerUserID: env.owner.ID, Title: "公开非官方", IsPublic: true})
+
+	w := doJSON(t, env.engine, http.MethodGet, "/api/public-rooms?official=true", "", "")
+	var page struct {
+		Items []struct {
+			RoomID string `json:"roomId"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if page.Total != 1 || page.Items[0].RoomID != onPublic.ID {
+		t.Fatalf("官方区必须同时要求 is_public：未公开官方房不该出现在免登录列表里，实际 %+v", page.Items)
+	}
+
+	// 普通公开列表也不该出现未公开官方房（同一口径）。
+	w = doJSON(t, env.engine, http.MethodGet, "/api/public-rooms", "", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if page.Total != 2 {
+		t.Fatalf("普通列表应只有两个公开房，实际 %+v", page.Items)
 	}
 }
 

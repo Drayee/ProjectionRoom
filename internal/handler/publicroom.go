@@ -45,6 +45,31 @@ const (
 	maxPublicRoomPageLimit     = 50
 )
 
+// 官方区查询参数 official 的取值解析。
+//
+// 只接受 true / false / 空：与 adminPublicFilter 的 public 参数同一套口径
+// （非整数/任意别的字符串一律 400，不静默当空处理）。
+//
+// 为什么 `official=1` 这种"看起来更自然"的写法**不**接受：#35 的票面写的是
+// `?official=1`，但这里坚持 true/false 的理由与 public 参数逐字相同 ——
+// 静默把非法值当"不筛选"，会让"前端把某个字符串直接拼进查询串"变成被接受
+// 的行为，而它拿到的是全量公开列表，看起来像"官方区有内容"。
+const officialParamTrue = "true"
+
+// officialFilter 解析 official 查询参数。
+func officialFilter(raw string) (officialOnly bool, err error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return false, nil
+	case officialParamTrue:
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("official 只能是 true、false 或留空")
+	}
+}
+
 // PublicRoomLister 是房间实时快照的来源（*service.Manager 满足它）。
 //
 // 只声明 ListRooms 一个方法：本端点**不允许**碰房间内部状态
@@ -126,6 +151,16 @@ type publicRoomHandler struct {
 //	members / memberList         成员明细（昵称列表本身就是隐私面）；
 //	email / role / status        房主的敏感档案（列表只有昵称）；
 //	ownerUserId                  内部账号 id —— 它的唯一用途是从列表反查账号。
+//
+// IsOfficial 是**运营事实**（0014，wayfinder #35）：它由管理员设置，
+// 与"这个房间现在有没有主播"这类实时状态无关。官方区的卡片据此加一个标识，
+// 而不必让前端自己判断"出现在这个列表里 = 官方"（那在 `official=false`
+// 的普通列表里就等于没有标识可用）。
+//
+// 为什么它不构成泄露：is_official 对所有人可见（官方区本身就是公开的），
+// 而它**不**透露 owner、rank 位次或任何账号信息。rank 不进响应：
+// 前端只需要知道"在官方区里"与"卡片顺序"（后者由响应顺序直接给出），
+// 把 rank 数字发出去只会让客户端有机会按一个它无法解释的整数排序。
 type publicRoomItem struct {
 	RoomID      string `json:"roomId"`
 	Title       string `json:"title"`
@@ -135,6 +170,9 @@ type publicRoomItem struct {
 	// HostOffline 表示主播已断线、房间处于离线宽限期内（§6 要求标注"主播离线中"）。
 	HostOffline bool `json:"hostOffline"`
 	HasPassword bool `json:"hasPassword"`
+	// IsOfficial 见类型说明。零值 false 会让普通列表的 JSON 里多一个
+	// `isOfficial:false` —— 这是有意的（客户端不必判"字段在不在"）。
+	IsOfficial bool `json:"isOfficial"`
 }
 
 // list 返回公开房的分页列表（成功 200，免登录）。
@@ -145,8 +183,22 @@ type publicRoomItem struct {
 //	② 与元数据 is_public 求交（closed_at 非空的房间不算"公开"）
 //	③ 缺行的房间降级 + 投递一次自愈 upsert
 //	④ 稳定排序 → 分页切片
+//
+// `?official=true` 时**同一个端点**变成官方区（#35 的口径：不新建路径）：
+//
+//	② 的筛选换成 is_official，④ 的排序换成运营位次（rank DESC, room_id）。
+//
+// 两条路径共用"内存实况是候选集合"这一条不变式：官方区也**只列当前真的存在
+// 的房间**。一个被标记为官方但主播早就下线、房间已被回收的房间，出现在官方区
+// 里只会让人点进去看到 ROOM_NOT_FOUND —— 那比"官方区暂时空着"更糟
+// （前者是坏链接，后者是可由运营立刻修复的状态）。
 func (h *publicRoomHandler) list(c *gin.Context) {
 	limit, offset, err := publicRoomPage(c.Query("limit"), c.Query("offset"))
+	if err != nil {
+		publicRoomBadRequest(c, err.Error())
+		return
+	}
+	officialOnly, err := officialFilter(c.Query("official"))
 	if err != nil {
 		publicRoomBadRequest(c, err.Error())
 		return
@@ -184,24 +236,63 @@ func (h *publicRoomHandler) list(c *gin.Context) {
 			// 缺行的房间**照常列出**（降级：标题空、昵称空串），并自愈补行 ——
 			// 这正是 §2"元数据缺行可降级 + 自愈"那条边界：内存实况是主要价值，
 			// 缺一行元数据不该让一个真的能进的房间从列表里消失。
+			//
+			// **官方区是唯一的例外**：缺行意味着 is_official 取不到（默认 false），
+			// 而把"运营从未标记过任何房间"降级成"官方区里有内容但标题是空的"
+			// 比空列表更糟。因此这里按"不在官方区"处理，也不自愈
+			// （自愈补出来的 is_official 必然是 false，投递了也不会改变结果）。
+			if officialOnly {
+				continue
+			}
 			h.healMissingMeta(s)
 			public = append(public, s)
 			continue
 		}
-		// 有元数据时，"公开且未关闭"才是进列表的必要条件。
+		// 有元数据时，"公开且未关闭"（或"官方且未关闭"）才是进列表的必要条件。
 		// closed_at 的判定放在这里而不是 SQL：本端点的候选集合本来就是内存实况，
 		// "元数据说公开"只是第二个必要条件。
-		if !m.IsPublic || m.ClosedAt != nil {
+		if m.ClosedAt != nil {
+			continue
+		}
+		// ⚠ **官方区也要 is_public**：官方标记与公开性是两个正交维度
+		// （一个房间可以又官方又未公开，例如运营先标记、等开播前再放出来），
+		// 但 `/api/public-rooms` 这个**免登录**端点面向的是公众 ——
+		// 一个未公开的房间出现在公众可见的任何列表里，都是"下架/未公开"被绕过。
+		// 未公开的官方房只在管理端（`/api/admin/rooms?official=true`）可见，
+		// 那是带 RequireAdmin 的读路径。
+		if !m.IsPublic {
+			continue
+		}
+		if officialOnly && !m.IsOfficial {
 			continue
 		}
 		public = append(public, s)
 	}
 
-	// ④ 稳定排序：先"有主播的"，再按播放进度（seq）降序，最后按房间码。
-	// 三级全序是分页正确性的前提 —— 只按"有主播"排会让同分的一组在两次请求间
-	// 顺序漂移，于是翻页会出现重复/漏项。
+	// ④ 稳定排序。
+	//
+	// 官方区走**运营位次**（official_rank DESC, room_id ASC），普通列表走实时性
+	// （有主播优先 → 播放进度降序 → 房间码）。两套排序的分页都必须是全序，
+	// 否则翻页会出现重复/漏项。
+	//
+	// 官方区三条为什么必须补全：
+	//   1. rank 相同的行极常见（默认值全是 0），只按它排时同分组内顺序不保证稳定；
+	//   2. hostOnline 依然是第一顺位 —— 官方区里"有主播的官方位"排在"还没开播的
+	//      官方位"之前，与运营意图不冲突（运营把一排房间设成官方，用户先进能进的）；
+	//   3. room_id 是主键级唯一键，做最后一级让整序确定。
+	var meta2 map[string]store.RoomMeta
+	if officialOnly {
+		meta2 = meta
+	}
 	sort.Slice(public, func(i, j int) bool {
 		a, b := public[i], public[j]
+		if officialOnly {
+			ma, _ := meta2[a.ID]
+			mb, _ := meta2[b.ID]
+			if ma.OfficialRank != mb.OfficialRank {
+				return ma.OfficialRank > mb.OfficialRank
+			}
+		}
 		if a.HostOnline != b.HostOnline {
 			return a.HostOnline
 		}
@@ -238,6 +329,7 @@ func (h *publicRoomHandler) list(c *gin.Context) {
 			HostOnline:  s.HostOnline,
 			HostOffline: s.HostInGrace,
 			HasPassword: s.HasPassword,
+			IsOfficial:  officialOnly || m.IsOfficial,
 		}
 		items = append(items, item)
 	}
@@ -247,6 +339,9 @@ func (h *publicRoomHandler) list(c *gin.Context) {
 		"total":  total,
 		"limit":  limit,
 		"offset": offset,
+		// 回显生效的筛选值：客户端不必猜自己传的 official 被理解成了什么
+		// （与 limit/offset 回显同一目的）。
+		"official": officialOnly,
 	})
 }
 

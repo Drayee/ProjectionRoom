@@ -655,6 +655,11 @@ func (s *fakeAdminRoomStore) QueryRoomMetas(ctx context.Context, q store.RoomMet
 		if q.PrivateOnly && m.IsPublic {
 			continue
 		}
+		// 0014（wayfinder #35）：官方标记筛选。假 store 必须与真 store 同口径，
+		// 否则"库侧筛选"这条判据在测试里被悄悄跳过（内存侧过滤会替它兜住）。
+		if q.OfficialOnly && !m.IsOfficial {
+			continue
+		}
 		match = append(match, m)
 	}
 	sort.Slice(match, func(i, j int) bool {
@@ -716,6 +721,14 @@ func (s *fakeAdminRoomStore) UpsertRoomMeta(ctx context.Context, m *store.RoomMe
 	cp := *m
 	if existing, ok := s.metas[m.RoomID]; ok {
 		// 与真 store 一致的覆盖语义：created_at 保持首次值。
+		//
+		// 其余字段一律取**调用方传入的值**（零值即写入零值）—— 真 store 的
+		// ON CONFLICT DO UPDATE 就是这个语义（整体登记），假实现若在这里
+		// "顺手保留旧值"，就会把"调用方漏传字段"这个缺陷藏起来：
+		// #35 的真机验收就抓到过一次 upsert 的赋值清单漏了新列，症状是
+		// 官方标记被静默抹掉，而整结构体赋值的假实现完全看不出问题。
+		// 那条判据由 store 包的 TestUpsertRoomMetaKeepsOfficialColumns
+		// 在真库上钉住；这里保持"如实复现语义"，不做补偿。
 		cp.CreatedAt = existing.CreatedAt
 	}
 	s.metas[m.RoomID] = cp
@@ -744,6 +757,12 @@ func (s *fakeAdminRoomStore) UpdateRoomMeta(ctx context.Context, roomID string, 
 	}
 	if patch.ClosedAt != nil {
 		m.ClosedAt = patch.ClosedAt
+	}
+	if patch.IsOfficial != nil {
+		m.IsOfficial = *patch.IsOfficial
+	}
+	if patch.OfficialRank != nil {
+		m.OfficialRank = *patch.OfficialRank
 	}
 	s.metas[roomID] = m
 	return nil
@@ -1273,6 +1292,7 @@ type adminRoomPage struct {
 		MemberCount     int    `json:"memberCount"`
 		MaxDepth        int    `json:"maxDepth"`
 		IsPublic        bool   `json:"isPublic"`
+		IsOfficial      bool   `json:"isOfficial"`
 		HasPassword     bool   `json:"hasPassword"`
 		HostOnline      bool   `json:"hostOnline"`
 		HostOffline     bool   `json:"hostOffline"`
@@ -1284,6 +1304,10 @@ type adminRoomPage struct {
 	Offset int    `json:"offset"`
 	Search string `json:"search"`
 	Public string `json:"public"`
+	// Official 是生效的官方标记筛选回显（0014，wayfinder #35）。
+	// 用 bool 而不是 string：这条端点内部只认 true/false 两态，
+	// 而非法值一律 400（不回落显原始输入）。
+	Official bool `json:"official"`
 }
 
 // TestAdminRoomsListIncludesPrivateAndFilters 覆盖 T4 的房间列表：
@@ -1496,6 +1520,204 @@ func TestAdminUnpublishIsIdempotentAndAuditsOnlyRealChange(t *testing.T) {
 	w = doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/NOPE0009/unpublish", "", env.adminToken)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("下架不存在的房间应当 404，实际 %d（%s）", w.Code, w.Body.String())
+	}
+}
+
+// TestAdminSetOfficialPersistsAuditsAndIsIdempotent 覆盖 0014（wayfinder #35）的
+// 运营端点：设官方落库 + 一行审计、撤销归零、幂等调用不新增审计、房间不存在 404。
+func TestAdminSetOfficialPersistsAuditsAndIsIdempotent(t *testing.T) {
+	env := newAdminEnv(t, nil)
+
+	if _, _, err := env.rooms.CreateOwned("OFFC0001", "", 0, env.user.ID); err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	env.roomStore.seed(store.RoomMeta{RoomID: "OFFC0001", OwnerUserID: env.user.ID, Title: "放映厅", IsPublic: true})
+
+	var resp struct {
+		RoomID     string `json:"roomId"`
+		IsOfficial bool   `json:"isOfficial"`
+		Rank       int    `json:"rank"`
+		Changed    bool   `json:"changed"`
+	}
+
+	// ① 设官方 + 置顶。
+	w := doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/OFFC0001/official",
+		`{"official":true,"rank":9}`, env.adminToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("设官方应当 200，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v（body=%s）", err, w.Body.String())
+	}
+	if !resp.IsOfficial || resp.Rank != 9 || !resp.Changed {
+		t.Fatalf("设官方应回 official=true/rank=9/changed=true，实际 %+v", resp)
+	}
+	m, ok := env.roomStore.meta("OFFC0001")
+	if !ok || !m.IsOfficial || m.OfficialRank != 9 {
+		t.Fatalf("库里的官方标记没写进去：%+v（存在=%t）", m, ok)
+	}
+	// 基底的字段不能被覆盖：设官方不该把标题/公开性冲掉。
+	if m.Title != "放映厅" || !m.IsPublic {
+		t.Fatalf("设官方不该动 title/isPublic：%+v", m)
+	}
+	if rows := env.roomStore.auditsOf("room.official"); len(rows) != 1 {
+		t.Fatalf("实际变更时必须有一行 room.official 审计，实际 %d", len(rows))
+	} else {
+		row := rows[0]
+		if row.ActorID != env.admin.ID || row.TargetType != "room" || row.TargetID != "OFFC0001" {
+			t.Fatalf("审计的操作者/目标不对：%+v", row)
+		}
+		if row.IP == nil || *row.IP != "203.0.113.7" {
+			t.Fatalf("审计应记录来源 IP，实际 %v", row.IP)
+		}
+		// 明细要能复盘：变更后的值与变更前的值都在。
+		if !strings.Contains(row.Detail, `"official":true`) || !strings.Contains(row.Detail, `"rank":9`) {
+			t.Fatalf("审计明细应记录变更后的值：%s", row.Detail)
+		}
+		if !strings.Contains(row.Detail, `"beforeOfficial":false`) || !strings.Contains(row.Detail, `"beforeRank":0`) {
+			t.Fatalf("审计明细应记录变更前的值：%s", row.Detail)
+		}
+	}
+
+	// ② 幂等再设一次：仍 200，但**不新增审计**。
+	w = doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/OFFC0001/official",
+		`{"official":true,"rank":9}`, env.adminToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("幂等设官方必须仍然 200，实际 %d", w.Code)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if resp.Changed {
+		t.Fatalf("重复设置不该算作变更，实际 %+v", resp)
+	}
+	if rows := env.roomStore.auditsOf("room.official"); len(rows) != 1 {
+		t.Fatalf("幂等调用不得新增审计，实际 %d 行", len(rows))
+	}
+
+	// ③ 撤销（空 body 即撤销）：库归零 + 一行变更审计。
+	w = doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/OFFC0001/official", "", env.adminToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("撤销官方应当 200，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if resp.IsOfficial || resp.Rank != 0 || !resp.Changed {
+		t.Fatalf("撤销应回 official=false/rank=0/changed=true，实际 %+v", resp)
+	}
+	m, _ = env.roomStore.meta("OFFC0001")
+	if m.IsOfficial || m.OfficialRank != 0 {
+		t.Fatalf("撤销后库应为 false/0，实际 %+v", m)
+	}
+	if rows := env.roomStore.auditsOf("room.official"); len(rows) != 2 {
+		t.Fatalf("撤销是一次真实变更，应有 2 行审计，实际 %d", len(rows))
+	}
+
+	// ④ 房间不存在 → 404，且不落审计。
+	w = doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/NOPE0009/official",
+		`{"official":true}`, env.adminToken)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("给不存在的房间设官方应当 404，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if rows := env.roomStore.auditsOf("room.official"); len(rows) != 2 {
+		t.Fatalf("404 不该新增审计，实际 %d 行", len(rows))
+	}
+
+	// ⑤ 非法 rank → 400（不写库、不写审计）。
+	w = doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/OFFC0001/official",
+		`{"official":true,"rank":-1}`, env.adminToken)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("负 rank 应当 400，实际 %d", w.Code)
+	}
+	w = doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/OFFC0001/official",
+		`{"official":true,"rank":99999}`, env.adminToken)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("超大 rank 应当 400，实际 %d", w.Code)
+	}
+	if m, _ = env.roomStore.meta("OFFC0001"); m.IsOfficial {
+		t.Fatalf("400 不该改动官方标记，实际 %+v", m)
+	}
+	if rows := env.roomStore.auditsOf("room.official"); len(rows) != 2 {
+		t.Fatalf("400 不该新增审计，实际 %d 行", len(rows))
+	}
+}
+
+// TestAdminSetOfficialPermissionBoundary 覆盖 #35 的权限判据：运营端点只有 admin
+// 能调（匿名 401、普通用户 403）；普通房主也不能自荐（没有申请流）。
+func TestAdminSetOfficialPermissionBoundary(t *testing.T) {
+	env := newAdminEnv(t, nil)
+
+	if _, _, err := env.rooms.CreateOwned("OFFC0002", "", 0, env.user.ID); err != nil {
+		t.Fatalf("建房失败: %v", err)
+	}
+	env.roomStore.seed(store.RoomMeta{RoomID: "OFFC0002", OwnerUserID: env.user.ID, IsPublic: true})
+
+	// 匿名 → 401。
+	if w := doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/OFFC0002/official", `{"official":true}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("匿名应当 401，实际 %d", w.Code)
+	}
+	// 普通用户（即使是房主本人）→ 403。
+	if w := doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/OFFC0002/official", `{"official":true}`, env.userToken); w.Code != http.StatusForbidden {
+		t.Fatalf("普通用户应当 403（运营权限只给 admin），实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if !strings.Contains(doJSON(t, env.engine, http.MethodPost, "/api/admin/rooms/OFFC0002/official", `{"official":true}`, env.userToken).Body.String(), CodeForbidden) {
+		t.Fatal("403 应当带 FORBIDDEN 错误码")
+	}
+	// 被拒后库里什么都没变。
+	if m, _ := env.roomStore.meta("OFFC0002"); m.IsOfficial {
+		t.Fatalf("非管理员不得把房间设成官方：%+v", m)
+	}
+	if rows := env.roomStore.auditsOf("room.official"); len(rows) != 0 {
+		t.Fatalf("被拒的请求不该产生审计，实际 %d 行", len(rows))
+	}
+}
+
+// TestAdminRoomsOfficialFilterListsMarkedRooms 覆盖管理端"只看官方"筛选（0014）：
+// 官方房（含未公开的）被列出、非官方房被排除、响应回显生效值。
+func TestAdminRoomsOfficialFilterListsMarkedRooms(t *testing.T) {
+	env := newAdminEnv(t, nil)
+
+	for _, id := range []string{"OFLT0001", "OFLT0002", "OFLT0003"} {
+		if _, _, err := env.rooms.CreateOwned(id, "", 0, env.user.ID); err != nil {
+			t.Fatalf("建房失败: %v", err)
+		}
+	}
+	// 官方 + 未公开：官方与公开性是两个正交维度，筛选必须能选中它。
+	env.roomStore.seed(store.RoomMeta{RoomID: "OFLT0001", OwnerUserID: env.user.ID, Title: "未公开的官方位", IsPublic: false, IsOfficial: true, OfficialRank: 3})
+	env.roomStore.seed(store.RoomMeta{RoomID: "OFLT0002", OwnerUserID: env.user.ID, Title: "公开的官方位", IsPublic: true, IsOfficial: true, OfficialRank: 1})
+	env.roomStore.seed(store.RoomMeta{RoomID: "OFLT0003", OwnerUserID: env.user.ID, Title: "普通公开", IsPublic: true})
+
+	var page adminRoomPage
+	w := doJSON(t, env.engine, http.MethodGet, "/api/admin/rooms?official=true", "", env.adminToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("应当 200，实际 %d", w.Code)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("official=true 应只留 2 个官方房，实际 %+v", page.Items)
+	}
+	for _, it := range page.Items {
+		if !it.IsOfficial {
+			t.Fatalf("筛选结果里的房间必须带 isOfficial=true：%+v", it)
+		}
+	}
+	if !page.Official {
+		t.Fatalf("响应应回显生效的 official 值（true），实际 %v", page.Official)
+	}
+
+	// 官方 + 公开两个筛选同时生效（交集）。
+	w = doJSON(t, env.engine, http.MethodGet, "/api/admin/rooms?official=true&public=true", "", env.adminToken)
+	_ = json.Unmarshal(w.Body.Bytes(), &page)
+	if page.Total != 1 || page.Items[0].RoomID != "OFLT0002" {
+		t.Fatalf("official+public 应只剩 OFLT0002，实际 %+v", page.Items)
+	}
+
+	// 非法值 → 400（与 public 参数同口径）。
+	if w := doJSON(t, env.engine, http.MethodGet, "/api/admin/rooms?official=1", "", env.adminToken); w.Code != http.StatusBadRequest {
+		t.Fatalf("official=1 应当 400，实际 %d", w.Code)
 	}
 }
 
