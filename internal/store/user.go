@@ -183,6 +183,42 @@ func canonicalEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(cleaned))
 }
 
+// UpdateDisplayName 改昵称（wayfinder #33 的 PATCH /api/me）。
+//
+// 三条判据：
+//
+//  1. **不做内容清洗**（去零宽/Bidi 是 service.SanitizeDisplayName 的职责，HTTP 层调用）：
+//     同 anime.go / posts.go / messages.go 的分工 —— 存储层只复核"非空 + 长度"，
+//     否则"该 strip 什么"会有两处定义，而它们迟早不一致。
+//  2. **空串直接拒**：`display_name` 是 NOT NULL 且界面上不允许空白名字（成员列表
+//     会渲染出一行空白）。回落成用户名是**服务层**的规则（它知道 username），
+//     本层不该猜。
+//  3. **不动 updated_at 之外的东西**：改昵称不影响 token_version（它不是授权事实），
+//     也不碰 last_seen_at（那不是档案变更）。GORM 的 Update 会自动带 updated_at ——
+//     那正是"资料被改过"的如实记录。
+func (s *Store) UpdateDisplayName(ctx context.Context, id int64, displayName string) error {
+	if id <= 0 {
+		return errors.New("store: UpdateDisplayName 需要有效的 user_id")
+	}
+	name := strings.TrimSpace(displayName)
+	if name == "" {
+		return errors.New("store: display_name 不能为空")
+	}
+	if len([]rune(name)) > maxDisplayNameLen {
+		return fmt.Errorf("store: display_name 超过 %d 个字符", maxDisplayNameLen)
+	}
+
+	res := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", id).Update("display_name", name)
+	if res.Error != nil {
+		return fmt.Errorf("store: 改昵称失败: %w", res.Error)
+	}
+	// PostgreSQL 的 UPDATE 即使写入相同的值也算命中一行，所以 0 = 确实没有这个 id。
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetUserStatus 改账号状态（active / banned）并维护 banned_reason。
 //
 // 语义细节：

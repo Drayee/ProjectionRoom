@@ -121,6 +121,17 @@ type AuthDeps struct {
 	MessagePusher MessagePusher
 	FriendPusher  FriendPusher
 	Presence      PresenceBroadcaster
+
+	// UserProfile 是用户公开档案与本人资料编辑的出口（wayfinder #33）。
+	//
+	// 同样挂在 AuthDeps 而不是新增 NewRouter 参数位（同一条硬约束）。
+	// 它的实现就是 accountDeps.Service（*service.AccountService 的方法集满足
+	// handler.UserProfileService 这个窄接口），但**声明成窄接口**：
+	// 公开档案端点只需要"读一个人的公开字段"与"改自己的昵称"两件事，
+	// 让它持有整张账号能力表（注册/找回/OTP/幂等）会让"这个端点能做什么"变模糊。
+	//
+	// nil 是合法的：注册一组 503（与其它域同一套降级语义）。
+	UserProfile UserProfileService
 }
 
 // SessionConfig 是会话在 HTTP 层的参数。

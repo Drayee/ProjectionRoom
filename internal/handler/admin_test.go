@@ -299,6 +299,19 @@ func (s *fakeAdminStore) SetUserRole(ctx context.Context, id int64, role string)
 	return nil
 }
 
+// UpdateDisplayName 是 #33 加的（service.AccountStore 的方法集变宽了）。
+// 与真 store 一样只复核形状：清洗在 service.SanitizeDisplayName 里已经做过。
+func (s *fakeAdminStore) UpdateDisplayName(_ context.Context, id int64, displayName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.DisplayName = displayName
+	return nil
+}
+
 func (s *fakeAdminStore) BumpTokenVersion(ctx context.Context, id int64) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -838,6 +851,11 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 	engine := NewRouter(cfg, hub, rooms, nil, nil,
 		AuthDeps{
 			Service: svc,
+			// 用户公开档案与本人资料编辑（wayfinder #33）：与 Service 是**同一个**
+			// 实例，与 bootstrap/engine.go 的生产装配逐字一致。
+			// 漏了它 → 那两个端点注册成 503（users_test.go 的用例第一次跑就是这么红的，
+			// 而 503 比"路由不存在"更容易被误判成"账号能力关闭"）。
+			UserProfile: svc,
 			Session: SessionConfig{
 				AccessTTL:   cfg.Auth.AccessTTL,
 				RefreshTTL:  cfg.Auth.RefreshTTL,

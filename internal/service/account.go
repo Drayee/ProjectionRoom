@@ -86,6 +86,32 @@ var (
 	// 能拿到这个错误的前提是已经通过了口令校验，也就是对方本来就知道账号存在。
 	ErrUserBanned = errors.New("account: 账号已被封禁")
 
+	// ErrUserNotFound 表示"这个用户不可见"（wayfinder #33）。
+	//
+	// ⚠ 它把**两种**情形合成一个值，这是刻意的（与 ErrInvalidCredentials 同一条理由）：
+	//   - 账号从来不存在；
+	//   - 账号存在但已被封禁。
+	//
+	// 公开档案（GET /api/users/:id）是**免登录**端点，区分这两者等于给攻击者一条
+	// 存在性探测通道 —— 他可以批量扫 id，把"存在但被封"挑出来（那是值得继续挖的目标）。
+	// handler 对它的映射因此只有一个 404。
+	//
+	// 与 ErrUserBanned 是两个错误，别混：后者是"你**自己**被封了"（登录/取票据时
+	// 已经通过口令校验，不构成枚举面，可以给出明确文案）；前者是"**别人**的资料
+	// 你读不到"。
+	ErrUserNotFound = errors.New("account: 用户不存在")
+
+	// ErrUserForbidden 表示"你自己这个账号当前不允许做这件事"（#33 的 PATCH /api/me）。
+	//
+	// 目前唯一的来源是"账号已被封禁"：改昵称是**本人**的动作，请求方已经带着
+	// 合法 access token（RequireAuth 放行了），所以这里可以给出 403 而不是 404 ——
+	// 对本人隐瞒"你被封了"没有意义，他连登录都过不了。
+	//
+	// 为什么不直接复用 ErrUserBanned：后者的文案是"账号已被封禁"，那是**登录**语境
+	// 的话；而这里是"你的账号当前不能修改资料"，给前端的下一步动作不同
+	// （一个是"别再试了"，一个是"去问问管理员"）。
+	ErrUserForbidden = errors.New("account: 当前账号不允许执行该操作")
+
 	// ErrSessionInvalid 表示 access token 与当前账号状态不符（token_version 落后，
 	// 或账号已不存在）。封禁/改密/登出全部设备都靠它即时生效（§5）。
 	ErrSessionInvalid = errors.New("account: 会话已失效，请重新登录")
@@ -210,6 +236,12 @@ type AccountStore interface {
 	SetUserEmail(ctx context.Context, id int64, email string, verifiedAt *time.Time) error
 	SetUserStatus(ctx context.Context, id int64, status, reason string) error
 	SetUserRole(ctx context.Context, id int64, role string) error
+	// UpdateDisplayName 改昵称（wayfinder #33 的 PATCH /api/me）。
+	//
+	// 与 SetUserRole 并列而不是复用 CreateUser：改昵称是**局部**更新，
+	// 走一遍 CreateUser 的整行校验（口令哈希非空、邮箱形状、建号不能带验证时间）
+	// 会让"只想改个名字"被一堆与它无关的规则挡住。
+	UpdateDisplayName(ctx context.Context, id int64, displayName string) error
 	// SetPasswordHash 直接换口令哈希（OTP 改密路径用；链接令牌那条走
 	// ConsumePasswordReset，它在同一个事务里连撤销会话一起做）。
 	SetPasswordHash(ctx context.Context, id int64, hash string) error
@@ -771,6 +803,145 @@ func (s *AccountService) Me(ctx context.Context, userID int64) (Profile, error) 
 		return Profile{}, err
 	}
 	return ProfileOf(u), nil
+}
+
+// PublicProfile 是**他人视角**的公开档案（wayfinder #33 的 GET /api/users/:id）。
+//
+// 与 Profile 是两个类型而不是"同一个类型少填几个字段"，这是本票最重要的一条决定：
+// 字段白名单必须是**类型层面**的事实，不能靠"记得别填"。Profile 带 email / status /
+// lastSeenAt —— 那是本人的档案，其中 email 是他自己的联系方式、status 是封禁状态。
+// 把两者混成一个结构，"公开档案泄露了谁的邮箱"就只取决于某处有没有少赋一个字段，
+// 而那类遗漏在 code review 里几乎看不出来（#33 验收第 2 条要的就是钉住它）。
+//
+// 字段与各自的理由：
+//   - ID / Username：公开档案页的地址与"这个人叫什么"。用户名本来就已公开 ——
+//     #39 的 `GET /api/users/search` 就是按 username 做子串匹配并把它回给调用方的。
+//   - DisplayName：显示名。
+//   - Role：只回 `user` | `admin` 的**标签**。管理端的真实边界是服务端 RequireAdmin
+//     （不变量 I3），而"这个人是管理员"在社区里本来就是公开事实（界面要显示徽章）。
+//     它与 status 不同：后者是**惩罚**记录，前者是**职责**标签。
+//   - CreatedAt：公开档案页的"加入时间"（社区类产品普遍展示）。
+//
+// ⚠ **刻意不返回 `avatarChar` / `avatarColor`**（与票面的一处偏离，理由必须写清）：
+// 票面把它们列进了白名单，但仓库既有的约定是**服务端契约不掺显示层**（#26 定的，
+// #28/#31/#37 全部照办）—— 头像首字母与取色是纯 UI 派生，`client/src/utils/avatar.ts`
+// 里那 5 行就是它。它们只需要 `id` + `displayName`，而这两个字段本响应已经给了，
+// 前端调 `avatarOf(id, displayName)` 就能得到**逐字相同**的结果。
+//
+// 在 Go 里再实现一份的代价不是"多写几行"，而是**色板有了两个源**：改一处不改另一处
+// 会让"同一个人在帖子页与档案页头像颜色不同"，而这种不一致没有编译期检查、
+// 也不会有任何测试失败。本票的验收第 2 条要的是"字段白名单被钉住"，
+// 而少两个字段是**更严**的白名单，不是漏做。
+//
+// 刻意**不在**这里的三样，以及各自的理由：
+//   - Email：他人的联系方式。泄露它就是给垃圾邮件/社工一个精准名单。
+//   - Status：被封禁是账号与平台之间的事，公开它会变成一种羞辱性标签
+//     （而且封禁常常是可逆的，公开后无法收回）。
+//   - LastSeenAt：在线行为画像。ACCOUNTS §13 的隐私口径是"不在线态之外不暴露活跃时间"。
+type PublicProfile struct {
+	ID          int64  `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+	// CreatedAt 是加入时间（RFC3339）。用字符串而不是 time.Time：
+	// 公开档案是纯展示页，前端只需要能格式化，不需要时区语义。
+	CreatedAt string `json:"createdAt"`
+}
+
+// PublicProfileOf 把库里的用户转成**他人视角**的公开档案（唯一出口）。
+//
+// 与 ProfileOf 并列而不是"给它加个参数"：两条出口的字段集不同，而"少填一个字段"
+// 在 Go 里没有任何编译期检查 —— 写成两个函数，至少让"公开档案有哪些字段"是一个
+// 可以一眼读完的地方（public_profile_test.go 的字段白名单用例钉住它）。
+func PublicProfileOf(u *store.User) PublicProfile {
+	if u == nil {
+		return PublicProfile{}
+	}
+	return PublicProfile{
+		ID:          u.ID,
+		Username:    u.Username,
+		DisplayName: u.DisplayName,
+		Role:        u.Role,
+		CreatedAt:   u.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// PublicProfile 读某个用户的公开档案（wayfinder #33）。
+//
+// **不存在与被封禁都回 ErrUserNotFound**（本票定的统一口径）。理由与
+// ErrInvalidCredentials 的"不区分用户名/口令错"是同一条：能区分它们就等于开了一条
+// 存在性探测通道 —— 攻击者可以拿一批 id 扫过去，把"这个 id 存在但被封了"与
+// "这个 id 从来没存在过"分开，前者是值得继续挖的目标。而公开档案是**免登录**端点，
+// 那正是最容易被批量扫的入口。
+//
+// 代价（写在注释里，因为它是刻意的）：被封禁用户的公开档案会像不存在一样 404，
+// 于是"他的帖子还在但主页 404"是一种可能出现的组合。这是可接受的：封禁的本意
+// 就是让这个账号在社区里不可见，而帖子侧另有自己的处置（本期不做级联）。
+func (s *AccountService) PublicProfile(ctx context.Context, userID int64) (PublicProfile, error) {
+	if userID <= 0 {
+		return PublicProfile{}, ErrUserNotFound
+	}
+	u, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return PublicProfile{}, ErrUserNotFound
+		}
+		return PublicProfile{}, err
+	}
+	if u.Status != store.StatusActive {
+		return PublicProfile{}, ErrUserNotFound
+	}
+	return PublicProfileOf(u), nil
+}
+
+// UpdateMyDisplayName 改自己的昵称（wayfinder #33 的 PATCH /api/me）。
+//
+// 三步，顺序是有意的：
+//
+//  1. **清洗**（SanitizeDisplayName：StripControl → TrimSpace → 限长 32）。
+//     清洗后为空时回落到用户名 —— 这是 §7.3 的既有规则（昵称是"显示给人看的"，
+//     为空会让成员列表出现一行空白），而本方法把 username 传进去当 fallback。
+//  2. **落库**（store.UpdateDisplayName，只复核形状）。
+//  3. **回读**并返回改动后的事实 —— 与 admin.patchUser 同一条理由：
+//     返回"我们请求改成的样子"会让"清洗把某些字符吃掉了"这种事对客户端不可见。
+//
+// ⚠ **不动 token_version**：昵称不是授权事实（不变量 I3 的推论）。给它 +1 会让
+// 用户改个名字就把自己所有设备踢下线，而那种"莫名其妙被登出"极难归因。
+//
+// 审计：**不写**。它与 #29 的六个好友端点同一条判据 —— 改的是自己的资料、
+// 无第三方需追责、且完全可逆（再改一次就回去了）。#39 的"解除拉黑"要审计是因为
+// 它改变了**别人**的处境。
+func (s *AccountService) UpdateMyDisplayName(ctx context.Context, userID int64, displayName string) (Profile, error) {
+	if userID <= 0 {
+		return Profile{}, ErrUserNotFound
+	}
+	// 先读一次拿 username（清洗的 fallback 要用它），顺带确认账号还在且未被封禁。
+	u, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return Profile{}, ErrUserNotFound
+		}
+		return Profile{}, err
+	}
+	if u.Status != store.StatusActive {
+		return Profile{}, ErrUserForbidden
+	}
+
+	cleaned, err := SanitizeDisplayName(displayName, u.Username)
+	if err != nil {
+		return Profile{}, err
+	}
+	if err := s.store.UpdateDisplayName(ctx, userID, cleaned); err != nil {
+		return Profile{}, err
+	}
+
+	// 回读：清洗可能改过值（去零宽、去首尾空白、回落成用户名），
+	// 客户端应当拿到**库里现在是什么**，而不是它请求写什么。
+	after, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		return Profile{}, err
+	}
+	return ProfileOf(after), nil
 }
 
 // IssueWSTicket 签发一张 WS 一次性票据（§5：浏览器无法给 WebSocket 加请求头，

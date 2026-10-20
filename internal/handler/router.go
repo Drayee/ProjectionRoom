@@ -278,6 +278,13 @@ func NewRouter(
 	// 回答，读代码时这两段应当相邻 —— 而"为什么发不出去"的答案就在上一段里。
 	registerMessageRoutes(api, accountDeps.Store, cfg, accountDeps.Service, accountDeps.MessagePusher)
 
+	// 用户公开档案与本人资料（wayfinder #33）：GET /api/users/:id 免登录，PATCH /api/me 需登录。
+	//
+	// 它必须排在好友域**之后**注册：`/api/users/search`（#39）与本域的 `/api/users/:id`
+	// 共用 `/api/users` 前缀，而 gin 按段分节点（静态段优先），顺序不影响匹配 ——
+	// 但把"搜索"与"看某个人"排在一起，读注册表时能一眼看出这个前缀下有几件事。
+	registerUserProfileRoutes(api, accountDeps.UserProfile, cfg, accountDeps.Service)
+
 	// 用户级实时通道（wayfinder #31）：/ws/user。票据必填，不属于任何房间。
 	registerUserWSRoute(r, cfg, accountDeps.UserHub, accountDeps, accountDeps.Presence)
 

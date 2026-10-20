@@ -84,6 +84,14 @@ func (a *AccountStoreAdapter) SetUserRole(ctx context.Context, id int64, role st
 	return a.store.SetUserRole(ctx, id, role)
 }
 
+// UpdateDisplayName 转发到 store（wayfinder #33）。
+//
+// 与上面几个转发一样**不做业务判断**：昵称的清洗（StripControl + 长度）在
+// service.SanitizeDisplayName 里，存储层只复核形状。
+func (a *AccountStoreAdapter) UpdateDisplayName(ctx context.Context, id int64, displayName string) error {
+	return a.store.UpdateDisplayName(ctx, id, displayName)
+}
+
 func (a *AccountStoreAdapter) SetPasswordHash(ctx context.Context, id int64, hash string) error {
 	return a.store.SetPasswordHash(ctx, id, hash)
 }

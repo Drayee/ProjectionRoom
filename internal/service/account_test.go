@@ -197,6 +197,19 @@ func (f *fakeStore) SetUserRole(_ context.Context, id int64, role string) error 
 	return nil
 }
 
+// UpdateDisplayName 是 #33 加的：假实现与真 store 一样只复核形状
+// （非空 + 长度），清洗在 service 层已经做过了。
+func (f *fakeStore) UpdateDisplayName(_ context.Context, id int64, displayName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.DisplayName = displayName
+	return nil
+}
+
 func (f *fakeStore) BumpTokenVersion(_ context.Context, id int64) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

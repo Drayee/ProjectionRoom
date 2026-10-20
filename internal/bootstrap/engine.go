@@ -56,6 +56,13 @@ func NewEngineDeps(
 	}
 	if svc != nil {
 		deps.Service = svc
+		// 用户公开档案与本人资料编辑（wayfinder #33）：与认证路由用的是**同一个**
+		// AccountService 实例 —— 这不是巧合，而是必须的：`PATCH /api/me` 与
+		// `/api/auth/me` 读的是同一份数据，两个实例意味着两套缓存/两处口径。
+		//
+		// 类型转换在这里做（*service.AccountService → handler.UserProfileService）：
+		// 编译期检查它的方法集是否满足那个窄接口，而不是等到第一次请求。
+		deps.UserProfile = svc
 	}
 	// 票据表与 /api/auth/ws-ticket 用的必须是**同一个实例**（wire 会复用同一个
 	// provider 的返回值），否则签发的票在 /ws 上永远查不到。
