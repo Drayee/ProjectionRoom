@@ -238,6 +238,24 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  /**
+   * 把一次**写操作返回的权威档案**落地（wayfinder #32 引入，`PATCH /api/me` 的回写）。
+   *
+   * 为什么需要它而不是让页面自己写 `profile.value = …`：档案落地的实现只有
+   * `applyUser` 一处（它负责保留未读数、写 localStorage），多一个直接赋值就多一处
+   * 会忘记同步缓存的代码。这个入口只做"把服务端刚回的档案交给 applyUser"。
+   *
+   * 与 `refreshProfile()` 的区别：那条是**再发一次请求**去问服务端，而写操作的响应
+   * 本身已经带着清洗后的权威值（去零宽、清空回落用户名都可能改过它）。再问一次是白烧
+   * 一发，而且中间那段窗口里顶栏与会显示旧名字。
+   *
+   * 未读数不会被它改：`PATCH /api/me` 的响应走 `usecase.Profile`，**不带** `unread`
+   * （只有 `GET /api/auth/me` 带）。`applyUser` 保留上一次的值，符合"不知道就不猜"。
+   */
+  function applyProfileUpdate(user: AuthUser): void {
+    applyUser(user)
+  }
+
   /** 一次成功的登录/注册/刷新之后的统一落地。 */
   function applySession(session: AuthSession): void {
     accessToken.value = session.accessToken
@@ -491,5 +509,6 @@ export const useAuthStore = defineStore('auth', () => {
     redirectToLogin,
     setUnread,
     refreshProfile,
+    applyProfileUpdate,
   }
 })

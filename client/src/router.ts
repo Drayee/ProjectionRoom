@@ -75,7 +75,8 @@ export const router = createRouter({
         depends: ['作者提供介绍内容（独立后续页）'],
       },
     },
-    // 用户详情页：本轮只支持本人（公开档案接口尚未实现）
+    // 用户档案页（#32）：他人 → 公开档案（免登录，只渲染白名单字段）；
+    // 本人 → 资料编辑（昵称）。数据全部经 `api/users.ts` 门面。
     { path: '/user/:id', name: 'user', component: UserPage, props: true, meta: { header: 'page' } },
 
     // 好友（票 #28）：列表 / 待处理请求 / 按用户名找人 / 黑名单，全部走 api/friends.ts 门面。
