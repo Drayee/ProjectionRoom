@@ -17,6 +17,7 @@ import PostEditorPage from './pages/PostEditorPage.vue'
 import AdminUsersPage from './pages/admin/AdminUsersPage.vue'
 import AdminRoomsPage from './pages/admin/AdminRoomsPage.vue'
 import AdminOpsPage from './pages/admin/AdminOpsPage.vue'
+import OfficialPage from './pages/OfficialPage.vue'
 
 /**
  * 路由表（月夜故障重建 · 票 #18 骨架）。
@@ -31,7 +32,7 @@ import AdminOpsPage from './pages/admin/AdminOpsPage.vue'
  * `/login`（负向判据）、`/reset`、`/verify`（邮件链接写死）不可改）。
  * 做/占位的分配来自票 #16：
  *   - 真做：/ /room /login /register /reset /verify /help /rooms /user /posts×3 /friends /messages
- *   - 占位（ComingSoonPage，props 驱动）：/official /forum /about
+ *   - 占位（ComingSoonPage，props 驱动）：/forum /about（/official 已由 #34 落地）
  *   - 管理端三屏（#23/#24/#25）：/admin /admin/rooms /admin/ops
  *
  * **`meta.header` 决定全局顶栏形态**（App.vue 常驻外壳，顶栏不属于任何页面）：
@@ -82,22 +83,9 @@ export const router = createRouter({
     // 好友（票 #28）：列表 / 待处理请求 / 按用户名找人 / 黑名单，全部走 api/friends.ts 门面。
     // 「发消息」按 utils/dmRoute.ts 的约定跳到 /messages?peer=<id>（票 #30 解析）。
     { path: '/friends', name: 'friends', component: FriendsPage, meta: { header: 'page' } },
-    {
-      path: '/official',
-      name: 'official',
-      component: ComingSoonPage,
-      props: {
-        title: '房间室 · 官方',
-        icon: 'shield-done',
-        summary: '官方与推荐的放映：运营位、活动房、以及被标记为官方的时间表。',
-        bullets: [
-          '官方房间列表：由运营设置，与用户自建的公开房分开呈现。',
-          '活动时间表：即将开始的放映与提醒。',
-          '审核与下架：官方列表要能一键撤下（复用管理端已有的强关/下架能力）。',
-        ],
-        depends: ['房间元数据里的"官方/推荐"标记与运营权限', '（可选）按时间表排序的查询接口'],
-      },
-    },
+    // 官方 / 推荐放映区（#34）：与 /rooms 共用同一个端点（?official=true）与同一张卡片，
+    // 差别只有运营位次排序与页级标识。数据经 api/official.ts 门面。
+    { path: '/official', name: 'official', component: OfficialPage, meta: { header: 'page' } },
     {
       path: '/forum',
       name: 'forum',

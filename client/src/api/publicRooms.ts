@@ -22,6 +22,14 @@ export interface PublicRoom {
   hostOffline: boolean
   /** 有密码：列表不会给出密码本身，只给这一个标记。 */
   hasPassword: boolean
+  /**
+   * 运营标记（wayfinder #35 的 `rooms_meta.is_official`）。
+   *
+   * 普通列表也会带上它（服务端恒返回该键，`false` 也返回）：于是同一个房间里
+   * 「是不是官方」只有一个来源，官方区（`?official=true`）与 `/rooms` 都读它，
+   * 前端不必用"出现在官方列表里"反推。
+   */
+  isOfficial: boolean
 }
 
 export interface PublicRoomPage {
@@ -30,6 +38,14 @@ export interface PublicRoomPage {
   /** 服务端**生效值**回显（自己传的 9999 被夹到了多少由它回答）。 */
   limit: number
   offset: number
+  /**
+   * 服务端回显的 `official` 筛选值（wayfinder #35 起才有）。
+   *
+   * 它是**能力探测点**：老服务端不认这个参数、会当没传，于是回包里没有这个键，
+   * `official` 为 false。官方页据此判断"服务端还没上线官方区"，而不是把整份
+   * 公开房列表当成官方房渲染出来（那是最坏的一种撒谎：把普通房标成官方推荐）。
+   */
+  official: boolean
 }
 
 /** 单页条数。20 与计划 T5 的约定一致，也是服务端默认值。 */
@@ -57,6 +73,7 @@ function normalizeItem(raw: unknown): PublicRoom {
     hostOnline: asBool(item.hostOnline),
     hostOffline: asBool(item.hostOffline),
     hasPassword: asBool(item.hasPassword),
+    isOfficial: asBool(item.isOfficial),
   }
 }
 
@@ -68,11 +85,14 @@ function normalizeItem(raw: unknown): PublicRoom {
  */
 export async function fetchPublicRooms(
   authedFetch: AuthedFetch,
-  options: { limit?: number; offset?: number } = {},
+  options: { limit?: number; offset?: number; official?: boolean } = {},
 ): Promise<PublicRoomPage> {
   const path = `/api/public-rooms${query({
     limit: options.limit ?? PUBLIC_ROOMS_PAGE_SIZE,
     offset: options.offset ?? 0,
+    // 只有调用方**显式**要官方区时才拼这个参数：普通列表不该因为传了 false
+    // 而在 URL 里留下 `official=false`（服务端两种都认，但少一个参数少一个出错面）。
+    official: options.official === undefined ? undefined : String(options.official),
   })}`
   const body = await requestJSON<Record<string, unknown>>(authedFetch, path)
   const rawItems = Array.isArray(body?.items) ? (body?.items as unknown[]) : []
@@ -81,6 +101,8 @@ export async function fetchPublicRooms(
     total: asNumber(body?.total),
     limit: asNumber(body?.limit) || (options.limit ?? PUBLIC_ROOMS_PAGE_SIZE),
     offset: asNumber(body?.offset) || (options.offset ?? 0),
+    // 老服务端没有这个键 → false（官方页据此判"官方区还没上线"，见类型说明）。
+    official: asBool(body?.official),
   }
 }
 
