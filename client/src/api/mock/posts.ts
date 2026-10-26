@@ -5,7 +5,9 @@
  * 页面**不直接** import 本文件——统一走门面 `api/posts.ts`，由 `api/mode.ts` 的
  * `VITE_MOCK_POSTS` 开关决定是否用这一份。
  */
+import { HttpError } from '../http'
 import type { Comment, ListPostsInput, ListPostsResult, Post } from '../../types/posts'
+import { MOCK_ANIME_THREADS } from './animeSeed'
 
 // ---------- Mock 数据 ----------
 
@@ -118,6 +120,43 @@ const MOCK_COMMENTS: Record<number, Comment[]> = {
 const CURRENT_USER_ID = 1
 const CURRENT_USER = MOCK_USERS[0]
 
+// ---------- 主题串（wayfinder #36） ----------
+//
+// 主题串就是**带 `animeId` 的帖子**：板块列表（forum 域）只提供"有哪些 id"，
+// 详情与回复完全复用本域的 getPost / listComments / addComment。因此这里必须把
+// 同一批数据也铺进帖子 mock —— 否则 mock 态点进主题串会显示"不存在"，
+// 而那条路径正是验收第 1 条要走的四层之一。
+//
+// 数据来自 `animeSeed.ts`（forum mock 与这里共用同一份纯数据），id / 作者 / 时间
+// 因此天然对齐，不需要两处手抄。
+
+for (const thread of MOCK_ANIME_THREADS) {
+  MOCK_POSTS.push({
+    id: thread.id,
+    title: thread.title,
+    content: thread.content,
+    authorId: thread.author.id,
+    author: thread.author,
+    images: [],
+    likeCount: thread.likeCount,
+    commentCount: thread.commentCount,
+    liked: false,
+    createdAt: thread.createdAt,
+    animeId: thread.animeId,
+    lastReplyAt: thread.lastReplyAt,
+  })
+  if (thread.comments.length > 0) {
+    MOCK_COMMENTS[thread.id] = thread.comments.map((c) => ({
+      id: c.id,
+      postId: thread.id,
+      authorId: c.author.id,
+      author: c.author,
+      content: c.content,
+      createdAt: c.createdAt,
+    }))
+  }
+}
+
 // ---------- 排序（按最新 / 按热度） ----------
 
 function sortPosts(posts: Post[], sort: 'latest' | 'hot'): Post[] {
@@ -144,10 +183,15 @@ export async function listPosts(input: ListPostsInput = {}): Promise<ListPostsRe
   return { items, hasMore: start + PAGE_SIZE < sorted.length }
 }
 
-/** 单篇帖子。 */
+/** 单篇帖子（主题串也是帖子）。 */
 export async function getPost(id: number): Promise<Post> {
   const post = allPosts.find((p) => p.id === id)
-  if (!post) throw new Error('帖子不存在')
+  if (!post) {
+    // 必须是 **404 HttpError**，不能是裸 Error：页面的分诊会把裸 Error 当成
+    // "网络不可达"（`toHttpError` 的 status 0），于是"这条主题串不存在"会被显示成
+    // 「无法连接服务器」—— 一个会让人去查网络的假象（wayfinder #36 发现）。
+    throw new HttpError({ status: 404, code: 'NOT_FOUND', message: '内容不存在' })
+  }
   return { ...post }
 }
 

@@ -18,6 +18,18 @@ export interface Post {
   commentCount: number
   liked: boolean
   createdAt: string
+  /**
+   * 所属板块（wayfinder #38 / #36）：有值 = 这是一条**主题串**，普通帖子没有这个键。
+   *
+   * 服务端用指针 + omitempty 表达"可选归属"（`postView.AnimeID`），前端也保持可选：
+   * 用 0 当哨兵会让每个普通帖子都声称属于 id=0 的板块。
+   */
+  animeId?: number
+  /**
+   * 最后回复时间（只有主题串有）。板块按「最新回复优先」排序时服务端已经排好，
+   * 这里只是**回显**给用户看「最后活跃」。
+   */
+  lastReplyAt?: string
 }
 
 /** 评论（扁平，无楼中楼/引用）。 */

@@ -18,6 +18,8 @@ import AdminUsersPage from './pages/admin/AdminUsersPage.vue'
 import AdminRoomsPage from './pages/admin/AdminRoomsPage.vue'
 import AdminOpsPage from './pages/admin/AdminOpsPage.vue'
 import OfficialPage from './pages/OfficialPage.vue'
+import ForumPage from './pages/ForumPage.vue'
+import AnimeBoardPage from './pages/AnimeBoardPage.vue'
 
 /**
  * 路由表（月夜故障重建 · 票 #18 骨架）。
@@ -32,7 +34,7 @@ import OfficialPage from './pages/OfficialPage.vue'
  * `/login`（负向判据）、`/reset`、`/verify`（邮件链接写死）不可改）。
  * 做/占位的分配来自票 #16：
  *   - 真做：/ /room /login /register /reset /verify /help /rooms /user /posts×3 /friends /messages
- *   - 占位（ComingSoonPage，props 驱动）：/forum /about（/official 已由 #34 落地）
+ *   - 占位（ComingSoonPage，props 驱动）：/about（/official 与 /forum 已由 #34/#36 落地）
  *   - 管理端三屏（#23/#24/#25）：/admin /admin/rooms /admin/ops
  *
  * **`meta.header` 决定全局顶栏形态**（App.vue 常驻外壳，顶栏不属于任何页面）：
@@ -86,21 +88,15 @@ export const router = createRouter({
     // 官方 / 推荐放映区（#34）：与 /rooms 共用同一个端点（?official=true）与同一张卡片，
     // 差别只有运营位次排序与页级标识。数据经 api/official.ts 门面。
     { path: '/official', name: 'official', component: OfficialPage, meta: { header: 'page' } },
+    // 番剧论坛（#36）：目录（`?q=&offset=` 进 URL）→ 板块（`/forum/:animeId`）→ 主题串
+    // （复用 `/posts/:id` 的详情与评论，不造第二套）。数据经 api/forum.ts 门面。
+    { path: '/forum', name: 'forum', component: ForumPage, meta: { header: 'page' } },
     {
-      path: '/forum',
-      name: 'forum',
-      component: ComingSoonPage,
-      props: {
-        title: '番剧论坛',
-        icon: 'chat',
-        summary: '按番剧聚合的讨论区：一部番一个板块，板块下面是主题串。',
-        bullets: [
-          '番剧条目 → 板块 → 主题串 → 回复的四层结构。',
-          '与"添加番剧"共用同一份目录数据（现在那个入口也还是"能力待接入"）。',
-          '排序与检索：最新回复优先，支持按番剧名/关键词找板块。',
-        ],
-        depends: ['番剧目录（anime 条目）的数据模型', '帖子/主题表（与 /posts 共用）'],
-      },
+      path: '/forum/:animeId',
+      name: 'anime-board',
+      component: AnimeBoardPage,
+      props: true,
+      meta: { header: 'page' },
     },
     { path: '/posts', name: 'posts', component: PostsPage, meta: { header: 'page' } },
     { path: '/posts/new', name: 'post-editor', component: PostEditorPage, meta: { header: 'page' } },

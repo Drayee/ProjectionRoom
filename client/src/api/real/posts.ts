@@ -64,6 +64,10 @@ interface ServerPost {
   commentCount: number
   liked: boolean
   createdAt: string
+  /** 主题串所属板块；普通帖子服务端 omitempty 掉这个键（wayfinder #38）。 */
+  animeId?: number
+  /** 最后回复时间（只有主题串有）。 */
+  lastReplyAt?: string
 }
 
 interface ServerComment {
@@ -75,8 +79,12 @@ interface ServerComment {
   createdAt: string
 }
 
-function toPost(raw: ServerPost): Post {
-  return {
+/**
+ * 服务端帖子行 → 前端形状（**导出给 forum 域复用**：板块主题串与帖子是同一份数据，
+ * 抄第二份归一化会让 `animeId` 这类可选字段在一处有、另一处漏）。
+ */
+export function toPost(raw: ServerPost): Post {
+  const post: Post = {
     id: raw.id,
     title: raw.title,
     content: raw.content,
@@ -88,7 +96,13 @@ function toPost(raw: ServerPost): Post {
     liked: raw.liked ?? false,
     createdAt: raw.createdAt,
   }
+  if (typeof raw.animeId === 'number') post.animeId = raw.animeId
+  if (typeof raw.lastReplyAt === 'string' && raw.lastReplyAt !== '') post.lastReplyAt = raw.lastReplyAt
+  return post
 }
+
+/** 服务端帖子行类型（forum 域需要声明同一个形状的请求体）。 */
+export type { ServerPost }
 
 function toComment(raw: ServerComment): Comment {
   return {
