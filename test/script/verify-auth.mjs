@@ -21,11 +21,12 @@
  *   ⑦ 匿名 `POST /api/rooms` → 401，且**没有**因此创建出房间
  *   ⑧ 归属一致：建房响应的 roomId ↔ `GET /api/rooms/:id` ↔ 管理端用户列表里的 owner
  *   ⑨ 附加：`GET /api/admin/logs?limit=5` 分页且**新→旧**；非 admin → 403
- *   ⑪ 附加（账号体系"邮箱"部分）：`POST /api/auth/forgot` 对"**已注册**邮箱"与
+ *   ⑪ 附加（账号体系"邮箱"部分）：`POST /api/auth/password/otp` 对"**已注册**邮箱"与
  *      "**未注册**邮箱"返回**逐字相同**的 status + body（不泄露账号是否存在）。
  *      期望值按实例的**真实能力**选：没配 SMTP（能力关闭）→ 两条路径都 503；
  *      配了 SMTP → 两条都 200 `{"status":"sent"}`。选到哪一条会打印出来。
- *      （邮箱验证 / 重置口令的完整链路不在这里：token 拿不到，属后端线的验收范围。）
+ *      另附一条：链接式改密的 `/api/auth/forgot` + `/api/auth/reset` 必须**已下线**（404）。
+ *      （验证码改密的端到端链路不在这里：真实验证码拿不到，属 Go handler 用例的范围。）
  *
  * 注册报文自"邮箱 + 忘记密码"起**必填 email**：本脚本提交
  * `testEmailFor(username)` = `<小写用户名>@example.test`（RFC 2606 保留域，
@@ -900,16 +901,16 @@ async function step9AdminLogs(server, admin, nonAdminToken) {
   )
 }
 
-// ---------- 判据 ⑪ 忘记密码不泄露账号是否存在 ----------
+// ---------- 判据 ⑪ 找回密码不泄露账号是否存在 ----------
 
 /**
- * 期望值按实例的**真实能力**二选一（契约里 /forgot 的合法状态只有这两种）：
+ * 期望值按实例的**真实能力**二选一（契约里发码接口的合法状态只有这两种）：
  *   - 配了 SMTP → 200 `{"status":"sent"}`；
  *   - 没配 SMTP（能力关闭）→ 503。
  *
  * 判据本体是两条路径**逐字相同**；这里的期望值只用来挡住"两边都 404/400"这种空相同。
  */
-function forgotExpectation(status) {
+function otpExpectation(status) {
   if (status === 200) {
     return { expect: 200, why: '实例配了 SMTP（探测响应 HTTP 200）→ 期望两条路径都 200 {"status":"sent"}' }
   }
@@ -920,7 +921,7 @@ function forgotExpectation(status) {
 }
 
 /**
- * ⑪ `POST /api/auth/forgot {email}` 对"**已注册**邮箱"与"**未注册**邮箱"必须
+ * ⑪ `POST /api/auth/password/otp {email}` 对"**已注册**邮箱"与"**未注册**邮箱"必须
  * 返回**逐字相同**的 status + body。
  *
  * 为什么这条判据值得单独钉住：找回入口是枚举账号的天然靶子 —— 只要两种输入有任何可观测
@@ -935,8 +936,16 @@ function forgotExpectation(status) {
  *
  * 端点未落地（404/405）或把合法邮箱判成 400/其它码，都记 FAIL：那是后端还没交付，
  * 不是"恒同"成立。
+ *
+ * ⚠ 端点是 `/api/auth/password/otp`（**不是** `/api/auth/forgot`）：
+ * 链接式改密已下线，找回密码改走 6 位验证码。判据从"重置邮件不泄露存在性"
+ * 变成"验证码不泄露存在性"，语义完全一样。
+ *
+ * ⚠ 本判据**只**比较对外响应，不消费验证码。改密端到端（发码 → 输码 → 新口令可登录）
+ * 由 Go 的 handler 用例覆盖（`internal/handler/passwordreset_test.go`），
+ * 因为这里拿不到真实验证码（发信是异步的，脚本不该去读 SMTP）。
  */
-async function step11ForgotNoEnumeration(server, { victim, admin }) {
+async function step11OTPNoEnumeration(server, { victim, admin }) {
   // ⑪-1：两个独立来源任一能读到提交值即可（本人读 /api/auth/me；管理员读用户列表）。
   const me = await raw(`${server}/api/auth/me`, {
     headers: { Authorization: `Bearer ${victim.accessToken}` },
@@ -976,7 +985,7 @@ async function step11ForgotNoEnumeration(server, { victim, admin }) {
     { headers: { Authorization: `Bearer ${admin.accessToken}` } },
   )
   const unregisteredVerified = probe.status === 200 && probe.json?.total === 0
-  evidence('forgotUnregisteredSide', {
+  evidence('otpUnregisteredSide', {
     email: unregistered,
     adminSearch: { status: probe.status, total: probe.json?.total },
   })
@@ -988,27 +997,27 @@ async function step11ForgotNoEnumeration(server, { victim, admin }) {
   )
 
   // 两条路径各发一次。顺序有意：**先未注册**那一侧，因为它同时是"这台实例有没有 SMTP"的探测。
-  const unreg = await withRateLimitRetry('⑪未注册邮箱 forgot', () =>
-    raw(`${server}/api/auth/forgot`, { method: 'POST', body: { email: unregistered } }),
+  const unreg = await withRateLimitRetry('⑪未注册邮箱 password/otp', () =>
+    raw(`${server}/api/auth/password/otp`, { method: 'POST', body: { email: unregistered } }),
   )
-  const reg = await withRateLimitRetry('⑪已注册邮箱 forgot', () =>
-    raw(`${server}/api/auth/forgot`, { method: 'POST', body: { email: victim.email } }),
+  const reg = await withRateLimitRetry('⑪已注册邮箱 password/otp', () =>
+    raw(`${server}/api/auth/password/otp`, { method: 'POST', body: { email: victim.email } }),
   )
-  evidence('forgotResponses', {
+  evidence('otpResponses', {
     unregistered: { email: unregistered, status: unreg.status, body: unreg.text },
     registered: { email: victim.email, status: reg.status, body: reg.text },
   })
 
-  const choice = forgotExpectation(unreg.status)
+  const choice = otpExpectation(unreg.status)
   console.log(
-    `  · forgot 能力口径：${
+    `  · password/otp 能力口径：${
       choice
         ? choice.why
         : `未能判定（未注册侧探测响应 HTTP ${unreg.status} body=${JSON.stringify(unreg.text.slice(0, 160))}）`
     }`,
   )
   record(
-    '⑪-3 forgot 端点已落地（不是"两边都 404/405"）',
+    '⑪-3 password/otp 端点已落地（不是"两边都 404/405"）',
     unreg.status !== 404 && unreg.status !== 405 && reg.status !== 404 && reg.status !== 405,
     `未注册 → HTTP ${unreg.status}；已注册 → HTTP ${reg.status}（404/405 = 端点未落地，判据无法成立）`,
   )
@@ -1016,7 +1025,7 @@ async function step11ForgotNoEnumeration(server, { victim, admin }) {
   const identical = unreg.status === reg.status && unreg.text === reg.text
   const meaningful = bound && unregisteredVerified && Boolean(choice) && unreg.status === choice?.expect
   record(
-    '⑪-4 forgot 对已注册/未注册邮箱逐字相同（status + body）',
+    '⑪-4 password/otp 对已注册/未注册邮箱逐字相同（status + body）',
     identical && meaningful,
     identical
       ? meaningful
@@ -1030,6 +1039,21 @@ async function step11ForgotNoEnumeration(server, { victim, admin }) {
           '（空的"相同"不是不泄露）'
       : `存在可观测差异：未注册 → HTTP ${unreg.status} body=${JSON.stringify(unreg.text)}；` +
         `已注册 → HTTP ${reg.status} body=${JSON.stringify(reg.text)}（期望 status 与 body 都逐字相同）`,
+  )
+
+  // ⑪-5：链接式改密已下线 —— 那两个端点必须**不复存在**。
+  // 为什么值得钉：删端点与"忘了注册"在运行期长得一样（都 404），而这条把
+  // "它不该存在"变成可执行的事实，也防止日后有人"顺手补回去"。
+  const legacyForgot = await raw(`${server}/api/auth/forgot`, { method: 'POST', body: { email: victim.email } })
+  const legacyReset = await raw(`${server}/api/auth/reset`, { method: 'POST', body: { token: 'x', password: 'abcd1234' } })
+  evidence('legacyLinkEndpoints', {
+    forgot: { status: legacyForgot.status },
+    reset: { status: legacyReset.status },
+  })
+  record(
+    '⑪-5 链接式改密端点已下线（/api/auth/forgot 与 /api/auth/reset 均为 404）',
+    legacyForgot.status === 404 && legacyReset.status === 404,
+    `POST /api/auth/forgot → HTTP ${legacyForgot.status}；POST /api/auth/reset → HTTP ${legacyReset.status}（期望都是 404）`,
   )
 }
 
@@ -1081,11 +1105,11 @@ async function main() {
     if (!victim) return
     report.victim = { id: victim.user.id, username: victim.username }
 
-    // ---------- ⑪ 忘记密码不泄露账号是否存在 ----------
+    // ---------- ⑪ 找回密码不泄露账号是否存在 ----------
     // 紧跟在 ① 之后：此时"受害者"是刚注册、未被封禁、邮箱最干净的那个账号
-    //（⑤ 会把它封掉并解封，放后面会让 /forgot 多带一个"账号被封"的变量）。
-    console.log('\n=== ⑪ 忘记密码不泄露账号是否存在（forgot 恒同） ===')
-    await step11ForgotNoEnumeration(SERVER_URL, { victim, admin })
+    //（⑤ 会把它封掉并解封，放后面会让发码多带一个"账号被封"的变量）。
+    console.log('\n=== ⑪ 找回密码不泄露账号是否存在（password/otp 恒同） ===')
+    await step11OTPNoEnumeration(SERVER_URL, { victim, admin })
 
     // ---------- ② 登录 Cookie ----------
     console.log('\n=== ② 登录 Cookie 属性 ===')

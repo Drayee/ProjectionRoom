@@ -136,7 +136,6 @@ func newFriendEnv(t *testing.T) *frEnv {
 	acctStore.nextID = carol.ID
 	svc, err := service.NewAccountService(acctStore, signer, tickets, service.AccountOptions{
 		RefreshTTL:     cfg.Auth.RefreshTTL,
-		ResetTTL:       cfg.Auth.ResetTTL,
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
 		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,

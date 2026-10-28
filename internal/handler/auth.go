@@ -42,13 +42,13 @@ type AccountService interface {
 	IssueWSTicket(ctx context.Context, userID int64) (string, error)
 	VerifyAccessToken(ctx context.Context, token string) (*store.User, error)
 
-	// —— 一次性邮件链路（找回密码 / 验证邮箱）。
+	// —— 一次性邮件链路（验证邮箱）。
 	//
-	// 三个方法都**不返回任何令牌**（这是刻意的）：明文令牌只在 service 内部
+	// ⚠ `Forgot` / `ResetPassword` 已删除（连同 `/api/auth/forgot` + `/api/auth/reset`）：
+	// 改密码现在只走 6 位验证码（SendAccountOTP / ResetPasswordWithOTP，见下方）。
+	// 那个方法仍然**不返回任何令牌**（这是刻意的）：明文令牌只在 service 内部
 	// 进入发信队列，HTTP 层从头到尾摸不到它。这样"响应体/日志里不出现 token"
 	// 就不需要靠人记得 —— 类型上就没有那个值可以写出去。
-	Forgot(ctx context.Context, email, ip, ua string) error
-	ResetPassword(ctx context.Context, token, password string) error
 	VerifyEmail(ctx context.Context, token string) error
 
 	// —— 两段式注册（先用户名口令，再邮箱验证码）。
@@ -180,23 +180,18 @@ func registerAccountRoutes(api *gin.RouterGroup, deps AuthDeps, cfg *config.Conf
 	registerLimiter := newKeyedLimiter(cfg.IPC.RegisterPerMinute, cfg.IPC.RegisterBurst, "注册")
 	refreshLimiter := newKeyedLimiter(cfg.IPC.RefreshPerMinute, cfg.IPC.RefreshBurst, "刷新")
 
-	// —— 一次性邮件链路的三条闸门。
+	// —— 一次性邮件链路的闸门。
 	//
 	// 换算（小时 → 每分钟）在 newHourlyEmailLimiter / hourlyToPerMinute 里，
 	// 理由见那两处的说明：少除一次 60 会让闸门宽 60 倍且没有任何报错。
-	forgotIPLimiter := newHourlyEmailLimiter(cfg.IPC.MailPerIPPerHour, forgotRateLimitWhat)
-	// reset 与 verify **共用同一个桶实例**：两者都是"拿一串 256 bit 随机串来猜"，
-	// 威胁模型逐字相同。共用一个桶意味着攻击者不能靠"拆成两个端点"把预算翻倍。
+	//
+	// 只剩 verify-email 一条走"长随机串"的链路，因此只需要一条每 IP 桶。
 	tokenIPLimiter := newHourlyEmailLimiter(cfg.IPC.ResetPerIPPerHour, tokenRateLimitWhat)
 
 	h := &authHandler{
 		deps: deps,
 		// 每邮箱闸门不是中间件（键来自请求体，中间件阶段还读不到），
 		// 因此在这里构造一个实例交给 handler 自己用。
-		forgotEmailLimiter: limiter.NewKeyed(
-			hourlyToPerMinute(cfg.IPC.MailPerEmailPerHour), cfg.IPC.MailPerEmailPerHour),
-		// 验证码的每邮箱闸门与找回**分开**：两者是不同的动作，共用一个桶会让
-		// "刚发过找回邮件"把"发注册验证码"也一起挡掉。
 		otpEmailLimiter: limiter.NewKeyed(
 			hourlyToPerMinute(cfg.IPC.MailPerEmailPerHour), cfg.IPC.MailPerEmailPerHour),
 	}
@@ -226,19 +221,20 @@ func registerAccountRoutes(api *gin.RouterGroup, deps AuthDeps, cfg *config.Conf
 	api.POST("/auth/register/email", otpSendLimiter, h.registerEmail)
 	api.POST("/auth/register/verify", otpVerifyLimiter, h.registerVerify)
 
-	// 邮件链路：全部免登录（它们要解决的正是"进不去账号"这件事）。
-	api.POST("/auth/forgot", forgotIPLimiter, h.forgot)
-	api.POST("/auth/reset", tokenIPLimiter, h.resetPassword)
+	// 邮件链路：免登录（它们要解决的正是"进不去账号"这件事）。
+	//
+	// ⚠ `/auth/forgot` 与 `/auth/reset` 已**删除**：改密码改走下面的验证码。
+	// 旧邮件里的 `/reset#token=` 链接因此全部失效 —— 这是有意的取舍，
+	// 见 docs/ACCOUNTS.md 与迁移 0015 的说明。
+	//
 	// ⚠ 路径名是 `verify-email`（**不是** `verify`）：它是冻结的前端契约
 	//（client/src/api/auth.ts 的 verifyEmail），邮件里的验证链接会把用户带到
 	// `/verify#token=…` 页，那个页再 POST 到这里。改名就等于让每一封验证邮件失效。
 	api.POST("/auth/verify-email", tokenIPLimiter, h.verifyEmail)
 
-	// —— 改密码走邮箱验证码（与上面 reset 并存的第二条路径）。
+	// —— 找回密码：邮箱验证码（**唯一**的改密路径）。
 	//
-	// 为什么不替换掉 reset：reset 是"点邮件里的链接"，OTP 是"输 6 位数字"。
-	// 前者对老账号（邮箱已验证但用户习惯点链接）仍然可用，后者是新的主路径。
-	// 两条并存不增加攻击面：它们都要求证明邮箱归属，且各有自己的闸门。
+	// 两条端点：发码（恒定 200，不泄露账号是否存在）与"校验码 + 设新密码"。
 	api.POST("/auth/password/otp", otpSendLimiter, h.passwordOTP)
 	api.POST("/auth/password/otp/reset", otpVerifyLimiter, h.passwordOTPReset)
 }
@@ -266,12 +262,13 @@ func registerAuthUnavailable(api *gin.RouterGroup) {
 // authHandler 持有依赖，把每个端点的实现做成方法（避免闭包里重复传参）。
 type authHandler struct {
 	deps AuthDeps
-	// forgotEmailLimiter 是**每邮箱**的令牌桶（键是归一化后的邮箱）。
+	// otpEmailLimiter 是**每邮箱**的验证码令牌桶（键是归一化后的邮箱）。
 	//
 	// 它为什么不是中间件：键来自请求体，而 gin 的中间件跑在处理器之前、
 	// 读不到（也不该去读）业务字段。nil = 该闸门关闭（配置为 0 时不会发生 —— config 层不允许 0）。
-	forgotEmailLimiter *limiter.Keyed
-	// otpEmailLimiter 是**验证码**的每邮箱令牌桶（与 forgotEmailLimiter 分开计数）。
+	//
+	// ⚠ 曾有一个与之并列的 forgotEmailLimiter（链接式找回的每邮箱桶），
+	// 随 `/api/auth/forgot` 一起删除。
 	otpEmailLimiter *limiter.Keyed
 }
 
@@ -292,23 +289,8 @@ type credentialsRequest struct {
 
 // —— 一次性邮件链路的请求体。
 //
-// 三个都用独立的类型而不是复用 credentialsRequest：它们的字段完全不同，
+// 用独立类型而不是复用 credentialsRequest：字段完全不同，
 // 复用只会让"这个端点到底读哪些字段"变得要靠读实现才知道。
-
-type forgotRequest struct {
-	Email string `json:"email"`
-}
-
-// resetRequest 是重置密码的请求体。
-//
-// token 走**请求体**而不是查询串或 URL 路径：它会出现在反代 access log、
-// 浏览器历史与 Referer 里 —— 而这是一串"拿到就能改密码"的凭据。
-// 邮件里的链接把 token 放在 fragment（#）里，前端读出来后再 POST 到这里，
-// 于是它在整个链路上一次都没有进过服务端的访问日志。
-type resetRequest struct {
-	Token    string `json:"token"`
-	Password string `json:"password"`
-}
 
 type verifyRequest struct {
 	Token string `json:"token"`
@@ -561,82 +543,31 @@ func (h *authHandler) wsTicket(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// —— 一次性邮件链路（找回密码 / 验证邮箱）。 ——
+// —— 一次性邮件链路（验证邮箱 / 验证码改密）。 ——
 
-// forgotResponseBody 是 POST /api/auth/forgot 的**唯一**成功响应体。
+// otpSentResponseBody 是 `POST /api/auth/password/otp` 的**唯一**成功响应体。
 //
-// 它是本文件里最重要的一个常量。需求是"无论邮箱是否注册、无论发信成功与否，
-// 都返回同样的 200 与同一句文案"，而"同样的字节"这件事只有一种可靠的实现方式：
-// **只有一个字面量**。三条路径（命中 / 未命中 / 发信失败）全部走到同一个
-// writeForgotSent，于是"逐字相同"不再依赖任何人记得别改文案。
-const forgotResponseBody = `{"status":"sent"}`
+// 它继承自已删除的 `/api/auth/forgot`（原 forgotResponseBody）。需求没变：
+// 无论邮箱是否注册、无论发信成功与否，都返回同样的 200 与同一句文案。
+// 而"同样的字节"只有一种可靠的实现方式：**只有一个字面量**。
+// 三条路径（命中 / 未命中 / 发信失败）全部走到同一个 writeOTPSent，
+// 于是"逐字相同"不再依赖任何人记得别改文案。
+const otpSentResponseBody = `{"status":"sent"}`
 
-// forgotResponseContentType 与 c.JSON 的产出保持一致（charset 一并写上，
+// otpSentResponseContentType 与 c.JSON 的产出保持一致（charset 一并写上，
 // 否则同一个端点在两条路径上的 Content-Type 会不同 —— 那也是一种可观测差异）。
-const forgotResponseContentType = "application/json; charset=utf-8"
+const otpSentResponseContentType = "application/json; charset=utf-8"
 
-// writeForgotSent 是"提交成功"在 HTTP 层的唯一产出点（见 forgotResponseBody）。
-func writeForgotSent(c *gin.Context) {
+// writeOTPSent 是"发码已受理"在 HTTP 层的唯一产出点（见 otpSentResponseBody）。
+func writeOTPSent(c *gin.Context) {
 	// 用 c.Data 而不是 c.JSON：响应体是常量字节，不经过任何序列化，
 	// 因此不存在"某个字段在某些路径上被省略/顺序不同"的可能。
-	c.Data(http.StatusOK, forgotResponseContentType, []byte(forgotResponseBody))
-}
-
-// forgot 接受"忘记密码"请求（成功 200，**恒定**）。
-//
-// 门控顺序（顺序即安全性质）：
-//
-//  1. 请求体解析（非 JSON → 400）；
-//  2. **每邮箱**闸门 → 429。键取归一化后的地址，且**先于任何查库**，
-//     因此它对"这个邮箱存不存在"一无所知 —— 与恒定 200 是同一件事的两面；
-//  3. service.Forgot：格式（400）/ 邮件能力（503）/ 其余一律 200。
-//
-// 为什么这里**不**先做邮箱格式校验再限速：格式错的请求根本没有"邮箱"可以当键，
-// 而它们也不消耗任何配额（走不到发信链路），所以顺序反过来的唯一后果是
-// 让攻击者能用垃圾格式绕开限速去打 format 正则 —— 而那是极廉价的纯 CPU 工作。
-func (h *authHandler) forgot(c *gin.Context) {
-	var req forgotRequest
-	if !bindJSON(c, &req, "请求体不是合法 JSON") {
-		return
-	}
-
-	// 键必须归一化：否则 A@x.com 与 a@x.com 是两个桶，"5 封/小时"会变成 10 封/小时。
-	// 归一化失败（格式非法）则跳过这条闸门 —— 那种请求走不到发信，且下游会给 400。
-	if key, err := service.CanonicalEmail(req.Email); err == nil {
-		if h.forgotEmailLimiter != nil && !h.forgotEmailLimiter.Allow(key) {
-			writeRateLimited(c, forgotRateLimitWhat)
-			return
-		}
-	}
-
-	if err := h.deps.Service.Forgot(c.Request.Context(),
-		req.Email, c.ClientIP(), c.Request.UserAgent()); err != nil {
-		writeAccountError(c, err)
-		return
-	}
-	writeForgotSent(c)
-}
-
-// resetPassword 用一次性令牌设置新口令（成功 204）。
-//
-// 204 而不是 200：没有响应体可给（改密成功后前端要做的是"跳去登录"），
-// 与既有的 logout / logout-all 同一种形态。
-func (h *authHandler) resetPassword(c *gin.Context) {
-	var req resetRequest
-	if !bindJSON(c, &req, "请求体不是合法 JSON") {
-		return
-	}
-	if err := h.deps.Service.ResetPassword(c.Request.Context(), req.Token, req.Password); err != nil {
-		writeAccountError(c, err)
-		return
-	}
-	c.Status(http.StatusNoContent)
+	c.Data(http.StatusOK, otpSentResponseContentType, []byte(otpSentResponseBody))
 }
 
 // verifyEmail 用一次性令牌完成邮箱验证（成功 204）。
 //
-// 与 resetPassword 共用同一条每 IP 闸门（见 router 注册处的说明）：
-// 两者都是"拿一串 256 bit 随机串来猜"，共用一条桶意味着不能靠拆端点翻倍预算。
+// 它拿的是一条"256 bit 随机串"，与任何用户输入无关，因此只需要每 IP 闸门。
 func (h *authHandler) verifyEmail(c *gin.Context) {
 	var req verifyRequest
 	if !bindJSON(c, &req, "请求体不是合法 JSON") {

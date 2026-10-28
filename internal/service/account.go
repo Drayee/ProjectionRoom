@@ -152,17 +152,11 @@ var (
 	// 后者的输入压根不像邮箱。混成一个错误会让用户不知道该改什么。
 	ErrEmailTaken = store.ErrEmailTaken
 
-	// ErrResetTokenInvalid 表示重置令牌不可用（不存在 / 已过期 / 已被使用 / 用途不符）。
+	// ErrVerifyTokenInvalid 表示验证令牌不可用（不存在 / 已过期 / 已被使用 / 用途不符）。
 	//
 	// **四种情况刻意共用一个错误与一个错误码**：区分它们就等于给攻击者一条
 	// 探测通道（"这个 token 是过期的" 与 "这个 token 从来不存在" 是很不一样的情报）。
-	ErrResetTokenInvalid = errors.New("account: 重置链接无效或已过期，请重新申请")
-
-	// ErrVerifyTokenInvalid 表示验证令牌不可用（同上，四合一）。
-	//
-	// 为什么不与 ErrResetTokenInvalid 共用：两个用途的错误对用户是可操作的
-	//（"重新申请重置" 与 "重新发一封验证信"），而它们**不构成枚举面** ——
-	// 能拿到这个错误的前提是对方已经持有一串 256 bit 的随机串。
+	// 它**不构成枚举面** —— 能拿到这个错误的前提是对方已经持有一串 256 bit 的随机串。
 	ErrVerifyTokenInvalid = errors.New("account: 验证链接无效或已过期，请重新获取")
 
 	// ErrMailUnavailable 是 mail.ErrMailUnavailable 的别名，供**上层**（handler）判断
@@ -254,12 +248,14 @@ type AccountStore interface {
 	RevokeSession(ctx context.Context, id int64) error
 	RevokeAllSessions(ctx context.Context, userID int64) (int64, error)
 
-	// —— 一次性邮件令牌（验证邮箱 / 重置密码）
+	// —— 一次性邮件令牌（验证邮箱）
 	//
-	// 两个消费方法都是**原子的**（校验 + 标记已用在同一条语句里，且跨表动作在一个
-	// 事务内）：这是"单次使用"与"改密 + 撤销全部会话 + 版本号自增"能成立的唯一形态。
+	// 消费方法是**原子的**（校验 + 标记已用 + 跨表动作在同一个事务内）：
+	// 这是"单次使用"能成立的唯一形态。
+	//
+	// ⚠ 曾有一个 ConsumePasswordReset（消费重置令牌 + 改密 + 撤销会话四合一），
+	// 随链接式找回一起删除。改密码现在走下面的 OTP 三件套，见 service.replacePassword。
 	InsertPasswordReset(ctx context.Context, t *store.PasswordReset) error
-	ConsumePasswordReset(ctx context.Context, tokenHash, newPasswordHash string) (int64, bool, error)
 	ConsumeEmailVerify(ctx context.Context, tokenHash string) (int64, bool, error)
 
 	// —— 邮箱验证码（OTP：注册两段式 + 改密码）
@@ -321,9 +317,9 @@ type AccountService struct {
 	// refreshTTL 是新建会话的有效期（与 PR_REFRESH_TTL 同源，由装配层注入）。
 	refreshTTL time.Duration
 
-	// resetTTL / emailVerifyTTL 是两类一次性令牌的有效期
-	//（PR_RESET_TTL / PR_EMAIL_VERIFY_TTL，由装配层注入）。
-	resetTTL       time.Duration
+	// emailVerifyTTL 是邮箱验证**链接**的有效期（PR_EMAIL_VERIFY_TTL，装配层注入）。
+	//
+	// ⚠ 曾经还有一个 resetTTL（PR_RESET_TTL）用于"重置密码链接"，随那条通道一起删除。
 	emailVerifyTTL time.Duration
 	// otpTTL 是邮箱验证码的有效期（分钟级）。比链接令牌短得多，
 	// 因为 6 位数字的猜测空间只有 100 万，时间越短越安全。
@@ -359,21 +355,20 @@ type AccountOptions struct {
 	// Now 是时间源；nil 取 time.Now。
 	Now func() time.Time
 
-	// —— 邮件链路（找回密码 / 验证邮箱）。四个都是必填的：装不出"半条"邮件链路。
+	// —— 邮件链路（验证邮箱 + 验证码改密）。这些都是必填的：装不出"半条"邮件链路。
 
 	// Mail 是发信队列；**可以为 nil**（= 邮件能力未配置）。nil 时相关用例返回
 	// mail.ErrMailUnavailable（handler 翻译成 503），其余账号功能完全不受影响。
 	Mail MailSink
-	// ResetTTL / EmailVerifyTTL 是两类一次性令牌的有效期；<= 0 报错。
+	// EmailVerifyTTL 是邮箱验证链接的有效期；<= 0 报错。
 	// 与 RefreshTTL 同一条理由：TTL 写错的表现是"链接点了没用"，极难归因。
-	ResetTTL       time.Duration
 	EmailVerifyTTL time.Duration
 	// PublicBaseURL 是对外链接的基地址；为空报错（没有它拼不出可用的链接，
 	// 而"用户收到一封点了没用的信"比启动失败晚得多、也难查得多）。
 	PublicBaseURL string
 	// OTPTTL 是邮箱验证码的有效期；<= 0 报错。
 	//
-	// 它比 ResetTTL / EmailVerifyTTL 短得多（分钟级）：验证码只有 6 位数字，
+	// 它比 EmailVerifyTTL 短得多（分钟级）：验证码只有 6 位数字，
 	// 时间窗口是它抵御爆破的主要维度之一（另外两道是错误次数与冷却期）。
 	OTPTTL time.Duration
 	// OTPDevEcho 打开后，发码接口会把明文验证码一并返回（**仅本机开发**）。
@@ -399,12 +394,9 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 	if opts.RefreshTTL <= 0 {
 		return nil, fmt.Errorf("account: refresh TTL 必须为正，当前 %s", opts.RefreshTTL)
 	}
-	// 邮件链路的三项**无论邮件能力是否开启都要校验**：它们描述的是"链接长什么样、
+	// 邮件链路的两项**无论邮件能力是否开启都要校验**：它们描述的是"链接长什么样、
 	// 活多久"，配错了以后即便将来打开邮件能力也仍然是错的，而那种错要等到
 	// 第一封邮件被点开才暴露。
-	if opts.ResetTTL <= 0 {
-		return nil, fmt.Errorf("account: 重置令牌 TTL 必须为正，当前 %s", opts.ResetTTL)
-	}
 	if opts.EmailVerifyTTL <= 0 {
 		return nil, fmt.Errorf("account: 验证令牌 TTL 必须为正，当前 %s", opts.EmailVerifyTTL)
 	}
@@ -441,7 +433,6 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 		mail:           opts.Mail,
 		bcryptCost:     cost,
 		refreshTTL:     opts.RefreshTTL,
-		resetTTL:       opts.ResetTTL,
 		emailVerifyTTL: opts.EmailVerifyTTL,
 		otpTTL:         opts.OTPTTL,
 		otpDevEcho:     opts.OTPDevEcho,
@@ -574,7 +565,7 @@ func (s *AccountService) Register(ctx context.Context, username, displayName, pa
 	// 注册后立刻发一封验证信（**best-effort**）：它既不是注册成功的前提，
 	// 失败也不该改变注册的响应 —— 所以放在 issueSession 之后，且忽略返回值。
 	// 能力关闭时 dispatchEmailToken 只记一条日志（账号仍然可用，只是暂时不能找回）。
-	if _, err := s.dispatchEmailToken(ctx, u, addr, store.PurposeEmailVerify, ip, ua); err != nil &&
+	if _, err := s.dispatchEmailToken(ctx, u, addr, ip, ua); err != nil &&
 		!errors.Is(err, mail.ErrMailUnavailable) {
 		log.Printf("[WARN] 注册后发送验证邮件失败：user=%d %v", u.ID, err)
 	}

@@ -94,7 +94,6 @@ func NewAccountService(
 		// 并发的 CPU 密集校验，这是部署事实而不是代码事实。
 		HashingConcurrency: cfg.Auth.HashingConcurrency,
 
-		ResetTTL:       cfg.Auth.ResetTTL,
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
 		OTPTTL:         cfg.Auth.OTPTTL,
 		OTPDevEcho:     cfg.Auth.OTPDevEcho,

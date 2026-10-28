@@ -46,19 +46,16 @@ const (
 	// 而不是拿同一张票重连 —— 票据是单次的，重连只会连续拿到 401。
 	CodeWSTicketInvalid = "WS_TICKET_INVALID"
 
-	// CodeResetTokenInvalid 表示重置链接不可用：**不存在 / 已过期 / 已被使用 / 用途不符
-	// 四种情况共用一个码**。
+	// CodeVerifyTokenInvalid 表示验证链接不可用：**不存在 / 已过期 / 已被使用 /
+	// 用途不符四种情况共用一个码**。
 	//
 	// 四合一不是偷懒，是安全性质：区分"过期"与"从来不存在"等于给攻击者一条
 	// 探测通道（前者说明这串 token 曾经是真的）。前端对它的正确反应是同一种：
-	// 回"忘记密码"重新申请一封。
-	CodeResetTokenInvalid = "RESET_TOKEN_INVALID"
-
-	// CodeVerifyTokenInvalid 表示验证链接不可用（同上四合一）。
+	// 重新发一封验证信。
 	//
-	// 它与 CodeResetTokenInvalid 分开：两者对用户是**不同**的可操作动作
-	//（"重新申请重置" vs "重新发一封验证信"），而它们都不构成枚举面 ——
-	// 能拿到这个码的前提是对方已经持有一串 256 bit 的随机串。
+	// ⚠ 曾有一个与之并列的 CodeResetTokenInvalid（`RESET_TOKEN_INVALID`），
+	// 随链接式改密（`/api/auth/reset`）一起删除。改密码现在走验证码，
+	// 错误码是下面的 OTP_INVALID / OTP_ATTEMPTS_EXCEEDED 那一组。
 	CodeVerifyTokenInvalid = "VERIFY_TOKEN_INVALID"
 
 	// —— 邮箱验证码链路（注册两段式 + 改密码）。
@@ -130,12 +127,13 @@ func accountErrorResponse(err error) (status int, code string, message string) {
 	case errors.Is(err, service.ErrBadEmail):
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
 
-	// —— 一次性邮件链路（找回密码 / 验证邮箱）。
+	// —— 一次性邮件链路（验证邮箱）。
 	//
-	// 两条都是 400 而不是 404：链接不可用是"你手里这串东西不对"，
+	// 400 而不是 404：链接不可用是"你手里这串东西不对"，
 	// 而不是"这个资源不存在"（后者会让人以为要换个 URL）。
-	case errors.Is(err, service.ErrResetTokenInvalid):
-		return http.StatusBadRequest, CodeResetTokenInvalid, err.Error()
+	//
+	// ⚠ 曾有一个 CodeResetTokenInvalid 分支（链接式改密），随 `/api/auth/reset`
+	// 一起删除。改密码现在走下面的验证码链路，错误码是 OTP_INVALID 那一组。
 	case errors.Is(err, service.ErrVerifyTokenInvalid):
 		return http.StatusBadRequest, CodeVerifyTokenInvalid, err.Error()
 

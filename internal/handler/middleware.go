@@ -186,18 +186,12 @@ func writeRateLimited(c *gin.Context, what string) {
 // 邮件链路的限速文案（429 的 message 由它们拼出来，两条闸门刻意用不同的词，
 // 但同一类闸门（IP / 邮箱）在所有路径上完全一致）。
 const (
-	// forgotRateLimitWhat 用于 /api/auth/forgot 的两条闸门（每 IP、每邮箱）。
-	//
-	// 两条用**同一个词**是刻意的：这样攻击者无法从文案上区分自己撞的是哪一条 ——
-	// 而"撞了每邮箱闸门"意味着"这个地址最近被请求过"，那是一条不需要存在性
-	// 也能被观测到的状态。两条合一说不出任何多余的信息。
-	forgotRateLimitWhat = "找回密码"
-	// tokenRateLimitWhat 用于 /api/auth/reset 与 /api/auth/verify-email（两者共用一条桶）。
+	// tokenRateLimitWhat 用于 /api/auth/verify-email 的每 IP 闸门。
 	tokenRateLimitWhat = "链接处理"
-	// otpRateLimitWhat 用于验证码的每邮箱闸门。
+	// otpRateLimitWhat 用于「找回密码」验证码的每邮箱闸门。
 	//
-	// 与 forgotRateLimitWhat 分开：两者是不同的动作，而"撞了验证码闸门"
-	// 与"撞了找回闸门"对用户来说意味着不同的等待对象。
+	// ⚠ 曾有一个 forgotRateLimitWhat（链接式找回的两条闸门），随 `/api/auth/forgot`
+	// 一起删除。现在发码只有这一条路径，因此也就没有"两个词区分两条闸门"的必要了。
 	otpRateLimitWhat = "验证码"
 )
 

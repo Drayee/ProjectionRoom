@@ -175,8 +175,8 @@ func (s *AccountService) RegisterSendEmailOTP(ctx context.Context, ticket, email
 
 	msg := mail.Outbound{
 		To:      addr,
-		Subject: otpEmailSubject(store.PurposeEmailVerify),
-		Body:    otpEmailBody(store.PurposeEmailVerify, code, s.otpTTL),
+		Subject: otpEmailSubject(otpMailRegister),
+		Body:    otpEmailBody(otpMailRegister, code, s.otpTTL),
 		Tag:     "otp.register draft=" + d.Username,
 	}
 	if s.otpDevEcho {

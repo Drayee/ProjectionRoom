@@ -273,10 +273,11 @@ func (s *Store) SetUserRole(ctx context.Context, id int64, role string) error {
 //
 // ⚠ 它**只改口令**，不动会话与 token_version。改密必须同时让旧凭据失效，
 // 因此调用方（service.replacePassword）紧接着要调 RevokeAllSessions + BumpTokenVersion。
-// 链接令牌那条路径不需要它：ConsumePasswordReset 把四件事放在同一个事务里。
 //
-// 单独提供这个方法而不是复用 ConsumePasswordReset：后者要求一个待消费的令牌，
-// 而 OTP 路径的令牌已经在 ConsumeEmailOTP 里消费掉了（那是它自己的单次使用点）。
+// 为什么不把这三步合成一个事务方法：验证码的"消费"已经在 ConsumeEmailOTP 里
+// 独立完成（那是它自己的单次使用点），因此这里没有令牌可以一并消费。
+// 想合成的话就得把 OTP 校验也塞进来 —— 那会让"一条码最多错 5 次"的计数逻辑
+// 与改密耦合在同一个事务里，而它们本该各自可测。
 func (s *Store) SetPasswordHash(ctx context.Context, id int64, hash string) error {
 	if strings.TrimSpace(hash) == "" {
 		return errors.New("store: SetPasswordHash 缺少口令哈希")

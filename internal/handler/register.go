@@ -246,11 +246,11 @@ func (h *authHandler) registerVerify(c *gin.Context) {
 	})
 }
 
-// passwordOTP 发一条改密码验证码（成功 200，**恒定**）。
+// passwordOTP 发一条「找回密码」验证码（成功 200，**恒定**）。
 //
-// 与 forgot 同一条口径：无论账号是否存在、是否可发信，对外都是同一个 200。
-// 因此这里**不能**用 withIdempotency（它会把"首次响应"落键，而那与恒定响应
-// 没有冲突，但会多一次库写；更重要的是恒等响应本身就是幂等的）。
+// 口径继承自已删除的 `/api/auth/forgot`：无论账号是否存在、是否可发信，
+// 对外都是同一个 200 与同一份字节（见 otpSentResponseBody 的说明）。
+// 因此这里**不能**用 withIdempotency（恒等响应本身就是幂等的，落键只是多一次库写）。
 func (h *authHandler) passwordOTP(c *gin.Context) {
 	var req passwordOTPRequest
 	if err := bindJSONBody(c, &req); err != nil {
@@ -273,10 +273,11 @@ func (h *authHandler) passwordOTP(c *gin.Context) {
 	}
 	if dev != "" {
 		// 仅本机开发（PR_OTP_DEV_ECHO=1），理由同 registerEmail。
+		// 这条分支**故意**偏离常量：回显验证码是它唯一的目的。
 		c.JSON(http.StatusOK, gin.H{"status": "sent", "devCode": dev})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "sent"})
+	writeOTPSent(c)
 }
 
 // passwordOTPReset 凭验证码改密码（成功 204）。

@@ -6,7 +6,6 @@ import RegisterPage from './pages/RegisterPage.vue'
 import HelpPage from './pages/HelpPage.vue'
 import PublicRoomsPage from './pages/PublicRoomsPage.vue'
 import UserPage from './pages/UserPage.vue'
-import ResetPasswordPage from './pages/ResetPasswordPage.vue'
 import VerifyEmailPage from './pages/VerifyEmailPage.vue'
 import ComingSoonPage from './pages/ComingSoonPage.vue'
 import FriendsPage from './pages/FriendsPage.vue'
@@ -51,7 +50,11 @@ export const router = createRouter({
     { path: '/register', name: 'register', component: RegisterPage, meta: { header: 'none' } },
     // 邮件链接落点：token 在 fragment（不进服务端日志），页面挂载时自己读
     // 并立刻抹掉 hash（utils/fragmentToken.ts）。不做成路由参数：那会让 token 进 URL 路径。
-    { path: '/reset', name: 'reset', component: ResetPasswordPage, meta: { header: 'bare' } },
+    //
+    // ⚠ 这里曾有 `/reset`（"点邮件里的重置链接改密"）。它随 `/api/auth/forgot` +
+    // `/api/auth/reset` 一起下线：改密码现在走**邮箱验证码**，入口在 `/login?tab=forgot`
+    // 的两段式表单里，不需要一个独立的落点页。
+    // 旧邮件里的 `/reset#token=…` 因此会落到 404 —— 这是有意的取舍（见 docs/ACCOUNTS.md）。
     { path: '/verify', name: 'verify', component: VerifyEmailPage, meta: { header: 'bare' } },
     // 帮助页：7 个锚点（#why-login #source #room-code #playback #diagnostics #privacy #faq）
     // 被多处深链引用，scrollBehavior 消费 to.hash —— 锚点 id 必须保留（票 #16）。

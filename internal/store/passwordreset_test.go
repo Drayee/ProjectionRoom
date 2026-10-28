@@ -19,8 +19,6 @@ import (
 //   - 邮箱的唯一性靠 users_email_lower_key 这个**部分唯一 + 函数索引**兜住；
 //   - 过期判定用的是**数据库时钟**（expires_at > now()），不是应用时钟。
 
-const testResetTTL = 30 * time.Minute
-
 // seedResetRow 直接插一行令牌（绕过 service，便于精确控制用途/过期时间）。
 func seedResetRow(t *testing.T, s *Store, userID int64, purpose, hash string, expiresAt time.Time) *PasswordReset {
 	t.Helper()
@@ -50,16 +48,19 @@ func TestInsertPasswordResetValidatesShape(t *testing.T) {
 		row  *PasswordReset
 	}{
 		{"nil", nil},
-		{"缺 user_id", &PasswordReset{Purpose: PurposePasswordReset, TokenHash: hexHash("a"), ExpiresAt: time.Now().Add(time.Hour)}},
+		{"缺 user_id", &PasswordReset{Purpose: PurposeEmailVerify, TokenHash: hexHash("a"), ExpiresAt: time.Now().Add(time.Hour)}},
 		{"purpose 非法", &PasswordReset{UserID: u.ID, Purpose: "whatever", TokenHash: hexHash("a"), ExpiresAt: time.Now().Add(time.Hour)}},
 		{"purpose 为空", &PasswordReset{UserID: u.ID, TokenHash: hexHash("a"), ExpiresAt: time.Now().Add(time.Hour)}},
-		{"缺 expires_at", &PasswordReset{UserID: u.ID, Purpose: PurposePasswordReset, TokenHash: hexHash("a")}},
+		{"缺 expires_at", &PasswordReset{UserID: u.ID, Purpose: PurposeEmailVerify, TokenHash: hexHash("a")}},
 		// 64 位但不是十六进制：长度对、字符集不对（例如误存了 base64 的原文）。
-		{"哈希不是十六进制", &PasswordReset{UserID: u.ID, Purpose: PurposePasswordReset,
+		{"哈希不是十六进制", &PasswordReset{UserID: u.ID, Purpose: PurposeEmailVerify,
 			TokenHash: strings.Repeat("z", 64), ExpiresAt: time.Now().Add(time.Hour)}},
 		// 原文（43 字符的 base64url）直接当哈希传进来：必须被拒。
-		{"哈希长度不对（可能是原文）", &PasswordReset{UserID: u.ID, Purpose: PurposePasswordReset,
+		{"哈希长度不对（可能是原文）", &PasswordReset{UserID: u.ID, Purpose: PurposeEmailVerify,
 			TokenHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ExpiresAt: time.Now().Add(time.Hour)}},
+		// 已下线的 purpose：链接式改密的 `password_reset` 必须被拒（迁移 0015 收窄了 CHECK）。
+		{"已下线的 password_reset 用途", &PasswordReset{UserID: u.ID, Purpose: "password_reset",
+			TokenHash: hexHash("a"), ExpiresAt: time.Now().Add(time.Hour)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,159 +68,6 @@ func TestInsertPasswordResetValidatesShape(t *testing.T) {
 				t.Fatal("应当被拒绝")
 			}
 		})
-	}
-}
-
-// TestConsumePasswordResetIsAtomicAndComplete 是本文件最重的一条：
-// 一次消费要同时成立四件事，且结果是**单次使用**的。
-func TestConsumePasswordResetIsAtomicAndComplete(t *testing.T) {
-	s := requireTestDB(t)
-	ctx := context.Background()
-	u := seedUser(t, s, "alice")
-
-	// 两个活跃会话：改密之后它们都必须失效。
-	for _, seed := range []string{"sess-1", "sess-2"} {
-		if err := s.CreateSession(ctx, &Session{
-			UserID: u.ID, TokenHash: hexHash(seed), ExpiresAt: time.Now().Add(time.Hour),
-		}); err != nil {
-			t.Fatalf("建会话失败：%v", err)
-		}
-	}
-	versionBefore := u.TokenVersion
-
-	row := seedResetRow(t, s, u.ID, PurposePasswordReset, hexHash("reset-token"), time.Now().Add(testResetTTL))
-
-	userID, ok, err := s.ConsumePasswordReset(ctx, hexHash("reset-token"), "new-hash-xxxx")
-	if err != nil {
-		t.Fatalf("消费失败：%v", err)
-	}
-	if !ok || userID != u.ID {
-		t.Fatalf("首次消费应当成功并返回 user_id=%d，实际 ok=%v id=%d", u.ID, ok, userID)
-	}
-
-	// ① 令牌被标记已用。
-	//
-	// 用 sql.NullTime 而不是 *time.Time：GORM 的 Raw().Scan 在 NULL 上会直接报错
-	// （"unsupported Scan, storing driver.Value type <nil>"），而这一列的 NULL
-	// 恰恰是最常见的形态 —— 用错类型的表现是"一半的用例无端变红"。
-	var used sql.NullTime
-	if err := s.DB().Raw(`SELECT used_at FROM password_resets WHERE id = ?`, row.ID).Scan(&used).Error; err != nil {
-		t.Fatalf("回读 used_at 失败：%v", err)
-	}
-	if !used.Valid {
-		t.Fatal("消费必须标记 used_at")
-	}
-
-	// ② 口令被换掉。
-	after, err := s.UserByID(ctx, u.ID)
-	if err != nil {
-		t.Fatalf("回读用户失败：%v", err)
-	}
-	if after.PasswordHash != "new-hash-xxxx" {
-		t.Fatalf("口令没被改掉：%s", after.PasswordHash)
-	}
-
-	// ③ 全部会话被撤销。
-	n, err := s.RevokeAllSessions(ctx, u.ID) // 幂等：再撤一次应当 0 行
-	if err != nil {
-		t.Fatalf("撤销失败：%v", err)
-	}
-	if n != 0 {
-		t.Fatalf("改密时应当已经撤销过全部会话，实际还剩 %d 条未撤销", n)
-	}
-
-	// ④ token_version 自增（旧 access token 立刻失效）。
-	if after.TokenVersion != versionBefore+1 {
-		t.Fatalf("token_version 应当自增：want=%d got=%d", versionBefore+1, after.TokenVersion)
-	}
-
-	// ⑤ **单次使用**：同一个令牌再用必须失败，且与"不存在"完全同一种返回。
-	_, ok2, err := s.ConsumePasswordReset(ctx, hexHash("reset-token"), "another-hash")
-	if err != nil {
-		t.Fatalf("第二次消费不该报错（只需要返回不可用）：%v", err)
-	}
-	if ok2 {
-		t.Fatal("令牌必须只能使用一次")
-	}
-	after2, _ := s.UserByID(ctx, u.ID)
-	if after2.PasswordHash != "new-hash-xxxx" {
-		t.Fatal("被拒的第二次消费不该改掉口令")
-	}
-
-	// ⑥ 并发双花：两个 goroutine 同时消费同一个**未用过**的令牌，只有一个能成功。
-	seedResetRow(t, s, u.ID, PurposePasswordReset, hexHash("race-token"), time.Now().Add(testResetTTL))
-	type res struct {
-		ok  bool
-		err error
-	}
-	results := make(chan res, 2)
-	start := make(chan struct{})
-	for i := 0; i < 2; i++ {
-		go func() {
-			<-start
-			_, ok, err := s.ConsumePasswordReset(context.Background(), hexHash("race-token"), "h")
-			results <- res{ok, err}
-		}()
-	}
-	close(start)
-	var wins int
-	for i := 0; i < 2; i++ {
-		r := <-results
-		if r.err != nil {
-			t.Fatalf("并发消费报错了（应当只有一方成功、另一方拿到 ok=false）：%v", r.err)
-		}
-		if r.ok {
-			wins++
-		}
-	}
-	if wins != 1 {
-		t.Fatalf("并发消费必须恰好一方成功，实际 %d 方成功", wins)
-	}
-}
-
-// TestConsumePasswordResetRejectsPurposeAndExpiry 覆盖两条"不可用"路径。
-func TestConsumePasswordResetRejectsPurposeAndExpiry(t *testing.T) {
-	s := requireTestDB(t)
-	ctx := context.Background()
-	u := seedUser(t, s, "alice")
-
-	// 用途不符：验证用途的令牌不能当重置令牌用。
-	//
-	// 这一行必须带上 email 列 —— 验证令牌的消费**要求**它非空（那正是
-	// "验证的是哪个地址"的依据），不带的话它连验证也用不了，用例就变成
-	// 在验两个东西坏掉而不是"用途被隔离"。
-	verifyAddr := "alice@example.com"
-	if err := s.SetUserEmail(ctx, u.ID, verifyAddr, nil); err != nil {
-		t.Fatalf("设置邮箱失败：%v", err)
-	}
-	vrow := seedResetRow(t, s, u.ID, PurposeEmailVerify, hexHash("verify-token"), time.Now().Add(time.Hour))
-	if err := s.DB().Exec(`UPDATE password_resets SET email = ? WHERE id = ?`, verifyAddr, vrow.ID).Error; err != nil {
-		t.Fatalf("补 email 失败：%v", err)
-	}
-	if _, ok, err := s.ConsumePasswordReset(ctx, hexHash("verify-token"), "h"); err != nil || ok {
-		t.Fatalf("验证令牌不得用于重置：ok=%v err=%v", ok, err)
-	}
-	// 而且这次尝试不能把它烧掉（WHERE 不命中 = 什么都不改）。
-	if _, ok, err := s.ConsumeEmailVerify(ctx, hexHash("verify-token")); err != nil || !ok {
-		t.Fatalf("用途不符的尝试不该烧掉验证令牌：ok=%v err=%v", ok, err)
-	}
-
-	// 已过期（显式把 expires_at 放在过去，避免依赖应用与数据库的时钟一致）。
-	row := seedResetRow(t, s, u.ID, PurposePasswordReset, hexHash("expired"), time.Now().Add(-time.Minute))
-	if _, ok, err := s.ConsumePasswordReset(ctx, hexHash("expired"), "h"); err != nil || ok {
-		t.Fatalf("过期令牌必须不可用：ok=%v err=%v", ok, err)
-	}
-	var used sql.NullTime
-	if err := s.DB().Raw(`SELECT used_at FROM password_resets WHERE id = ?`, row.ID).Scan(&used).Error; err != nil {
-		t.Fatalf("回读失败：%v", err)
-	}
-	if used.Valid {
-		t.Fatal("不可用的令牌不该被标记 used_at（否则它连审计价值都没了）")
-	}
-
-	// 形状不对的哈希：直接当"不可用"，连库都不查。
-	if _, ok, err := s.ConsumePasswordReset(ctx, "not-a-hash", "h"); err != nil || ok {
-		t.Fatalf("形状不对的哈希应当返回不可用而不是报错：ok=%v err=%v", ok, err)
 	}
 }
 
@@ -281,8 +129,8 @@ func TestDeleteExpiredPasswordResets(t *testing.T) {
 	ctx := context.Background()
 	u := seedUser(t, s, "alice")
 
-	seedResetRow(t, s, u.ID, PurposePasswordReset, hexHash("old"), time.Now().Add(-2*time.Hour))
-	seedResetRow(t, s, u.ID, PurposePasswordReset, hexHash("fresh"), time.Now().Add(time.Hour))
+	seedResetRow(t, s, u.ID, PurposeEmailVerify, hexHash("old"), time.Now().Add(-2*time.Hour))
+	seedResetRow(t, s, u.ID, PurposeEmailVerify, hexHash("fresh"), time.Now().Add(time.Hour))
 
 	n, err := s.DeleteExpiredPasswordResets(ctx, time.Now().Add(-time.Hour))
 	if err != nil {

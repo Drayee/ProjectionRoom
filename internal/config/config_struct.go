@@ -227,16 +227,15 @@ type IPCConfig struct {
 	MailPerEmailPerHour int
 	// MailPerIPPerHour 是**每个来源 IP** 每小时最多触发的发信次数（PR_MAIL_PER_IP_PER_HOUR，默认 20）。
 	//
-	// 它同时是"探测未注册邮箱"这条路的成本上限：`forgot` 对存在与不存在返回
+	// 它同时是"探测未注册邮箱"这条路的成本上限：发码接口对存在与不存在返回
 	// 完全相同的响应，因此唯一的滥用面就是拿它当"发信机"用。
 	MailPerIPPerHour int
-	// ResetPerIPPerHour 是 `reset` 与 `verify` **共用**的每 IP 每小时次数
+	// ResetPerIPPerHour 是 `verify-email` 的每 IP 每小时次数
 	//（PR_MAIL_RESET_PER_IP_PER_HOUR，默认 10）。
 	//
-	// 为什么 reset 与 verify 共用一条闸门而不是各一条：两者都是"拿一串 32 字节
-	// 随机 token 来猜"的入口，威胁模型逐字相同（穷举碰撞），而共用一条桶意味着
-	// 攻击者**不能**通过拆成两个端点来把总预算翻倍。给 verify 单独一条更宽的
-	// 闸门只会让"猜"变得更便宜。
+	// 名字里的 Reset 是历史遗留（那条通道已删除），环境变量名保持不变：
+	// 改名会让既有部署的配置静默失效（旧变量没人读 = 退回默认值，且不报错）。
+	// 语义现在只剩"拿一串 32 字节随机 token 来猜"的入口。
 	//
 	// 10 的依据：token 是 256 bit 随机，任何有限的尝试次数都不可能碰撞；
 	// 这一条挡的是"拿它当免费的哈希查询/日志放大器"，10 次/小时对正常人
@@ -314,16 +313,17 @@ type AuthConfig struct {
 	// PublicBaseURL 是拼接**对外链接**的基地址（PR_PUBLIC_BASE_URL，默认 http://60.205.212.25）。
 	//
 	// 为什么必须是配置而不是从请求头推导：Host / X-Forwarded-Host 完全由请求方控制。
-	// 攻击者用 `Host: evil.com` 打一次 forgot，受害者收到的就是指向 evil.com 的
-	// 重置链接 —— 点一下 token 就进了攻击者的服务器，账号直接接管。
-	// 这是"密码重置链接投毒"的现成攻击路径，所以域名只能来自服务端自己持有的配置。
+	// 攻击者用 `Host: evil.com` 触发一次发信，受害者收到的就是指向 evil.com 的
+	// 验证链接 —— 点一下 token 就进了攻击者的服务器。这是"链接投毒"的现成攻击路径，
+	// 所以域名只能来自服务端自己持有的配置。
 	PublicBaseURL string
-	// ResetTTL 是**重置密码**令牌的有效期（PR_RESET_TTL，默认 30m）。
-	// 短是刻意的：它是一封邮件里的链接，暴露面（邮箱、转发、备份）比 access token 大。
-	ResetTTL time.Duration
 	// EmailVerifyTTL 是**验证邮箱**令牌的有效期（PR_EMAIL_VERIFY_TTL，默认 24h）。
-	// 比重置长得多：验证不是紧急动作，用户可能第二天才点开那封信；
+	//
+	// 为什么长：验证不是紧急动作，用户可能第二天才点开那封信；
 	// 而它的危害面更小（通过验证只会"打开找回能力"，不会直接改凭据）。
+	//
+	// ⚠ 曾有一个 ResetTTL（PR_RESET_TTL，默认 30m）用于"重置密码链接"，
+	// 随链接式找回一起删除 —— 改密码现在走 6 位验证码（OTPTTL）。
 	EmailVerifyTTL time.Duration
 	// OTPTTL 是**邮箱验证码**的有效期（PR_OTP_TTL，默认 5m）。
 	//

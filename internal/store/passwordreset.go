@@ -9,17 +9,22 @@ import (
 	"gorm.io/gorm"
 )
 
-// 一次性邮件令牌的仓储（验证邮箱 / 重置密码）。
+// 一次性邮件令牌的仓储（验证邮箱 / 验证码改密）。
 //
 // 本文件的全部价值集中在**两件事**上：
 //
 //  1. **"校验"与"标记已用"必须是同一条语句**（`UPDATE ... WHERE used_at IS NULL
 //     ... RETURNING`）。分两步（先 SELECT 再 UPDATE）会留下并发窗口：两个同时
-//     到达的请求都能通过校验，于是同一个 token 被用两次 —— 对重置密码来说，
+//     到达的请求都能通过校验，于是同一个 token 被用两次 —— 对验证码来说，
 //     那等于"截获过邮件的人可以再改一次密码"。
-//  2. **跨表动作必须在同一个事务里**。改密要同时成立四件事：令牌标记已用、
-//     口令换掉、该用户全部会话撤销、token_version 自增。少任何一件都会留下一个
-//     fail-open 的窗口（token 可重放 / 旧 access token 还能用）。
+//  2. **跨表动作必须在同一个事务里**。验证邮箱要同时成立两件事：令牌标记已用、
+//     email_verified_at 落值。少任何一件都会留下一个 fail-open 的窗口
+//     （token 可重放 / 邮箱已验证但库里没记）。
+//
+// ⚠ 历史上还有第三条（"改密 = 消费令牌 + 换口令 + 撤销全部会话 + 版本号自增"
+// 四合一）。那条链接通道已随 `/api/auth/reset` 一起下线；改密码现在走验证码，
+// 由 store.ConsumeEmailOTP（消费码）+ store.SetPasswordHash / RevokeAllSessions /
+// BumpTokenVersion（三步）组成，见 service.replacePassword。
 
 // InsertPasswordReset 写入一行一次性令牌（同步写，见 service 的 syncWriteReason 第 3 条）。
 //
@@ -47,8 +52,8 @@ func normalizePasswordReset(t *PasswordReset) error {
 		return errors.New("store: 收到 nil 令牌")
 	}
 	if !isValidTokenPurpose(t.Purpose) {
-		return fmt.Errorf("store: 非法的 purpose %q（允许 %s / %s / %s）",
-			t.Purpose, PurposeEmailVerify, PurposePasswordReset, PurposeEmailOTP)
+		return fmt.Errorf("store: 非法的 purpose %q（允许 %s / %s）",
+			t.Purpose, PurposeEmailVerify, PurposeEmailOTP)
 	}
 	hash, err := canonicalTokenHash(t.TokenHash)
 	if err != nil {
@@ -80,63 +85,6 @@ func normalizePasswordReset(t *PasswordReset) error {
 		t.IP = &v
 	}
 	return nil
-}
-
-// ConsumePasswordReset 原子地消费一个**重置**令牌并把新口令落库。
-//
-// 四件事在**一个事务**里完成：
-//
-//	① 令牌：used_at = now()（WHERE used_at IS NULL AND expires_at > now()）
-//	② 口令：users.password_hash = 新哈希
-//	③ 会话：该用户全部未撤销会话置 revoked
-//	④ 版本号：users.token_version + 1
-//
-// 为什么四件事必须一起成立：①③④ 里任何一件单独失败都留下一个可用的旧凭据
-// （token 可重放 / 旧 refresh 还能刷新 / 旧 access 还没失效），而用户看到的却是
-// "改密成功"。反过来 ② 失败而 ① 成功，用户要重新走一遍找回 —— 那是安全的一侧。
-//
-// 返回值 ok=false 表示令牌不可用（不存在 / purpose 不符 / 已用 / 已过期）。
-// 这四种情况**刻意不区分**：区分它们就等于给攻击者一条探测通道。
-func (s *Store) ConsumePasswordReset(ctx context.Context, tokenHash, newPasswordHash string) (userID int64, ok bool, err error) {
-	hash, err := canonicalTokenHash(tokenHash)
-	if err != nil {
-		// 形状不对的哈希直接当"不可用"，不去查库（库里不可能有这种行）。
-		return 0, false, nil
-	}
-	if newPasswordHash == "" {
-		return 0, false, errors.New("store: ConsumePasswordReset 缺少新口令哈希")
-	}
-
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var row struct {
-			UserID int64
-			Email  *string
-		}
-		if err := tx.Raw(consumeTokenSQL, hash, PurposePasswordReset).Scan(&row).Error; err != nil {
-			return fmt.Errorf("store: 消费重置令牌失败: %w", err)
-		}
-		if row.UserID == 0 {
-			// 0 行：令牌不存在/已用/过期/purpose 不符。不是错误，是"不可用"。
-			return nil
-		}
-		userID, ok = row.UserID, true
-
-		if err := tx.Model(&User{}).Where("id = ?", row.UserID).
-			Update("password_hash", newPasswordHash).Error; err != nil {
-			return fmt.Errorf("store: 更新口令失败: %w", err)
-		}
-		if _, err := revokeAllSessionsIn(ctx, tx, row.UserID); err != nil {
-			return err
-		}
-		if _, err := bumpTokenVersionIn(ctx, tx, row.UserID); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, false, err
-	}
-	return userID, ok, nil
 }
 
 // ConsumeEmailVerify 原子地消费一个**验证**令牌并把该账号的邮箱标记为已验证。
@@ -222,6 +170,11 @@ const consumeTokenSQL = `UPDATE password_resets
 RETURNING user_id, email`
 
 // isValidTokenPurpose 与 DDL 的 CHECK 约束对应（应用层先给可读错误）。
+//
+// ⚠ 这里**比 DDL 更窄**：DDL 还允许 `'password_reset'`（迁移 0008 的历史遗留，
+// 见 models.go 的说明），但应用层不再接受它 —— 那条链路已删除，允许写入只会
+// 制造永远不会被消费的死行。这类"应用层比 DB 更严"是刻意的：DB 的 CHECK 是
+// 最后一道兜底（且受「只做加法」规约约束不能收窄），应用层才是真正的策略。
 func isValidTokenPurpose(p string) bool {
-	return p == PurposeEmailVerify || p == PurposePasswordReset || p == PurposeEmailOTP
+	return p == PurposeEmailVerify || p == PurposeEmailOTP
 }

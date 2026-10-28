@@ -334,29 +334,6 @@ func (f *fakeStore) consume(tokenHash, purpose string) *store.PasswordReset {
 	return found
 }
 
-func (f *fakeStore) ConsumePasswordReset(_ context.Context, tokenHash, newPasswordHash string) (int64, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	r := f.consume(tokenHash, store.PurposePasswordReset)
-	if r == nil {
-		return 0, false, nil
-	}
-	u, ok := f.users[r.UserID]
-	if !ok {
-		return 0, false, nil
-	}
-	u.PasswordHash = newPasswordHash
-	// 改密必须让全部会话立刻失效 + 版本号自增（真 store 在一个事务里做这四件事）。
-	for _, s := range f.sessions {
-		if s.UserID == r.UserID && s.RevokedAt == nil {
-			now := time.Now()
-			s.RevokedAt = &now
-		}
-	}
-	u.TokenVersion++
-	return r.UserID, true, nil
-}
-
 func (f *fakeStore) ConsumeEmailVerify(_ context.Context, tokenHash string) (int64, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -692,12 +669,9 @@ func newTestService(t *testing.T, f *fakeStore, opts AccountOptions) *AccountSer
 	if opts.RefreshTTL == 0 {
 		opts.RefreshTTL = 30 * 24 * time.Hour
 	}
-	// 邮件链路的三项在生产里由 config 提供（见 bootstrap.NewAccountService）。
+	// 邮件链路的各项在生产里由 config 提供（见 bootstrap.NewAccountService）。
 	// 这里给测试默认值：不填的话 NewAccountService 会拒绝构造（TTL 必须为正、
 	// baseURL 不能为空），那样每一个既有用例都会因为"少填一个测试参数"而变红。
-	if opts.ResetTTL == 0 {
-		opts.ResetTTL = 30 * time.Minute
-	}
 	if opts.EmailVerifyTTL == 0 {
 		opts.EmailVerifyTTL = 24 * time.Hour
 	}

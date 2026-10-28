@@ -91,14 +91,28 @@ func newOTP() (code string, hash string, err error) {
 	return code, HashOpaqueToken(code), nil
 }
 
+// 验证码邮件的两种「用途」。
+//
+// ⚠ 它们**只决定邮件文案**（"完成注册"还是"重置密码"），**不是**数据库里的
+// `password_resets.purpose` —— 落库时两种都写成 store.PurposeEmailOTP
+// （见 dispatchAccountOTP 与 AttachDraftOTP）。刻意分成两套取值：
+// 邮件的"为什么要发这封信"与库里的"这行是什么凭据"是两件事，混用会让
+// 某天想加第三种邮件（比如"换绑邮箱确认"）时被迫往 DB 的 CHECK 里加值。
+const (
+	// otpMailRegister 是注册第二段的验证码邮件。
+	otpMailRegister = "register"
+	// otpMailPassword 是"找回密码（验证码改密）"的验证码邮件。
+	otpMailPassword = "password"
+)
+
 // otpEmailBody 组装验证码邮件正文。
 //
 // 与链接邮件同样只放"用户要做的那一件事"：验证码、有效期、不是你本人就忽略。
 // **不**放用户名/昵称 —— 收件箱被转发时，正文越少越好。
-func otpEmailBody(purpose, code string, ttl time.Duration) string {
+func otpEmailBody(kind, code string, ttl time.Duration) string {
 	action := "完成注册"
-	if purpose == store.PurposePasswordReset {
-		action = "重置密码"
+	if kind == otpMailPassword {
+		action = "找回密码"
 	}
 	return fmt.Sprintf(`%s · 验证码
 
@@ -113,26 +127,37 @@ func otpEmailBody(purpose, code string, ttl time.Duration) string {
 }
 
 // otpEmailSubject 返回主题（常量，不含用户输入 —— 邮件头是 CRLF 注入的经典位置）。
-func otpEmailSubject(purpose string) string {
-	if purpose == store.PurposePasswordReset {
-		return emailBrandName + "：重置密码验证码"
+func otpEmailSubject(kind string) string {
+	if kind == otpMailPassword {
+		return emailBrandName + "：找回密码验证码"
 	}
 	return emailBrandName + "：注册验证码"
 }
 
-// SendAccountOTP 给**已存在的账号**发一条验证码（改密码用）。
+// SendAccountOTP 给**已存在的账号**发一条「找回密码」验证码。
 //
-// 门控顺序与 Forgot 逐条对齐（顺序本身就是安全性质）：
+// 门控顺序（顺序本身就是安全性质）：
 //
 //	① 邮箱格式（不依赖库）→ ErrBadEmail
 //	② 邮件能力（不依赖库）→ ErrEmailOTPUnavailable
 //	③ 查库：**任何结果都返回 nil**（不泄露账号是否存在）
-//	④ 未验证 / 被封禁 → 返回 nil（不发信，理由同 Forgot）
+//	④ 被封禁 → 返回 nil（不发信：改密也登不进来，见下）
 //	⑤ 冷却期内 → 也返回 nil（**不**报错：报错就等于确认了账号存在）
 //
-// 唯一的例外是冷却期：它在"账号存在且可发信"之后才判断，所以**报错会泄露存在性**。
-// 因此这里选择返回 nil 而不是 ErrOTPTooSoon —— 用户看到的是"如果这个邮箱可用，
-// 验证码已经发出"，而他多试几次就会自然拿到新码（冷却期只有 60 秒）。
+// # 为什么**不**再要求 email_verified_at
+//
+// 这条门控曾经存在，是从链接通道原样搬过来的。它对链接是必需的（否则攻击者
+// 填受害者的邮箱，受害者点开链接就把**攻击者账号**的密码改了），但对验证码
+// 完全不适用：码只发给这个邮箱的真实持有者，攻击者填别人的地址只能让受害者
+// 收到一封莫名其妙的验证码 —— 他自己拿不到那 6 位数字，也就改不了任何东西。
+//
+// 而这道门控的代价是真实的：老账号（早期单段注册建的、或那封 24 小时的验证信
+// 过期/进垃圾箱/当时实例根本没配 SMTP）会永久停在"未验证"，于是**永远找不回
+// 密码**，且因为对外恒定 200，用户只会看到"已发送"却收不到信，无从自查。
+// 这曾是一个真实的支持问题，也正是本次改造要解掉的那个。
+//
+// 被封禁的账号仍然不发信：改密成功也登不进来（Login 在口令通过之后仍会因
+// status 拒绝），发信只会把发信配额花在无效请求上。这个门控同样不对外可见。
 func (s *AccountService) SendAccountOTP(ctx context.Context, email, ip, ua string) (devCode string, err error) {
 	addr, err := CanonicalEmail(email)
 	if err != nil {
@@ -152,7 +177,7 @@ func (s *AccountService) SendAccountOTP(ctx context.Context, email, ip, ua strin
 	default:
 		return "", err
 	}
-	if u.Email == nil || u.EmailVerifiedAt == nil || u.Status != store.StatusActive {
+	if u.Status != store.StatusActive {
 		return "", nil
 	}
 
@@ -166,23 +191,27 @@ func (s *AccountService) SendAccountOTP(ctx context.Context, email, ip, ua strin
 		return "", nil
 	}
 
-	dev, err := s.dispatchAccountOTP(ctx, u, addr, store.PurposePasswordReset, ip, ua)
+	dev, err := s.dispatchAccountOTP(ctx, u, addr, ip, ua)
 	if err != nil {
 		if errors.Is(err, mail.ErrMailUnavailable) {
 			return "", err
 		}
-		log.Printf("[WARN] 改密码验证码发送失败：user=%d %v", u.ID, err)
+		log.Printf("[WARN] 找回密码验证码发送失败：user=%d %v", u.ID, err)
 		return "", nil
 	}
 	return dev, nil
 }
 
-// VerifyAccountOTP 校验**改密码**用的验证码，通过后直接设置新口令。
+// ResetPasswordWithOTP 校验「找回密码」验证码，通过后直接设置新口令。
 //
 // 为什么把"校验 + 改密"合成一个用例而不是两步：两步之间需要一个"已验证"的中间凭据，
 // 而那等于再发明一种令牌。合成一步则校验通过即改密，中间没有任何可重放的窗口。
 //
-// 顺序：口令策略（廉价）→ 哈希（昂贵）→ 原子的"消费验证码 + 改密 + 撤销会话"。
+// 与 SendAccountOTP 对齐：这里同样**不要求** email_verified_at ——
+// 能拿出这个码本身就是归属证明（码只发到这个邮箱），再要求一次"已验证"
+// 只会让未验证邮箱的账号连最后一步也走不通。
+//
+// 顺序：口令策略（廉价）→ 查库 → 校验码 → 哈希（昂贵）→ 改密+撤销会话。
 // 把策略检查放在哈希之前：弱口令不该烧掉一条有效的验证码。
 func (s *AccountService) ResetPasswordWithOTP(ctx context.Context, email, code, password string) error {
 	addr, err := CanonicalEmail(email)
@@ -202,7 +231,7 @@ func (s *AccountService) ResetPasswordWithOTP(ctx context.Context, email, code, 
 	default:
 		return err
 	}
-	if u.Email == nil || u.EmailVerifiedAt == nil || u.Status != store.StatusActive {
+	if u.Status != store.StatusActive {
 		return ErrOTPInvalid
 	}
 
@@ -235,9 +264,13 @@ func (s *AccountService) ResetPasswordWithOTP(ctx context.Context, email, code, 
 
 // replacePassword 换口令并撤销该账号全部会话（含 token_version 自增）。
 //
-// 复用 store 里既有的实现路径：`ConsumePasswordReset` 在事务里做的就是
-// "改密 + 撤销全部会话 + 版本号自增"。这里没有令牌可消费，所以走等价的三步 ——
-// 但必须**在同一语义下**完成，否则旧 access token 还能用。
+// 三步缺一不可，且**顺序无关但全都要做**：少撤销会话，旧 refresh 还能刷新；
+// 少自增版本号，旧 access token 在 15 分钟内仍然有效。用户看到的却是"改密成功"。
+//
+// 为什么不合成一个 store 方法（像已删除的 ConsumePasswordReset 那样）：
+// 验证码的消费已经在 ConsumeEmailOTP 里独立完成（那是它自己的单次使用点与错误计数点），
+// 因此这里没有"待消费的令牌"可以一并塞进同一个事务。硬合并会把"一条码最多错 5 次"
+// 的计数逻辑与改密耦合在一起，而它们本该各自可测。
 func (s *AccountService) replacePassword(ctx context.Context, userID int64, newHash string) error {
 	if err := s.store.SetPasswordHash(ctx, userID, newHash); err != nil {
 		return err
@@ -259,7 +292,7 @@ func (s *AccountService) replacePassword(ctx context.Context, userID int64, newH
 // 返回的 `devCode` 只在 `otpDevEcho` 打开时非空（**仅本机开发**）：
 // 生产恒为空串，因此它不会经任何路径泄漏到响应体里。
 func (s *AccountService) dispatchAccountOTP(
-	ctx context.Context, u *store.User, addr, purpose, ip, ua string,
+	ctx context.Context, u *store.User, addr, ip, ua string,
 ) (devCode string, err error) {
 	if s.mail == nil && !s.otpDevEcho {
 		return "", mail.ErrMailUnavailable
@@ -295,10 +328,10 @@ func (s *AccountService) dispatchAccountOTP(
 
 	msg := mail.Outbound{
 		To:      addr,
-		Subject: otpEmailSubject(purpose),
-		Body:    otpEmailBody(purpose, code, ttl),
+		Subject: otpEmailSubject(otpMailPassword),
+		Body:    otpEmailBody(otpMailPassword, code, ttl),
 		// Tag 里**不放验证码**：日志是给人看的排障信息，不是凭据载体。
-		Tag: fmt.Sprintf("otp.%s user=%d", purpose, u.ID),
+		Tag: fmt.Sprintf("otp.%s user=%d", otpMailPassword, u.ID),
 	}
 	if s.mail == nil {
 		// 只可能是 dev echo 模式：不投递，只回显。

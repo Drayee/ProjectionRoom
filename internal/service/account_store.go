@@ -172,14 +172,10 @@ func (a *AccountStoreAdapter) RevokeAllSessions(ctx context.Context, userID int6
 	return a.store.RevokeAllSessions(ctx, userID)
 }
 
-// —— 一次性邮件令牌（验证邮箱 / 重置密码）——
+// —— 一次性邮件令牌（验证邮箱）——
 
 func (a *AccountStoreAdapter) InsertPasswordReset(ctx context.Context, t *store.PasswordReset) error {
 	return a.store.InsertPasswordReset(ctx, t)
-}
-
-func (a *AccountStoreAdapter) ConsumePasswordReset(ctx context.Context, tokenHash, newPasswordHash string) (int64, bool, error) {
-	return a.store.ConsumePasswordReset(ctx, tokenHash, newPasswordHash)
 }
 
 func (a *AccountStoreAdapter) ConsumeEmailVerify(ctx context.Context, tokenHash string) (int64, bool, error) {

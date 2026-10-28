@@ -136,7 +136,6 @@ const (
 	envSMTPTLS        = "PR_SMTP_TLS"
 	envSMTPTimeout    = "PR_SMTP_TIMEOUT"
 	envPublicBaseURL  = "PR_PUBLIC_BASE_URL"
-	envResetTTL       = "PR_RESET_TTL"
 	envEmailVerifyTTL = "PR_EMAIL_VERIFY_TTL"
 	envOTPTTL         = "PR_OTP_TTL"
 	envOTPDevEcho     = "PR_OTP_DEV_ECHO"
@@ -216,14 +215,11 @@ const (
 	// 且症状是"链接点不开/点到了别人的站点"，极难归因到自己少配了一个变量。
 	// 新策略要求功能完整，因此它改成必填（缺了就在启动期报出来）。
 	//
-	// DefaultResetTTL = 30m（需求口径）：一封邮件里的链接，暴露面比 access token 大。
-	DefaultResetTTL = 30 * time.Minute
-	// MinResetTTL / MaxResetTTL：太短（<1m）会让"收到信 → 点开"来不及；
-	// 太长（>24h）等于把一封长期有效的凭据留在邮箱里。
-	MinResetTTL = time.Minute
-	MaxResetTTL = 24 * time.Hour
 	// DefaultEmailVerifyTTL = 24h：验证不是紧急动作，用户可能第二天才点开那封信；
 	// 而它的危害面更小（通过验证只打开找回能力，不直接改凭据）。
+	//
+	// ⚠ 曾有一组 DefaultResetTTL / MinResetTTL / MaxResetTTL（PR_RESET_TTL），
+	// 随链接式改密一起删除 —— 改密码现在只走验证码，TTL 由下面的 OTPTTL 决定。
 	DefaultEmailVerifyTTL = 24 * time.Hour
 	// MaxEmailVerifyTTL = 30 天：再长就等于"永久有效的验证链接"。
 	MaxEmailVerifyTTL = 30 * 24 * time.Hour
@@ -517,7 +513,6 @@ func Default() *Config {
 			SMTPTLS:      DefaultSMTPTLS,
 			SMTPTimeout:  DefaultSMTPTimeout,
 			// PublicBaseURL 故意留空（必填，见 DefaultPublicBaseURL 处的说明）。
-			ResetTTL:       DefaultResetTTL,
 			EmailVerifyTTL: DefaultEmailVerifyTTL,
 			OTPTTL:         DefaultOTPTTL,
 		},
@@ -1418,17 +1413,6 @@ func applyAuthEnv(ac *AuthConfig) error {
 	}
 	if v := strings.TrimSpace(ac.PublicBaseURL); v != "" {
 		ac.PublicBaseURL = strings.TrimRight(v, "/")
-	}
-	if v := os.Getenv(envResetTTL); v != "" {
-		d, err := positiveDuration(envResetTTL, v)
-		if err != nil {
-			return err
-		}
-		if d < MinResetTTL || d > MaxResetTTL {
-			return fmt.Errorf("config: %s 必须落在 [%s, %s] 区间, got %q",
-				envResetTTL, MinResetTTL, MaxResetTTL, v)
-		}
-		ac.ResetTTL = d
 	}
 	if v := os.Getenv(envEmailVerifyTTL); v != "" {
 		d, err := positiveDuration(envEmailVerifyTTL, v)

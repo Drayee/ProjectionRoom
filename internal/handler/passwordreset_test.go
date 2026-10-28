@@ -22,19 +22,24 @@ import (
 	"ProjectionRoom/internal/store"
 )
 
-// —— 一次性邮件链路的**协议面**验收 ——
+// —— 账号邮件链路的**协议面**验收 ——
 //
 // 这一组用例全部跑在**真实**的 service 之上（只把 store 换成内存实现、把发信出口
 // 换成一个捕获型假实现），因此它们验的是真实的协议行为，不是对桩的断言：
 //
-//   - forgot 对"命中 / 未命中 / 未验证"三条路径的**响应字节**是否逐字相同；
+//   - 发码接口对"命中 / 未命中 / 未验证"三条路径的**响应字节**是否逐字相同；
 //   - 双维度限速（每邮箱 / 每 IP）与 503 降级；
 //   - 发信是否真的在请求路径之外（用一个卡住的 sender 断言 handler 立刻返回）；
-//   - 明文令牌是否泄漏到响应体或日志里。
+//   - 明文令牌/验证码是否泄漏到响应体或日志里。
 //
-// ⚠ 端点名是冻结的前端契约：`/api/auth/forgot`、`/api/auth/reset`、
-// **`/api/auth/verify-email`**（不是 `verify`）。邮件里的验证链接把用户带到
-// 前端的 `/verify#token=…` 页，那一页再 POST 到 `/api/auth/verify-email`。
+// ⚠ 端点名是冻结的前端契约：
+//   - `/api/auth/password/otp`（发码，**恒定 200**）
+//   - `/api/auth/password/otp/reset`（凭码改密，204）
+//   - **`/api/auth/verify-email`**（不是 `verify`）—— 邮件里的验证链接把用户带到
+//     前端的 `/verify#token=…` 页，那一页再 POST 到这里。
+//
+// ⚠ `/api/auth/forgot` 与 `/api/auth/reset` 已删除（链接式改密下线）。
+// 本文件保留一条回归断言钉住"它们确实不存在"，防止有人以为删漏了又加回去。
 
 // captureSender 是 mail.Sender 的捕获实现（保留每一封发出去的邮件）。
 type captureSender struct {
@@ -89,7 +94,7 @@ type resetEnv struct {
 
 // newResetEnv 组装"真实 service + 内存 store + 捕获型发信"。
 //
-// withMail=false 表示**邮件能力未配置**（Mail 接口为 nil）：此时 forgot 必须 503。
+// withMail=false 表示**邮件能力未配置**（Mail 接口为 nil）：此时发码必须 503。
 // 注意这里刻意用一个 nil 接口而不是"类型化 nil 的指针"—— 后者会让 service 的
 // `s.mail == nil` 判断失效（那正是 bootstrap 里那段注释在防的坑）。
 func newResetEnv(t *testing.T, withMail bool, mutate func(*config.Config)) *resetEnv {
@@ -117,7 +122,6 @@ func newResetEnv(t *testing.T, withMail bool, mutate func(*config.Config)) *rese
 	svc, err := service.NewAccountService(st, signer, tickets, service.AccountOptions{
 		BcryptCost:     auth.MinBcryptCost,
 		RefreshTTL:     time.Hour,
-		ResetTTL:       30 * time.Minute,
 		EmailVerifyTTL: 24 * time.Hour,
 		OTPTTL:         5 * time.Minute,
 		PublicBaseURL:  "https://pr.example.com",
@@ -136,8 +140,8 @@ func newResetEnv(t *testing.T, withMail bool, mutate func(*config.Config)) *rese
 	return &resetEnv{engine: engine, cfg: cfg, st: st, sender: sender, close: closeQueue}
 }
 
-// seedVerified 造一个"邮箱已验证"的账号（这是找回功能的前置条件）。
-func (e *resetEnv) seedVerified(t *testing.T, username, email, password string) *store.User {
+// seedWithEmail 造一个账号并绑定邮箱（verified 决定它是否已验证）。
+func (e *resetEnv) seedWithEmail(t *testing.T, username, email, password string, verified bool) *store.User {
 	t.Helper()
 	u := e.st.seed(username, store.RoleUser, store.StatusActive)
 	hash, err := auth.HashPassword(password, auth.MinBcryptCost)
@@ -148,12 +152,22 @@ func (e *resetEnv) seedVerified(t *testing.T, username, email, password string) 
 	e.st.users[u.ID].PasswordHash = hash
 	e.st.mu.Unlock()
 
-	now := time.Now()
-	if err := e.st.SetUserEmail(context.Background(), u.ID, email, &now); err != nil {
+	var verifiedAt *time.Time
+	if verified {
+		now := time.Now()
+		verifiedAt = &now
+	}
+	if err := e.st.SetUserEmail(context.Background(), u.ID, email, verifiedAt); err != nil {
 		t.Fatalf("设置邮箱失败：%v", err)
 	}
 	got, _ := e.st.user(u.ID)
 	return &got
+}
+
+// seedVerified 是 seedWithEmail(verified=true) 的简写（旧用例的调用形态）。
+func (e *resetEnv) seedVerified(t *testing.T, username, email, password string) *store.User {
+	t.Helper()
+	return e.seedWithEmail(t, username, email, password, true)
 }
 
 // resetRows 数一下内存 store 里某个用途的令牌行数（"内部有没有真的动手"的可观测判据）。
@@ -183,27 +197,29 @@ func (e *resetEnv) tokenHashSeen(token string) bool {
 
 // —— 恒定响应（枚举防护） ——
 
-// TestForgotResponseIsByteIdentical 是本轮**最重要**的一条判据：
+// TestPasswordOTPResponseIsByteIdentical 是本轮**最重要**的一条判据：
 // 不论邮箱是否注册、是否已验证，状态码与响应体必须逐字相同。
-func TestForgotResponseIsByteIdentical(t *testing.T) {
+func TestPasswordOTPResponseIsByteIdentical(t *testing.T) {
 	env := newResetEnv(t, true, nil)
 	defer env.close()
 
 	env.seedVerified(t, "alice", "alice@example.com", "abcd1234")
+	env.seedWithEmail(t, "bob", "bob@example.com", "abcd1234", false)
 
-	bodies := make([][]byte, 0, 4)
+	bodies := make([][]byte, 0, 5)
 	for _, email := range []string{
 		"alice@example.com",  // 已注册 + 已验证
+		"bob@example.com",    // 已注册 + **未验证**（旧通道下这条路不发信）
 		"nobody@example.com", // 账号不存在
 		"ghost@example.com",  // 账号不存在（第二个样本，排除偶然等价）
 		"drayee@qq.com",      // 账号不存在（真实域名形态）
 	} {
-		w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot",
+		w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp",
 			`{"email":"`+email+`"}`, "")
 		if w.Code != http.StatusOK {
 			t.Fatalf("邮箱 %s 应当恒定 200，实际 %d（body=%s）", email, w.Code, w.Body.String())
 		}
-		if ct := w.Header().Get("Content-Type"); ct != forgotResponseContentType {
+		if ct := w.Header().Get("Content-Type"); ct != otpSentResponseContentType {
 			t.Fatalf("Content-Type 也必须恒定：%q（路径 %s）", ct, email)
 		}
 		bodies = append(bodies, w.Body.Bytes())
@@ -217,123 +233,102 @@ func TestForgotResponseIsByteIdentical(t *testing.T) {
 		t.Fatalf("响应体形状不对：%q", bodies[0])
 	}
 
-	// 内部确实只有一条真的走了发信（其余三条被门控挡住，但对外看不出来）。
-	if got := env.sender.count(); got != 1 {
-		t.Fatalf("只有已验证的邮箱该发信，实际 %d 封", got)
+	// 内部：**两个**存在的邮箱都发了信（未验证也发），不存在的那三个没发。
+	if !waitUntil(func() bool { return env.sender.count() == 2 }) {
+		t.Fatalf("应当只有 2 个存在的邮箱收到码，实际 %d 封", env.sender.count())
 	}
 }
 
-// TestForgotUnverifiedEmailSendsNothingButStillReturns200 单独钉住"验证门控"
-// 的可观测判据：对外 200，对内 0 封、0 行。
-func TestForgotUnverifiedEmailSendsNothingButStillReturns200(t *testing.T) {
+// TestPasswordOTPReachesUnverifiedEmail 单独钉住本次改造的核心：
+// 未验证邮箱**也**收得到码（旧 Forgot 在这里是 0 封）。
+func TestPasswordOTPReachesUnverifiedEmail(t *testing.T) {
 	env := newResetEnv(t, true, nil)
 	defer env.close()
 
-	// 注册一个账号：邮箱落库但未验证。
-	w := doJSON(t, env.engine, http.MethodPost, "/api/auth/register",
-		`{"username":"bob","displayName":"鲍勃","password":"abcd1234","email":"bob@example.com"}`, "")
-	if w.Code != http.StatusCreated {
-		t.Fatalf("注册应当 201，实际 %d（%s）", w.Code, w.Body.String())
-	}
-	// 注册本身发了一封验证信（等它真的投递出来）。
-	if !waitUntil(func() bool { return env.sender.count() == 1 }) {
-		t.Fatalf("注册应当发一封验证信，实际 %d 封", env.sender.count())
-	}
+	env.seedWithEmail(t, "bob", "bob@example.com", "abcd1234", false)
 
-	before := env.sender.count()
-	w = doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"bob@example.com"}`, "")
+	w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"bob@example.com"}`, "")
 	if w.Code != http.StatusOK || string(w.Body.Bytes()) != `{"status":"sent"}` {
-		t.Fatalf("未验证邮箱的找回也必须恒定 200，实际 %d %q", w.Code, w.Body.String())
+		t.Fatalf("未验证邮箱的发码也必须恒定 200，实际 %d %q", w.Code, w.Body.String())
 	}
-	// 给它一段时间（如果真的发了，异步投递足够跑完）。
-	time.Sleep(100 * time.Millisecond)
-	if got := env.sender.count() - before; got != 0 {
-		t.Fatalf("未验证的邮箱不该收到重置信，实际 %d 封", got)
+	if !waitUntil(func() bool { return env.sender.count() == 1 }) {
+		t.Fatalf("未验证邮箱必须真的收到码（这是本次改造的目的），实际 %d 封", env.sender.count())
 	}
-	// 库里也不该留下重置用途的行（第二个可观测判据）。
-	if got := env.resetRows(store.PurposePasswordReset); got != 0 {
-		t.Fatalf("未验证的邮箱不该留下重置令牌行，实际 %d 行", got)
+	if got := env.resetRows(store.PurposeEmailOTP); got != 1 {
+		t.Fatalf("应当留下 1 行验证码，实际 %d 行", got)
 	}
-	if got := env.resetRows(store.PurposeEmailVerify); got != 1 {
-		t.Fatalf("注册应当留下 1 行验证令牌，实际 %d 行", got)
+	// 发码**不**等于验证：email_verified_at 不该被动。
+	if got := env.resetRows(store.PurposeEmailVerify); got != 0 {
+		t.Fatalf("发码不该产生验证链接用途的行，实际 %d 行", got)
 	}
 }
 
-// TestForgotBadEmailIs400 验参数非法的分支（与"存不存在"无关）。
-func TestForgotBadEmailIs400(t *testing.T) {
+// TestLegacyLinkEndpointsAreGone 钉住"链接式改密确实下线了"。
+//
+// 为什么要写：删端点与"忘了注册"在运行期长得一样（都 404），
+// 而这条判据把"它不该存在"变成可执行的事实 —— 也防止有人日后"顺手补回去"。
+func TestLegacyLinkEndpointsAreGone(t *testing.T) {
+	env := newResetEnv(t, true, nil)
+	defer env.close()
+
+	for _, path := range []string{"/api/auth/forgot", "/api/auth/reset"} {
+		w := doJSON(t, env.engine, http.MethodPost, path,
+			`{"email":"a@b.com","token":"x","password":"abcd1234"}`, "")
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s 应当已下线（404），实际 %d（%s）", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+// TestPasswordOTPBadEmailIs400 验参数非法的分支（与"存不存在"无关）。
+func TestPasswordOTPBadEmailIs400(t *testing.T) {
 	env := newResetEnv(t, true, nil)
 	defer env.close()
 	for _, body := range []string{
 		`{"email":""}`, `{"email":"not-an-email"}`, `{"email":"a b@c.com"}`, `{`, `{"email":"a@b.com\nBcc: x@y.com"}`,
 	} {
-		w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", body, "")
+		w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", body, "")
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("body=%s 应当 400，实际 %d（%s）", body, w.Code, w.Body.String())
 		}
 	}
 }
 
-// TestForgotRateLimitedPerEmailAndPerIP 覆盖两条闸门（需求里的 5/邮箱、20/IP）。
-func TestForgotRateLimitedPerEmailAndPerIP(t *testing.T) {
-	t.Run("每邮箱 5 次/小时", func(t *testing.T) {
-		env := newResetEnv(t, true, func(cfg *config.Config) {
-			cfg.IPC.MailPerEmailPerHour = 5
-			cfg.IPC.MailPerIPPerHour = 1_000_000
-		})
-		defer env.close()
-		env.seedVerified(t, "alice", "alice@example.com", "abcd1234")
-
-		for i := 0; i < 5; i++ {
-			w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"alice@example.com"}`, "")
-			if w.Code != http.StatusOK {
-				t.Fatalf("第 %d 次应当 200，实际 %d", i+1, w.Code)
-			}
-		}
-		w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"alice@example.com"}`, "")
-		if w.Code != http.StatusTooManyRequests {
-			t.Fatalf("第 6 次应当 429，实际 %d", w.Code)
-		}
-		assertRateLimitedBody(t, w.Body.Bytes())
-
-		// 关键：限速键是**归一化后**的邮箱，所以大小写不同也共享同一个桶
-		//（否则 5 封/小时会变成 10 封/小时）。
-		w = doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"ALICE@Example.COM"}`, "")
-		if w.Code != http.StatusTooManyRequests {
-			t.Fatalf("大小写不同的同一邮箱应当共享限速桶，实际 %d", w.Code)
-		}
-		// 而每 IP 那条闸门**没有**被用到（它开到 100 万），说明两条闸门确实是独立的。
-		if env.cfg.IPC.MailPerIPPerHour != 1_000_000 {
-			t.Fatal("这一条子用例只该动每邮箱闸门")
-		}
+// TestPasswordOTPRateLimitedPerEmail 覆盖**每邮箱**闸门（5/邮箱/小时）。
+//
+// 与旧 forgot 的差别：这里只测每邮箱那条。每 IP 那条在 OTP 路径上挂的是
+// otpSendLimiter（与注册共用），它已经由注册侧的用例覆盖。
+func TestPasswordOTPRateLimitedPerEmail(t *testing.T) {
+	env := newResetEnv(t, true, func(cfg *config.Config) {
+		cfg.IPC.MailPerEmailPerHour = 5
+		// 每 IP 那条开到很大，确保这里打到的只可能是每邮箱闸门。
+		cfg.IPC.RegisterPerMinute = 1_000_000
+		cfg.IPC.RegisterBurst = 1_000_000
 	})
+	defer env.close()
+	env.seedVerified(t, "alice", "alice@example.com", "abcd1234")
 
-	t.Run("每 IP 20 次/小时", func(t *testing.T) {
-		env := newResetEnv(t, true, func(cfg *config.Config) {
-			cfg.IPC.MailPerEmailPerHour = 1_000_000
-			cfg.IPC.MailPerIPPerHour = 20
-		})
-		defer env.close()
+	for i := 0; i < 5; i++ {
+		w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"alice@example.com"}`, "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("第 %d 次应当 200，实际 %d（%s）", i+1, w.Code, w.Body.String())
+		}
+	}
+	w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"alice@example.com"}`, "")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("第 6 次应当 429，实际 %d", w.Code)
+	}
+	assertRateLimitedBody(t, w.Body.Bytes())
 
-		// 每次换一个邮箱：这样打到的只可能是 IP 那条闸门。
-		for i := 0; i < 20; i++ {
-			w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot",
-				`{"email":"user`+strconv.Itoa(i)+`@example.com"}`, "")
-			if w.Code != http.StatusOK {
-				t.Fatalf("第 %d 次应当 200，实际 %d（%s）", i+1, w.Code, w.Body.String())
-			}
-		}
-		w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"last@example.com"}`, "")
-		if w.Code != http.StatusTooManyRequests {
-			t.Fatalf("第 21 次应当 429，实际 %d", w.Code)
-		}
-		assertRateLimitedBody(t, w.Body.Bytes())
-	})
+	// 关键：限速键是**归一化后**的邮箱，所以大小写不同也共享同一个桶
+	//（否则 5 封/小时会变成 10 封/小时）。
+	w = doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"ALICE@Example.COM"}`, "")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("大小写不同的同一邮箱应当共享限速桶，实际 %d", w.Code)
+	}
 }
 
 // assertRateLimitedBody 断言 429 的响应体形状。
-//
-// 两条闸门（每邮箱 / 每 IP）用**同一句话**：否则攻击者能从文案上区分自己撞的是哪一条 ——
-// 而"撞了每邮箱闸门"意味着"这个地址最近被单独计数过"。
 func assertRateLimitedBody(t *testing.T, body []byte) {
 	t.Helper()
 	var got map[string]string
@@ -343,23 +338,23 @@ func assertRateLimitedBody(t *testing.T, body []byte) {
 	if got["code"] != "RATE_LIMITED" {
 		t.Fatalf("429 的错误码应当是 RATE_LIMITED，实际 %q", got["code"])
 	}
-	if !strings.Contains(got["error"], "找回密码请求过于频繁") {
+	if !strings.Contains(got["error"], "验证码请求过于频繁") {
 		t.Fatalf("429 的文案不对：%q", got["error"])
 	}
 }
 
-// TestForgotReturns503WhenMailNotConfigured 验显式降级（与"账号能力关闭"同风格）。
-func TestForgotReturns503WhenMailNotConfigured(t *testing.T) {
+// TestPasswordOTPReturns503WhenMailNotConfigured 验显式降级（与"账号能力关闭"同风格）。
+func TestPasswordOTPReturns503WhenMailNotConfigured(t *testing.T) {
 	env := newResetEnv(t, false, nil) // Mail = nil：邮件能力未配置
 	defer env.close()
 	env.seedVerified(t, "alice", "alice@example.com", "abcd1234")
 
-	w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"alice@example.com"}`, "")
+	w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"alice@example.com"}`, "")
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("邮件能力未配置时应当 503，实际 %d", w.Code)
 	}
 	// 与"邮箱是否存在"无关：未注册的邮箱拿到**同一个** 503。
-	w2 := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"nobody@example.com"}`, "")
+	w2 := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"nobody@example.com"}`, "")
 	if w2.Code != http.StatusServiceUnavailable || w2.Body.String() != w.Body.String() {
 		t.Fatalf("503 也必须与存在性无关：%d %q vs %d %q", w.Code, w.Body.String(), w2.Code, w2.Body.String())
 	}
@@ -370,9 +365,9 @@ func TestForgotReturns503WhenMailNotConfigured(t *testing.T) {
 
 // —— 不变量 I4：发信必须在请求路径之外 ——
 
-// TestForgotDoesNotWaitForDelivery 用一个**卡住的** SMTP 投递器断言：
+// TestPasswordOTPDoesNotWaitForDelivery 用一个**卡住的** SMTP 投递器断言：
 // handler 立刻返回（它只入队），绝不等 SMTP。
-func TestForgotDoesNotWaitForDelivery(t *testing.T) {
+func TestPasswordOTPDoesNotWaitForDelivery(t *testing.T) {
 	st := newFakeAdminStore()
 	signer, err := auth.NewSigner(handlerTestSecret, 15*time.Minute)
 	if err != nil {
@@ -385,7 +380,7 @@ func TestForgotDoesNotWaitForDelivery(t *testing.T) {
 
 	svc, err := service.NewAccountService(st, signer, auth.NewTicketStore(time.Minute), service.AccountOptions{
 		BcryptCost: auth.MinBcryptCost, RefreshTTL: time.Hour,
-		ResetTTL: 30 * time.Minute, EmailVerifyTTL: 24 * time.Hour, OTPTTL: 5 * time.Minute,
+		EmailVerifyTTL: 24 * time.Hour, OTPTTL: 5 * time.Minute,
 		PublicBaseURL: "https://pr.example.com", Mail: mailer,
 	})
 	if err != nil {
@@ -400,7 +395,7 @@ func TestForgotDoesNotWaitForDelivery(t *testing.T) {
 	}
 
 	start := time.Now()
-	w := doJSON(t, engine, http.MethodPost, "/api/auth/forgot", `{"email":"alice@example.com"}`, "")
+	w := doJSON(t, engine, http.MethodPost, "/api/auth/password/otp", `{"email":"alice@example.com"}`, "")
 	elapsed := time.Since(start)
 
 	if w.Code != http.StatusOK {
@@ -425,12 +420,11 @@ func TestForgotDoesNotWaitForDelivery(t *testing.T) {
 	close(blocked)
 }
 
-// —— reset / verify-email ——
+// —— 凭验证码改密 ——
 
-// TestResetFlowRevokesAllSessionsAndNeverEchoesToken 是端到端的服务端验收：
-// 拿明文令牌改密 → 旧 access/refresh 全失效 → 新口令可登录；且明文令牌不出现在
-// 响应体与日志里。
-func TestResetFlowRevokesAllSessionsAndNeverEchoesToken(t *testing.T) {
+// TestPasswordOTPResetFlowRevokesAllSessionsAndNeverEchoesCode 是端到端的服务端验收：
+// 拿验证码改密 → 旧 access/refresh 全失效 → 新口令可登录；且码不出现在响应体里。
+func TestPasswordOTPResetFlowRevokesAllSessionsAndNeverEchoesCode(t *testing.T) {
 	env := newResetEnv(t, true, nil)
 	defer env.close()
 	env.seedVerified(t, "alice", "alice@example.com", "abcd1234")
@@ -452,28 +446,27 @@ func TestResetFlowRevokesAllSessionsAndNeverEchoesToken(t *testing.T) {
 		t.Fatal("登录应当下发 refresh Cookie")
 	}
 
-	// 申请重置 → 从**发信内容**里取明文令牌（接口不回显它，这是唯一合法的拿法）。
-	if w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"alice@example.com"}`, ""); w.Code != http.StatusOK {
-		t.Fatalf("forgot 应当 200，实际 %d", w.Code)
+	// 申请验证码 → 从**发信内容**里取 6 位数字（接口不回显它，这是唯一合法的拿法）。
+	if w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"alice@example.com"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("发码应当 200，实际 %d", w.Code)
 	}
-	body := env.sender.lastBody(t)
-	token := tokenFromMailBody(t, body)
+	code := otpFromMailBody(t, env.sender.lastBody(t))
 
 	// 顺带钉住"库里是 sha256、不是原文"。
-	if env.tokenHashSeen(token) {
-		t.Fatal("库里出现了令牌原文")
+	if env.tokenHashSeen(code) {
+		t.Fatal("库里出现了验证码原文")
 	}
 
-	// 捕获日志：整个改密过程中都不该出现明文令牌。
+	// 捕获日志：整个改密过程中都不该出现明文验证码。
 	logs := captureLogs(t, func() {
-		wr := doJSON(t, env.engine, http.MethodPost, "/api/auth/reset",
-			`{"token":"`+token+`","password":"newpass123"}`, "")
+		wr := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp/reset",
+			`{"email":"alice@example.com","code":"`+code+`","password":"newpass123"}`, "")
 		if wr.Code != http.StatusNoContent {
-			t.Fatalf("重置应当 204，实际 %d（%s）", wr.Code, wr.Body.String())
+			t.Fatalf("改密应当 204，实际 %d（%s）", wr.Code, wr.Body.String())
 		}
 	})
-	if strings.Contains(logs, token) {
-		t.Fatalf("明文令牌出现在了服务端日志里：\n%s", logs)
+	if strings.Contains(logs, code) {
+		t.Fatalf("明文验证码出现在了服务端日志里：\n%s", logs)
 	}
 
 	// 旧 access token 必须失效。
@@ -495,38 +488,36 @@ func TestResetFlowRevokesAllSessionsAndNeverEchoesToken(t *testing.T) {
 	if w3.Code != http.StatusOK {
 		t.Fatalf("新口令应当能登录，实际 %d（%s）", w3.Code, w3.Body.String())
 	}
-	// 口令与令牌都不在任何响应体里出现。
-	for _, resp := range []string{w.Body.String(), w2.Body.String(), w3.Body.String()} {
-		if strings.Contains(resp, token) {
-			t.Fatalf("响应体里出现了明文令牌：%s", resp)
-		}
-	}
 
-	// 单次使用：同一个令牌再来一次必须是 400 + RESET_TOKEN_INVALID。
-	w4 := doJSON(t, env.engine, http.MethodPost, "/api/auth/reset",
-		`{"token":"`+token+`","password":"another123"}`, "")
-	if w4.Code != http.StatusBadRequest || !strings.Contains(w4.Body.String(), "RESET_TOKEN_INVALID") {
-		t.Fatalf("第二次使用同一令牌应当 400 RESET_TOKEN_INVALID，实际 %d %s", w4.Code, w4.Body.String())
+	// 单次使用：同一个码再来一次必须是 400 + OTP_INVALID。
+	w4 := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp/reset",
+		`{"email":"alice@example.com","code":"`+code+`","password":"another123"}`, "")
+	if w4.Code != http.StatusBadRequest || !strings.Contains(w4.Body.String(), "OTP_INVALID") {
+		t.Fatalf("第二次使用同一验证码应当 400 OTP_INVALID，实际 %d %s", w4.Code, w4.Body.String())
 	}
 }
 
-// TestResetRejectsInvalidTokenAndWeakPassword 覆盖两个 400 分支。
-func TestResetRejectsInvalidTokenAndWeakPassword(t *testing.T) {
+// TestPasswordOTPResetRejectsWeakPassword 覆盖弱口令分支（沿用注册的策略与错误码）。
+func TestPasswordOTPResetRejectsWeakPassword(t *testing.T) {
 	env := newResetEnv(t, true, nil)
 	defer env.close()
+	env.seedVerified(t, "alice", "alice@example.com", "abcd1234")
 
-	// 非法/过期/已用的令牌：**同一个错误码**（不区分，避免探测）。
-	for _, tok := range []string{"", "garbage", strings.Repeat("A", 43)} {
-		w := doJSON(t, env.engine, http.MethodPost, "/api/auth/reset",
-			`{"token":"`+tok+`","password":"abcd1234"}`, "")
-		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "RESET_TOKEN_INVALID") {
-			t.Fatalf("令牌 %q 应当 400 RESET_TOKEN_INVALID，实际 %d %s", tok, w.Code, w.Body.String())
-		}
+	if w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"alice@example.com"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("发码应当 200，实际 %d", w.Code)
 	}
-	// 弱口令：沿用注册的口令策略与错误码。
-	w := doJSON(t, env.engine, http.MethodPost, "/api/auth/reset", `{"token":"x","password":"short"}`, "")
+	code := otpFromMailBody(t, env.sender.lastBody(t))
+
+	w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp/reset",
+		`{"email":"alice@example.com","code":"`+code+`","password":"short"}`, "")
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"BAD_REQUEST"`) {
 		t.Fatalf("弱口令应当 400 BAD_REQUEST，实际 %d %s", w.Code, w.Body.String())
+	}
+	// 弱口令**不该烧掉验证码**：同一条码仍可用强口令通过。
+	w = doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp/reset",
+		`{"email":"alice@example.com","code":"`+code+`","password":"newpass123"}`, "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("弱口令被拒后同一条码仍然可用，实际 %d（%s）", w.Code, w.Body.String())
 	}
 }
 
@@ -552,16 +543,16 @@ func TestVerifyEmailEndpointCompletesFlow(t *testing.T) {
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "VERIFY_TOKEN_INVALID") {
 		t.Fatalf("验证令牌必须单次使用，实际 %d %s", w.Code, w.Body.String())
 	}
-	// 验证之后该邮箱**从此可以找回**（库里有重置行 + 真的发了一封）。
+	// 验证之后该邮箱**从此可以找回**（发得出码 + 库里有 OTP 行）。
 	before := env.sender.count()
-	if w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"bob@example.com"}`, ""); w.Code != http.StatusOK {
+	if w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"bob@example.com"}`, ""); w.Code != http.StatusOK {
 		t.Fatalf("验证后找回应当 200，实际 %d", w.Code)
 	}
 	if !waitUntil(func() bool { return env.sender.count() == before+1 }) {
-		t.Fatalf("验证后应当能收到重置信，实际 %d 封（期望 %d）", env.sender.count(), before+1)
+		t.Fatalf("验证后应当能收到验证码，实际 %d 封（期望 %d）", env.sender.count(), before+1)
 	}
-	if got := env.resetRows(store.PurposePasswordReset); got != 1 {
-		t.Fatalf("应当留下 1 行重置令牌，实际 %d 行", got)
+	if got := env.resetRows(store.PurposeEmailOTP); got != 1 {
+		t.Fatalf("应当留下 1 行验证码，实际 %d 行", got)
 	}
 }
 
@@ -586,9 +577,12 @@ func TestVerifyEmailRouteNameIsTheFrozenContract(t *testing.T) {
 	}
 }
 
-// TestVerifyEmailRateLimitedSharedWithReset 验 reset 与 verify-email **共用**
-// 一条每 IP 闸门（否则攻击者可以靠拆端点把猜 token 的预算翻倍）。
-func TestVerifyEmailRateLimitedSharedWithReset(t *testing.T) {
+// TestVerifyEmailRateLimitedPerIP 验 verify-email 的每 IP 闸门。
+//
+// 它曾经与 /api/auth/reset 共用一条桶（"不能靠拆端点把猜 token 的预算翻倍"）。
+// reset 下线后这条桶只剩 verify-email 一个使用者，判据本身仍然成立：
+// 超过配额必须 429。
+func TestVerifyEmailRateLimitedPerIP(t *testing.T) {
 	env := newResetEnv(t, true, func(cfg *config.Config) {
 		cfg.IPC.ResetPerIPPerHour = 3
 	})
@@ -600,14 +594,10 @@ func TestVerifyEmailRateLimitedSharedWithReset(t *testing.T) {
 			t.Fatalf("第 %d 次应当 400（令牌无效），实际 %d", i+1, w.Code)
 		}
 	}
-	// 第 4 次撞闸门；**换成 reset 端点**同样被拒（共用一条桶）。
+	// 第 4 次撞闸门。
 	w := doJSON(t, env.engine, http.MethodPost, "/api/auth/verify-email", `{"token":"x"}`, "")
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("第 4 次 verify-email 应当 429，实际 %d", w.Code)
-	}
-	w = doJSON(t, env.engine, http.MethodPost, "/api/auth/reset", `{"token":"x","password":"abcd1234"}`, "")
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("reset 与 verify-email 必须共用同一条闸门，实际 %d", w.Code)
 	}
 }
 
@@ -686,13 +676,13 @@ func TestAdminPatchBindsEmailAndAuditsOnce(t *testing.T) {
 		t.Fatalf("no-op 的绑定不该写审计，实际 %d 条", got)
 	}
 
-	// 绑定之后该邮箱**立刻**可用于找回（管理员绑定就是为了这条通路）。
+	// 绑定之后该邮箱**立刻**可用于找回。
 	before := env.sender.count()
-	if w := doJSON(t, env.engine, http.MethodPost, "/api/auth/forgot", `{"email":"alice@example.com"}`, ""); w.Code != http.StatusOK {
+	if w := doJSON(t, env.engine, http.MethodPost, "/api/auth/password/otp", `{"email":"alice@example.com"}`, ""); w.Code != http.StatusOK {
 		t.Fatalf("绑定后找回应当 200，实际 %d", w.Code)
 	}
 	if !waitUntil(func() bool { return env.sender.count() == before+1 }) {
-		t.Fatalf("绑定后应当能收到重置信，实际 %d 封", env.sender.count())
+		t.Fatalf("绑定后应当能收到验证码，实际 %d 封", env.sender.count())
 	}
 
 	// 邮箱格式非法 → 400；被别的账号占用 → 409 EMAIL_TAKEN。
@@ -758,4 +748,30 @@ func tokenFromMailBody(t *testing.T, body string) string {
 		t.Fatal("令牌为空")
 	}
 	return rest
+}
+
+// otpFromMailBody 从验证码邮件正文里取出 6 位数字。
+func otpFromMailBody(t *testing.T, body string) string {
+	t.Helper()
+	const marker = "验证码是："
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("邮件正文里找不到 %q：\n%s", marker, body)
+	}
+	rest := body[i+len(marker):]
+	start := -1
+	for j, r := range rest {
+		if r >= '0' && r <= '9' {
+			if start < 0 {
+				start = j
+			}
+			if j-start+1 == 6 {
+				return rest[start : j+1]
+			}
+			continue
+		}
+		start = -1
+	}
+	t.Fatalf("邮件正文里找不到 6 位验证码：\n%s", body)
+	return ""
 }

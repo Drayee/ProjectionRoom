@@ -218,7 +218,7 @@ const TABS: { key: AuthTab; label: string }[] = [
         </div>
     </form>
 
-    <!-- ================= 登录 / 找回密码（既有形态，未改） ================= -->
+    <!-- ================= 登录 / 找回密码 ================= -->
     <form v-else @submit.prevent="f.submit()">
       <template v-if="f.tab.value !== 'forgot'">
         <div class="field">
@@ -233,19 +233,73 @@ const TABS: { key: AuthTab; label: string }[] = [
         </div>
       </template>
 
-      <!-- 注册已迁到上面的两页式表单，这里的邮箱只剩"找回密码"一条用途 -->
+      <!-- ============ 找回密码：两段式（邮箱验证码） ============
+           旧形态是"填邮箱 → 收一封重置链接"，那条通道已随 /api/auth/forgot +
+           /api/auth/reset 下线（见 useAuthForm 顶部的说明）。现在是：
+           第 1 段 填邮箱 → 人机验证（页内子窗体）→ 发码；
+           第 2 段 填 6 位验证码 + 新密码 → 改密成功。 -->
       <template v-if="f.tab.value === 'forgot'">
-        <div class="field">
-          <label for="auth-email">邮箱</label>
-          <input
-            id="auth-email"
-            v-model="f.form.email"
-            name="email"
-            type="email"
-            autocomplete="email"
-            placeholder="用于找回密码"
-          />
-          <p v-if="f.emailProblem.value" class="hint">{{ f.emailProblem.value }}</p>
+        <!-- 阶段指示：两段式必须让人知道自己在第几步。 -->
+        <ol class="steps" aria-label="找回密码步骤">
+          <li :class="{ on: f.forgotStep.value === 'email', done: f.forgotStep.value === 'reset' }">
+            <span class="dot" aria-hidden="true" />1 验证邮箱
+          </li>
+          <li :class="{ on: f.forgotStep.value === 'reset' }"><span class="dot" aria-hidden="true" />2 设置新密码</li>
+        </ol>
+
+        <!-- 第 1 段 -->
+        <div v-if="f.forgotStep.value === 'email'" class="pane">
+          <div class="field">
+            <label for="auth-email">邮箱</label>
+            <input
+              id="auth-email"
+              v-model="f.form.email"
+              name="email"
+              type="email"
+              autocomplete="email"
+              placeholder="用于接收验证码"
+            />
+            <p v-if="f.emailProblem.value" class="hint">{{ f.emailProblem.value }}</p>
+          </div>
+        </div>
+
+        <!-- 第 2 段 -->
+        <div v-else class="pane">
+          <div class="field">
+            <label for="auth-otp">验证码</label>
+            <input
+              id="auth-otp"
+              v-model="f.otpCode.value"
+              name="code"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              maxlength="6"
+              placeholder="邮件里的 6 位数字"
+              data-testid="forgot-otp"
+            />
+            <p v-if="f.devCode.value" class="dev-hint" data-testid="forgot-dev-code">
+              调试（本机无 SMTP）：验证码是 <strong class="mono">{{ f.devCode.value }}</strong>
+            </p>
+          </div>
+          <div class="field">
+            <label for="auth-new-password">新密码</label>
+            <input
+              id="auth-new-password"
+              v-model="f.newPassword.value"
+              name="new-password"
+              type="password"
+              autocomplete="new-password"
+              placeholder="至少 8 位"
+              data-testid="forgot-new-password"
+            />
+            <p v-if="f.newPasswordProblem.value" class="hint">{{ f.newPasswordProblem.value }}</p>
+          </div>
+          <div class="row">
+            <button class="ghost" type="button" :disabled="f.busy.value" data-testid="forgot-resend" @click="f.resendForgotCode()">
+              重新发送验证码
+            </button>
+            <button class="ghost" type="button" :disabled="f.busy.value" @click="f.backToForgotEmail()">← 换个邮箱</button>
+          </div>
         </div>
       </template>
 
@@ -268,9 +322,22 @@ const TABS: { key: AuthTab; label: string }[] = [
       <p v-if="f.notice.value" class="ok" role="status">{{ f.notice.value }}</p>
 
       <div class="row">
-        <button class="primary" type="submit" :disabled="!f.canSubmit.value || f.busy.value">
+        <!-- 找回密码第 1 段的按钮**不是** submit：它要先打开人机验证子窗体，
+             由子窗体的「通过」回调接着发码。用 type=button + @click 明确这一点。 -->
+        <button
+          v-if="f.tab.value === 'forgot' && f.forgotStep.value === 'email'"
+          class="primary"
+          type="button"
+          :disabled="!f.canSubmit.value || f.busy.value"
+          data-testid="forgot-send"
+          @click="f.openForgotCaptcha()"
+        >
           <BrandIcon v-if="f.busy.value" name="load-spinner" decorative :size="15" />
-          <span>{{ f.tab.value === 'login' ? '登录' : '发送重置链接' }}</span>
+          <span>发送验证码</span>
+        </button>
+        <button v-else class="primary" type="submit" :disabled="!f.canSubmit.value || f.busy.value">
+          <BrandIcon v-if="f.busy.value" name="load-spinner" decorative :size="15" />
+          <span>{{ f.tab.value === 'forgot' ? '设置新密码' : '登录' }}</span>
         </button>
       </div>
     </form>
@@ -291,8 +358,16 @@ const TABS: { key: AuthTab; label: string }[] = [
          它挂在 panel 最外层：position:fixed 使其成为独立的一层，不参与表单布局。
          **不套 <Transition>**：离场动画依赖 transitionend + 双 rAF，而后台/无头
          标签页会把 rAF 节流到十几秒 —— 那会让遮罩卡在 DOM 里继续挡住页面。
-         入场动画由 .overlay / .dialog 自身的 animation 提供（一次性，不阻塞移除）。 -->
+         入场动画由 .overlay / .dialog 自身的 animation 提供（一次性，不阻塞移除）。
+
+         **两条路各一个实例**（注册 / 找回密码）：它们的 open 状态互不相干，
+         共用一个会出"注册的验证窗被找回密码关掉"这类串台。 -->
     <CaptchaDialog v-if="reg.captchaOpen.value" @pass="reg.onCaptchaPass()" @cancel="reg.onCaptchaCancel()" />
+    <CaptchaDialog
+      v-if="f.captchaOpen.value"
+      @pass="f.onForgotCaptchaPass()"
+      @cancel="f.onForgotCaptchaCancel()"
+    />
   </div>
 </template>
 

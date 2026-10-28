@@ -231,30 +231,6 @@ func (s *fakeAdminStore) consumeLocked(tokenHash, purpose string) *store.Passwor
 	return nil
 }
 
-func (s *fakeAdminStore) ConsumePasswordReset(ctx context.Context, tokenHash, newPasswordHash string) (int64, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r := s.consumeLocked(tokenHash, store.PurposePasswordReset)
-	if r == nil {
-		return 0, false, nil
-	}
-	u, ok := s.users[r.UserID]
-	if !ok {
-		return 0, false, nil
-	}
-	u.PasswordHash = newPasswordHash
-	// 真 store 在**同一个事务**里做四件事：标记令牌已用、改密、撤销全部会话、
-	// 版本号自增。假实现少做任何一件，都会让"改密后旧凭据必须失效"变成假绿。
-	for _, sess := range s.sessions {
-		if sess.UserID == r.UserID && sess.RevokedAt == nil {
-			now := time.Now()
-			sess.RevokedAt = &now
-		}
-	}
-	u.TokenVersion++
-	return r.UserID, true, nil
-}
-
 func (s *fakeAdminStore) ConsumeEmailVerify(ctx context.Context, tokenHash string) (int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -396,28 +372,97 @@ func (s *fakeAdminStore) InsertAudit(ctx context.Context, a *store.AdminAudit) e
 // 于是审计仍然是**异步**投递的（这正是要验的形态），只是不经过写队列。
 func (s *fakeAdminStore) EventWriter() *store.Writer { return nil }
 
-// —— 邮箱验证码 / 注册草稿 / 幂等键（handler 层的用例不走这些路径，
-// 但 AccountStore 接口要求它们存在；语义与真 store 对齐的部分写在 service 的 fake 里）。 ——
+// —— 邮箱验证码 / 注册草稿 / 幂等键（语义与真 store 对齐）。 ——
+//
+// ⚠ ConsumeEmailOTP / CountRecentEmailOTP / LastEmailOTPSentAt 曾经是**恒返回失败**
+// 的桩（注释说"handler 层的用例不走这些路径"）。那句话在找回密码改成验证码之后
+// 就不成立了：`/api/auth/password/otp/reset` 正是走这三个方法，
+// 桩会让"凭码改密"的每条用例都拿到 OTP_INVALID —— 而症状看起来像业务 bug。
+// 现在它们与 service 包那个内存假实现同构（含 attempts 计数与单次使用）。
 
 func (s *fakeAdminStore) InsertEmailOTP(ctx context.Context, t *store.PasswordReset) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 作废旧码：与真 store 一致（同一 user + 同用途的未用行全部烧掉）。
+	for _, r := range s.resets {
+		if r.UserID == t.UserID && r.Purpose == store.PurposeEmailOTP && r.UsedAt == nil {
+			now := time.Now()
+			r.UsedAt = &now
+		}
+	}
 	s.nextID++
 	t.ID = s.nextID
-	s.resets = append(s.resets, t)
+	t.Purpose = store.PurposeEmailOTP
+	t.Attempts = 0
+	cp := *t
+	s.resets = append(s.resets, &cp)
 	return nil
 }
 
-func (s *fakeAdminStore) ConsumeEmailOTP(_ context.Context, _ int64, _ string, _ int) (bool, error) {
-	return false, store.ErrOTPNotFound
+func (s *fakeAdminStore) ConsumeEmailOTP(_ context.Context, userID int64, otpHash string, maxAttempts int) (bool, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 找该账号最近一条未用未过期的码（与真 store 的 ORDER BY created_at DESC LIMIT 1 同义）。
+	var cur *store.PasswordReset
+	for _, r := range s.resets {
+		if r.UserID != userID || r.Purpose != store.PurposeEmailOTP {
+			continue
+		}
+		if r.UsedAt != nil || !time.Now().Before(r.ExpiresAt) {
+			continue
+		}
+		if cur == nil || r.CreatedAt.After(cur.CreatedAt) {
+			cur = r
+		}
+	}
+	if cur == nil {
+		return false, store.ErrOTPNotFound
+	}
+	if cur.Attempts >= maxAttempts {
+		now := time.Now()
+		cur.UsedAt = &now
+		return false, store.ErrOTPAttemptsExceeded
+	}
+	if cur.TokenHash != otpHash {
+		cur.Attempts++
+		if cur.Attempts >= maxAttempts {
+			now := time.Now()
+			cur.UsedAt = &now
+			return false, store.ErrOTPAttemptsExceeded
+		}
+		return false, nil
+	}
+	now := time.Now()
+	cur.UsedAt = &now
+	return true, nil
 }
 
-func (s *fakeAdminStore) CountRecentEmailOTP(_ context.Context, _ int64, _ time.Time) (int64, error) {
-	return 0, nil
+func (s *fakeAdminStore) CountRecentEmailOTP(_ context.Context, userID int64, since time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for _, r := range s.resets {
+		if r.UserID == userID && r.Purpose == store.PurposeEmailOTP && !r.CreatedAt.Before(since) {
+			n++
+		}
+	}
+	return n, nil
 }
 
-func (s *fakeAdminStore) LastEmailOTPSentAt(_ context.Context, _ int64) (time.Time, error) {
-	return time.Time{}, nil
+func (s *fakeAdminStore) LastEmailOTPSentAt(_ context.Context, userID int64) (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var last time.Time
+	for _, r := range s.resets {
+		if r.UserID == userID && r.Purpose == store.PurposeEmailOTP && r.CreatedAt.After(last) {
+			last = r.CreatedAt
+		}
+	}
+	return last, nil
 }
 
 func (s *fakeAdminStore) InsertRegisterDraft(_ context.Context, _ *store.RegisterDraft) error {
@@ -843,7 +888,6 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 	svc, err := service.NewAccountService(st, signer, tickets, service.AccountOptions{
 		RefreshTTL: cfg.Auth.RefreshTTL,
 		// 邮件链路的三项（config.Default() 已经给好了生产默认值，这里直接沿用）。
-		ResetTTL:       cfg.Auth.ResetTTL,
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
 		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,

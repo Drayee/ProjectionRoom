@@ -73,21 +73,14 @@ export interface RegisterInput {
   email: string
 }
 
-/** POST /api/auth/forgot 的请求体：只要邮箱。 */
-export interface ForgotInput {
-  email: string
-}
-
-/** POST /api/auth/forgot 的成功体。契约固定为 `{"status":"sent"}`。 */
-export interface ForgotResult {
-  /** `sent` = 请求已被受理。**它不代表"该邮箱存在"**（见 forgot() 的说明）。 */
+/**
+ * POST /api/auth/password/otp 的成功体。契约固定为 `{"status":"sent"}`。
+ *
+ * 本机开发（`PR_OTP_DEV_ECHO=1`）时服务端会额外给 `devCode`，见 passwordOTP 的说明。
+ */
+export interface PasswordOTPSent {
+  /** `sent` = 请求已被受理。**它不代表"该邮箱存在"**（见 passwordOTP 的说明）。 */
   status: string
-}
-
-/** POST /api/auth/reset 的请求体。token 只在这里（请求体），绝不进 URL。 */
-export interface ResetInput {
-  token: string
-  password: string
 }
 
 /** POST /api/auth/verify-email 的请求体。 */
@@ -345,10 +338,18 @@ export async function wsTicket(token: string): Promise<WsTicket> {
   return { ticket, expiresIn: typeof body?.expiresIn === 'number' ? body.expiresIn : 0 }
 }
 
-// ---------- 找回密码 / 重置 / 验证邮箱（三条都是**匿名**端点，不带 Authorization）----------
+// ---------- 找回密码 / 验证邮箱（两条都是**匿名**端点，不带 Authorization）----------
+//
+// ⚠ 找回密码**只有验证码这一条路**了：`POST /api/auth/forgot` 与
+// `POST /api/auth/reset`（邮件里的一次性链接）已随服务端一起下线。
+// 为什么换：链接通道必须 gate 在 `email_verified_at` 上（否则攻击者填受害者的
+// 邮箱，受害者点开链接就把攻击者账号的密码改了），于是"邮箱未验证"的老账号
+// 永远找不回密码。验证码没有这个两难 —— 码只发给邮箱的真实持有者。
+//
+// `/api/auth/verify-email` 仍然存在：注册后那封"验证你的邮箱"的信还在用链接。
 
 /**
- * POST /api/auth/forgot —— 申请重置邮件。
+ * POST /api/auth/password/otp —— 申请一条找回密码验证码（成功 200）。
  *
  * **不泄露账号是否存在是服务端的契约**：邮箱不存在时它同样返回 200 与同一个响应体
  * （所以这里的成功**不代表**"该邮箱已注册"）。前端必须与它保持同一口径 ——
@@ -356,21 +357,32 @@ export async function wsTicket(token: string): Promise<WsTicket> {
  *
  * 三种失败要分开（调用方按 `status` 分诊，不靠文案匹配）：
  *   400 邮箱格式不合法；429 限速；503 邮件能力未配置。
+ *
+ * 返回值是**本机开发**的验证码回显（`PR_OTP_DEV_ECHO=1` 时服务端才给）：
+ * 没有 SMTP 的机器上，这是唯一能把"发码 → 输码 → 改密"走通的途径。
+ * 生产环境服务端不返回该字段，因此这里恒为空串 —— 界面据此决定要不要显示。
  */
-export async function forgot(input: ForgotInput): Promise<ForgotResult> {
-  const body = (await request('forgot', { method: 'POST', body: input })) as Partial<ForgotResult> | null
-  return { status: asString(body?.status) }
+export async function passwordOTP(email: string): Promise<string> {
+  const body = (await request('password/otp', { method: 'POST', body: { email } })) as
+    | { status?: unknown; devCode?: unknown }
+    | null
+  return asString(body?.devCode)
 }
 
 /**
- * POST /api/auth/reset —— 用一次性 token 改密码。成功是 **204**（无响应体）。
+ * POST /api/auth/password/otp/reset —— 凭验证码改密码。成功是 **204**（无响应体）。
  *
- * 失败分诊靠 `AuthApiError.code`：
- *   `RESET_TOKEN_INVALID` = 非法 / 过期 / 已用过（服务端对三者给同一个码，刻意不区分）；
- *   400 且不是该码 = 弱密码，服务端文案原样展示。
+ * 失败分诊（靠 `code`，不靠文案）：
+ *   `OTP_INVALID`            验证码不对，还能再试；
+ *   `OTP_ATTEMPTS_EXCEEDED`  这条码已废，必须重新获取；
+ *   `RATE_LIMITED`           太频繁；
+ *   400 且不是上面两个码 = 弱密码，服务端文案原样展示。
  */
-export async function reset(input: ResetInput): Promise<void> {
-  await request('reset', { method: 'POST', body: input })
+export async function passwordOTPReset(
+  input: { email: string; code: string; password: string },
+  idempotencyKey?: string,
+): Promise<void> {
+  await request('password/otp/reset', { method: 'POST', body: input, idempotencyKey })
 }
 
 /**
@@ -436,26 +448,4 @@ export async function registerEmail(ticket: string, email: string, idempotencyKe
 /** POST /api/auth/register/verify —— 凭 ticket + 验证码建号并登录（201）。 */
 export async function registerVerify(ticket: string, code: string, idempotencyKey?: string): Promise<AuthSession> {
   return normalizeSession(await request('register/verify', { method: 'POST', body: { ticket, code }, idempotencyKey }))
-}
-
-// ---------- 改密码走邮箱验证码 ----------
-
-/** POST /api/auth/password/otp —— 发一条改密码验证码（200，恒定）。 */
-export async function passwordOTP(email: string): Promise<void> {
-  await request('password/otp', { method: 'POST', body: { email } })
-}
-
-/**
- * POST /api/auth/password/otp/reset —— 凭验证码改密码（204）。
- *
- * 失败分诊（靠 `code`，不靠文案）：
- *   `OTP_INVALID`            验证码不对，还能再试；
- *   `OTP_ATTEMPTS_EXCEEDED`  这条码已废，必须重新获取；
- *   `RATE_LIMITED`           太频繁。
- */
-export async function passwordOTPReset(
-  input: { email: string; code: string; password: string },
-  idempotencyKey?: string,
-): Promise<void> {
-  await request('password/otp/reset', { method: 'POST', body: input, idempotencyKey })
 }

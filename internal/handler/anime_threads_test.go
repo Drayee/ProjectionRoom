@@ -130,7 +130,6 @@ func newAnimeThreadEnv(t *testing.T) *atEnv {
 	acctStore.nextID = other.ID
 	svc, err := service.NewAccountService(acctStore, signer, tickets, service.AccountOptions{
 		RefreshTTL:     cfg.Auth.RefreshTTL,
-		ResetTTL:       cfg.Auth.ResetTTL,
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
 		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
