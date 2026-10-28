@@ -3,7 +3,7 @@
 > **这是 AI 会话进入本项目后的唯一入口。默认只读本文件**，需要动某处时再按下面的路径精确打开那几个文件，不要重新遍历整棵树。
 >
 > **维护约定（必须遵守）**：目录结构、关键约定、命令、部署事实一旦变化，**同步更新本文件**。过时地图比没有地图更危险——后续会话会按它行动。
-> 最近一次同步：**找回密码从「邮件重置链接」改为「邮箱验证码」**（`/api/auth/forgot` + `/api/auth/reset` 下线、`/reset` 路由删除、`SendAccountOTP` 去掉 `email_verified_at` 门控、`PurposePasswordReset` 常量删除、前端「找回密码」页签改两段式）；并把旧 `src/views/` 与根级 `src/components/*.vue` 的未跟踪残留真正清掉（此前 CLAUDE.md 说"已删"，实际还在）。上一次是注册/改密码改成**邮箱验证码**（两段式注册 + 页内人机验证子窗体 + 幂等键）与 **`requireComplete` 必需配置齐全才启动**。
+> 最近一次同步：**线上六个分区全员显示同一份 mock 假数据的修复**——`build-push.yml` 的「Build frontend」注入 `VITE_MOCK_*: vars.VITE_MOCK_* || '0'`（CI 侧默认翻真实接口；本地 `mode.ts` 仍默认 mock，两侧相反是有意的，见 §8 与 README 适配层一节）。更早：找回密码从「邮件重置链接」改为**邮箱验证码**（`/api/auth/forgot` + `/api/auth/reset` 下线、`/reset` 路由删除、`SendAccountOTP` 去掉 `email_verified_at` 门控、前端两段式表单、新增真机脚本 `verify-forgot.mjs`）；注册改成两段式 + 页内人机验证 + 幂等键；`requireComplete` 必需配置齐全才启动。
 
 ---
 
@@ -155,6 +155,7 @@ CSP 会拦住"跨源本机媒体服务器"的注入路径（脚手架用法）�
 - **对象存储**：桶 `pr-files`，匿名只读（只给 `s3:GetObject`，不给 ListBucket）。浏览器经 `http://60.205.212.25/files/pr-files/...` 访问（nginx `location /files/` 反代到 9000）。详见 `docs/STORAGE-MINIO.md`。
 - PostgreSQL 16 在宿主机（回环），库 `projectionroom`（生产）+ `projectionroom_test`（测试）；角色 `pr_app`。**`pg_hba.conf` 曾临时改过 trust 用于导入，已从 `.bak` 恢复**。
 - CI：`.github/workflows/build-push.yml` 推镜像到 GHCR（Secret 名 **`REGISTRY_TOKEN`**，classic PAT 带 `write:packages`）；`deploy.yml` 从 GHCR 拉镜像部署。⚠ Dockerfile **不能**带 `-tags wireinject`（会选中空壳 `cmd/wire.go`，`InitializeApp` 返回 nil → 启动即 SIGSEGV）。
+- **前端在 CI 里默认走真实接口**：build-push 的「Build frontend」给六个 `VITE_MOCK_*` 注入 `vars.VITE_MOCK_* || '0'`（**不设仓库变量 = 翻真**；想退回 mock 才去仓库 Variables 设 `1`）。这与 `api/mode.ts` 的"本地默认 mock"**刻意相反** —— 2026-10-28 线上六个分区对所有人显示同一份硬编码假数据（`/messages?peer=2` 恒为 mock 的「放映员」），根因正是 CI 什么都没设、静默沿用了"默认 mock"。判据别用"bundle 里还有 mock 人名"（两份实现都进产物），看 CI 日志打印的开关快照或页面实际发的 `/api/*` 请求。
 - **已知缺口**：无 TLS（refresh Cookie 因此不带 `Secure`，token/密码明文过网）；`client/dist/downloads/room-media` 本地约 3.95 GB，但 **`.dockerignore` 已排除**，镜像内不存在（该缺口在 Docker 部署下已消解）。
 
 ## 9. 工作约定（人与 AI 都适用）

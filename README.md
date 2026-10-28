@@ -311,22 +311,37 @@ client/src/api/<域>.ts          门面：页面唯一 import 的出口，导出
         └── api/real/<域>.ts    真实 HTTP 实现
 ```
 
-| 环境变量 | 默认 | 说明 |
-| :--- | :--- | :--- |
-| `VITE_MOCK_POSTS` | mock | 帖子域（`/posts` ×3） |
-| `VITE_MOCK_FRIENDS` | mock | 好友域（`/friends`） |
-| `VITE_MOCK_MESSAGES` | mock | 消息域（`/messages`） |
-| `VITE_MOCK_FORUM` | mock | 番剧论坛（`/forum`） |
-| `VITE_MOCK_OFFICIAL` | mock | 官方分区（`/official`） |
-| `VITE_MOCK_USERS` | mock | 用户公开档案（`/user/:id`） |
+| 环境变量 | **本地**默认 | **CI/生产**默认 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `VITE_MOCK_POSTS` | mock | **真实** | 帖子域（`/posts` ×3） |
+| `VITE_MOCK_FRIENDS` | mock | **真实** | 好友域（`/friends`） |
+| `VITE_MOCK_MESSAGES` | mock | **真实** | 消息域（`/messages`） |
+| `VITE_MOCK_FORUM` | mock | **真实** | 番剧论坛（`/forum`） |
+| `VITE_MOCK_OFFICIAL` | mock | **真实** | 官方分区（`/official`） |
+| `VITE_MOCK_USERS` | mock | **真实** | 用户公开档案（`/user/:id`） |
 
-语义是**默认 mock**：只有显式写成 `0` / `false` / `off` / `no` 才翻成真实实现；
-留空、不写、写成别的值一律按 mock 处理 —— 配错退化成"还是 mock"，而不是退化成整片分区 404。
+**两侧默认值刻意相反**，这不是笔误：
+
+- **本地不设变量 → mock**（`client/src/api/mode.ts` 的语义）。前端先行的施工期要的就是这个，
+  配错也退化成"还是 mock"，不会退化成整片分区 404。
+- **CI 不设仓库变量 → 真实接口**（`.github/workflows/build-push.yml` 里回退成 `0`）。
+  2026-10-28 线上六个分区对所有人都显示同一份假数据（`/messages?peer=2` 恒为写死的
+  「放映员」），根因就是 CI 什么都没设、静默沿用了"默认 mock"。**生产走 mock 从来不是
+  任何人的决定，只是没人想起来配它** —— 而"忘了配"在两种默认下后果不对称：
+  开发忘配一切照常，生产忘配是所有人看到硬编码的好友与消息。
+
+所以要在某个环境**显式**退回 mock：仓库 Settings → Secrets and variables → Actions →
+**Variables** 里把对应变量设成 `1`（六个独立设，支持逐域翻真）。构建日志会打印本次生效的
+六个开关，别靠猜。
 
 翻成真实实现后，若该域的服务端路由还没注册（返回 404），页面渲染
 「该分区后端尚未上线」空态（`client/src/components/ui/CapabilityNotice.vue`），
 **不是**裸的「请求失败（HTTP 404）」—— 后者看起来像整个后端挂了。这与
 `useAuthForm.ts` 把 `/api/auth/*` 的 404 解释成「账号能力未启用（游客模式）」是同一条约定。
+
+⚠ **翻真后不要拿"bundle 里还有 mock 的中文人名"当判据**：两份实现都会进产物
+（`mode.ts` 记着的几 KB 刻意取舍，换掉运行期配置注入面），grep 字符串证明不了走的是哪条路。
+要看的是页面实际发出了哪些 `/api/*` 请求。
 
 这些变量是**构建期常量**（Vite `import.meta.env` 静态替换）：改完要重启 dev server 或重新构建。
 模板见 [`client/.env.example`](client/.env.example)。

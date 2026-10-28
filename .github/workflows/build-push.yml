@@ -70,9 +70,33 @@ jobs:
           cache-dependency-path: client/package-lock.json
 
       - name: Build frontend (required by Dockerfile COPY client/dist)
+        # ------------------------------------------------------------------
+        # mock/real 适配层开关（client/src/api/mode.ts 的六个 VITE_MOCK_*）。
+        #
+        # ⚠ 这里的默认值与 mode.ts 的默认语义**刻意相反**，这不是笔误：
+        #   · 本地开发不设变量 → mode.ts 判成 mock（前端先行的施工期要的正是这个）；
+        #   · CI 不设仓库变量 → 这里回退成 '0' = **真实接口**。
+        # 理由：2026-10-28 线上六个分区全显示同一份 mock 假数据，就是因为 CI
+        # 什么都没设、静默沿用了 mode.ts 的"默认 mock"。生产走 mock 从来不是
+        # 任何人的决定，只是"没人想起来配它" —— 而"忘了配"在两种默认下的后果
+        # 完全不同：开发忘配 = 一切照常；生产忘配 = 所有人看到假的硬编码好友与消息。
+        # 所以构建这一侧必须默认翻真，把"要不要 mock"变成**显式**动作。
+        #
+        # 想在某个环境退回 mock：仓库 Settings → Secrets and variables → Actions →
+        # Variables 里把对应变量设成 1（六个独立设，支持逐域翻真）。
+        # 判据：`npm run build` 之后看下一行打印的快照，别猜。
+        env:
+          VITE_MOCK_POSTS: ${{ vars.VITE_MOCK_POSTS || '0' }}
+          VITE_MOCK_FRIENDS: ${{ vars.VITE_MOCK_FRIENDS || '0' }}
+          VITE_MOCK_MESSAGES: ${{ vars.VITE_MOCK_MESSAGES || '0' }}
+          VITE_MOCK_FORUM: ${{ vars.VITE_MOCK_FORUM || '0' }}
+          VITE_MOCK_OFFICIAL: ${{ vars.VITE_MOCK_OFFICIAL || '0' }}
+          VITE_MOCK_USERS: ${{ vars.VITE_MOCK_USERS || '0' }}
         run: |
           npm --prefix client ci
           npm --prefix client run build
+          echo "本次构建的 mock 开关（0=真实接口，1=本地 mock）："
+          env | grep '^VITE_MOCK_' | sort
 
       - name: Build segmenter binaries (cross-compiled, served by /downloads)
         run: |
