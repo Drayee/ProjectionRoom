@@ -240,21 +240,20 @@ export function useAuthForm(initialTab: AuthTab = 'login') {
     }
   }
 
-  /**
-   * 回到找回密码第 1 段（改邮箱 / 重新发码）。
-   *
-   * `keepNotice` = true 时**不动**提示槽：改密成功后要留住那句"请用新密码重新登录"，
-   * 而 `resetForgotState()` 会把它一起清掉。
-   */
-  function backToForgotEmail(keepNotice = false): void {
+  /** 回到找回密码第 1 段（改邮箱 / 重新发码）。 */
+  function backToForgotEmail(): void {
     resetForgotState()
-    if (!keepNotice) {
-      failed.value = ''
-      notice.value = ''
-    }
+    failed.value = ''
+    notice.value = ''
   }
 
-  /** 清掉找回密码的全部阶段状态（不含提示槽 —— 那是调用方的事）。 */
+  /**
+   * 清掉找回密码的全部阶段状态。
+   *
+   * 刻意**不碰** `notice` / `failed`：那两个提示槽的 owner 是调用方 ——
+   * 改密成功那条路径要先写下"请用新密码重新登录"再调这里，如果这里顺手清了，
+   * 那句提示就没了（而这正是用户当下唯一需要看见的话）。
+   */
   function resetForgotState(): void {
     forgotStep.value = 'email'
     otpCode.value = ''
