@@ -133,7 +133,8 @@ powershell -File scripts/run-local.ps1 -Port 8090   # 换端口（自动补 Orig
 | `verify-room-resume` | 主播断线/宽限期/同码重建 | **`--grace` 必须与服务端 `PR_ROOM_HOST_GRACE` 对齐**；素材用默认 `short_video/cut`；服务端自报 grace 要一致 |
 | `verify-ice` | ICE 下发/刷新/重启 | 实例需 `PR_ICE_TTL=30s` |
 | `verify-health` | 卡顿换父与健康度 | 素材用 `mkw_cut`（短素材会假失败） |
-| `verify-auth` | 账号 **35** 判据（重放撤销、封禁断连、游客进房、**`password/otp` 不泄露账号存在性**、**链接式改密端点已下线**） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉。**换环境时**：发码接口的期望值取决于实例是否配了 SMTP（未配=两条路径都 503，已配=都 200），脚本会先探测并打印它选了哪条 |
+| `verify-auth` | 账号判据（重放撤销、封禁断连、游客进房、**`password/otp` 不泄露账号存在性**、**链接式改密端点已下线**） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉。**换环境时**：发码接口的期望值取决于实例是否配了 SMTP（未配=两条路径都 503，已配=都 200），脚本会先探测并打印它选了哪条 |
+| `verify-forgot` | **找回密码（邮箱验证码）的真机 UI 流程**：`F1` 深链渲染找回密码页签 / `F2` 人机验证子窗体→第 2 段→拿到码 / `F3` 点「设置新密码」**确实发出**请求且 204 / `F4` 成功后切回登录并清空输入 / `F5` 新口令生效旧口令失效 / `F6` **未验证邮箱也能走完找回**（本轮改造的核心） | **实例必须 `PR_OTP_DEV_ECHO=1`**，否则拿不到验证码（脚本会明确报缺 dev echo 而不是假绿）。**刻意不并进 `verify-auth`**：那个脚本允许"没配 SMTP → 503"的口径，而这里必须拿得到码，两者对实例的要求互相矛盾。F3 靠**页面里的 fetch 钩子**判定 —— 本轮那个"点了没反应"的缺陷是静默的（无请求、无报错），只有钩子能区分"没发"与"发了但失败"；已用回退实验验过：把 busy 自锁的修复撤掉，F3/F4/F5 必红 |
 | `verify-connection` | **协议层连通性**：后端 `/healthz`·`/api/ice`·`/api/public-rooms`·静态页面、Vite 页面与 `/api` 代理（识破 SPA 回退成 HTML）、`/ws` 直连与经代理升级、**Origin 白名单四态**（白名单内放行/白名单外 403/同主机异端口 403/无 Origin 放行） | **不依赖 Chrome**，几十毫秒出结论——"页面连不上后端"应先跑它再起浏览器。环境变量 `PR_BACKEND`/`PR_VITE`（`PR_VITE=''` 跳过代理层）/`PR_ALLOWED_ORIGIN`。**Origin 必须用原始 Upgrade 握手验证**：Node 内置 WebSocket 的第二参数只收子协议，传 `{headers:{Origin}}` 会被判非法子协议 → 1006，于是"被拒"与"不支持"同形 |
 | （待补）`verify-public-rooms` / `verify-admin` | 公开房列表与管理端强关/下架/审计 | **尚未在仓库里**（计划 T8 的产出，因故未落地）；需要时按 §6 起实例 + 管理员凭据自建 |
 | `lib/browser.mjs` | 公共库：`startChrome/openTarget/waitFor/createRoom/seedAndEnter/ensureAccount/lastAccount/newCookieJar/findChrome/argOf/percentile` | `createRoom` 会自动取测试账号（账号能力关闭时退化为匿名）；`seedAndEnter` 可传第 7 参 account 给主播窗口播种会话 |

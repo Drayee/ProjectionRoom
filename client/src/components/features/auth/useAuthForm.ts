@@ -33,12 +33,27 @@ export type AuthTab = 'login' | 'register' | 'forgot'
 /** 找回密码的两个阶段。 */
 export type ForgotStep = 'email' | 'reset'
 
+/** 从路由 query 里读页签（只认三个合法值，其余一律忽略）。 */
+function readTabFromQuery(raw: unknown): AuthTab | null {
+  const v = Array.isArray(raw) ? raw[0] : raw
+  return v === 'forgot' || v === 'register' || v === 'login' ? v : null
+}
+
 export function useAuthForm(initialTab: AuthTab = 'login') {
   const auth = useAuthStore()
   const route = useRoute()
   const router = useRouter()
 
-  const tab = ref<AuthTab>(initialTab)
+  /**
+   * 首屏页签：`?tab=forgot|register|login` **优先于** `initialTab`。
+   *
+   * 这条不是装饰，是三个入口的依赖：
+   *   - `VerifyEmailPage` 验证失败/成功后的跳转（`/login?tab=forgot`）；
+   *   - 旧验收脚本与文档里写死的深链；
+   *   - 用户从邮件页退回时"回到我刚才是哪个页签"。
+   * 丢了它，症状是"链接打开后停在登录页签，找回密码的表单根本没渲染"。
+   */
+  const tab = ref<AuthTab>(readTabFromQuery(route.query.tab) ?? initialTab)
   const busy = ref(false)
   const notice = ref('')
   const failed = ref('')
@@ -183,9 +198,20 @@ export function useAuthForm(initialTab: AuthTab = 'login') {
     openForgotCaptcha()
   }
 
-  /** 第二阶段：凭码改密。 */
+  /**
+   * 第二阶段：凭码改密。
+   *
+   * ⚠ **不要**在这里再写 `if (!canSubmit.value) return`。
+   * 上一版这么写过，症状是"点『设置新密码』毫无反应"：调用方 `submit()` 在进来之前
+   * 已经 `busy = true`，而 `canSubmit` 的第一条就是 `if (busy.value) return false` ——
+   * 于是被自己刚设的 busy 挡回、静默 return，既不发请求也不报错，
+   * 只有 notice 被清空留作痕迹。判据只能有一处（`submit()` 顶部），这里重复守卫就是自锁。
+   *
+   * 保留的字段检查**刻意不看 busy**：它防的是"别处将来直接调用这个函数"，
+   * 而不是防重复提交（那个职责在 canSubmit）。
+   */
   async function submitForgotReset(): Promise<void> {
-    if (!canSubmit.value) return
+    if (otpCode.value.trim() === '' || newPassword.value.length < 8 || form.email.trim() === '') return
     busy.value = true
     failed.value = ''
     notice.value = ''
@@ -195,7 +221,13 @@ export function useAuthForm(initialTab: AuthTab = 'login') {
       // 改密会撤销该账号**全部**会话（含本机）：本地还留着旧 access token 只会
       // 立刻 401。清掉它，并把用户送到登录页用新口令重新登。
       auth.clearSession()
+      // ⚠ 必须**在这里**把页签与找回密码状态重置，不能指望 `router.push` 帮你重渲染：
+      // /login 与 /login?tab=forgot 命中的是同一个组件实例，`tab` 只在实例创建时
+      // 从 query 读一次。少这三步的症状是"提示让你去登录，但屏幕上还是找回密码的
+      // 第二阶段，验证码与密码都还填在里面"。
       notice.value = '密码已重置。请用新密码重新登录。'
+      resetForgotState()
+      tab.value = 'login'
       await router.push({ name: 'login' })
     } catch (err) {
       const e = toAuthError(err)
@@ -208,15 +240,27 @@ export function useAuthForm(initialTab: AuthTab = 'login') {
     }
   }
 
-  /** 回第一阶段（改邮箱 / 重新发码）。 */
-  function backToForgotEmail(): void {
+  /**
+   * 回到找回密码第 1 段（改邮箱 / 重新发码）。
+   *
+   * `keepNotice` = true 时**不动**提示槽：改密成功后要留住那句"请用新密码重新登录"，
+   * 而 `resetForgotState()` 会把它一起清掉。
+   */
+  function backToForgotEmail(keepNotice = false): void {
+    resetForgotState()
+    if (!keepNotice) {
+      failed.value = ''
+      notice.value = ''
+    }
+  }
+
+  /** 清掉找回密码的全部阶段状态（不含提示槽 —— 那是调用方的事）。 */
+  function resetForgotState(): void {
     forgotStep.value = 'email'
     otpCode.value = ''
     newPassword.value = ''
     codeSent.value = false
     devCode.value = ''
-    failed.value = ''
-    notice.value = ''
   }
 
   async function submit(): Promise<void> {
