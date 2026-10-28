@@ -81,7 +81,7 @@ const (
 	//
 	// ⚠ 这是一个**被接受的有界枚举面**（见 service.Register 的说明）：
 	// 注册时用户必须知道该换邮箱还是换用户名，所以这里给出可区分的码。
-	// 与 /api/auth/forgot 的"恒定 200"形成对照 —— 那个入口免登录且不限"写"，
+	// 与 /api/auth/password/otp 的"恒定 200"形成对照 —— 那个入口免登录且不限"写"，
 	// 因此它必须逐字相同。改这里的文案/码之前请先读 service.Register 的那一段。
 	CodeEmailTaken = "EMAIL_TAKEN"
 )

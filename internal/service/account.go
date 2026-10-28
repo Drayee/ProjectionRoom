@@ -521,9 +521,9 @@ type Session struct {
 // 邮箱唯一约束被撞上时必须回一个能区分于"用户名被占用"的错误，用户才知道该换邮箱
 // 还是换用户名；这确实让人能拿 /api/auth/register 去问"这个邮箱注册过没有"。
 // 接受它的理由：注册本来就有每 IP 5/分钟（容量 3）的令牌桶，一次探测要占掉一个
-// 注册配额，而注册比登录贵得多（一次 bcrypt）。**与 /api/auth/forgot 的"恒定 200"
-// 形成对照** —— 找回入口免登录、不限"写"，所以它必须逐字相同；注册入口是写操作、
-// 有限速、且必须给用户可操作的反馈。改这里的文案之前请先读这一段。
+// 注册配额，而注册比登录贵得多（一次 bcrypt）。**与 /api/auth/password/otp 的
+// "恒定 200"形成对照** —— 发码入口免登录、不限"写"，所以它必须逐字相同；
+// 注册入口是写操作、有限速、且必须给用户可操作的反馈。改这里的文案之前请先读这一段。
 func (s *AccountService) Register(ctx context.Context, username, displayName, password, email, ip, ua string) (*Session, error) {
 	name, err := CanonicalUsername(username)
 	if err != nil {

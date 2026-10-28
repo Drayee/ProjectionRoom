@@ -126,7 +126,7 @@ const (
 	// —— 邮件通道（SMTP）与找回密码 / 验证邮箱。
 	//
 	// 这一组是账号能力的出口：PR_SMTP_HOST 与账号密码任缺其一 = 邮件能力关闭
-	//（/api/auth/forgot 一律 503，账号本身照常可用）。
+	//（发码接口与验证邮箱一律 503，账号本身照常可用）。
 	envSMTPHost       = "PR_SMTP_HOST"
 	envSMTPPort       = "PR_SMTP_PORT"
 	envSMTPUser       = "PR_SMTP_USER"
