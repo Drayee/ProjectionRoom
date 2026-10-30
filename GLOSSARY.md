@@ -41,4 +41,21 @@ Terms locked by [他人与本人档案信息架构](https://github.com/Drayee/Pr
 - **Posts**: 普通公开帖，倒序无限滚动；无草稿概念。
 - **Rooms**: 同 `GET /api/public-rooms` —— 已公开且未关闭。
 - **Counts**: 关注数 / 粉丝数为纯数字，**不可点开名单**；名单只在 Console 看自己的。
-- **Favorites**: 位留、可见性归收藏域票（#48）决定前不渲染。
+- **Favorites**: **他人档案不渲染收藏块** —— 收藏仅自己可见，决定见收藏域票（#48）。
+
+
+## Favorites（收藏）
+
+Terms locked by [收藏域：做不做与产品形状](https://github.com/Drayee/ProjectionRoom/issues/48) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Favorite** | 收藏 | 私人书签，**不计任何公开数**；与点赞（公开表态、计 `like_count`）语义不同。 |
+| **Favorite target** | 收藏对象 | `post` / `room` / `anime`。`anime` 是**番剧目录项本身**（追番），不是板块里的主题串——主题串本身就是 `post`，由帖子收藏覆盖。 |
+| **Stale favorite** | 失效收藏 | 对象已关闭/下架/删除的收藏条目：**保留**、灰显「已失效」、不可点进，由用户自行移除。不静默删除。 |
+| **Favorite list** | 收藏列表 | 仅本人可见，落 `/me` 内独立区块，类型 tab（帖 / 房 / 番剧），每类按**收藏时间倒序**分页。 |
+
+### Boundaries
+
+- **不做**：公开收藏夹、他人可见的收藏、收藏数公开计数、收藏夹分类/标签/备注/导出。
+- 存储为单表 `favorites(user_id, target_type, target_id, created_at)`，主键三元组保证幂等；跨表完整性由服务层校验（对象不存在 → 404，不写孤儿行）。
