@@ -99,3 +99,30 @@ Terms locked by [帖子互动面：列表赞、收藏入口与一致性](https:/
 - 赞与收藏**都**乐观更新：先改本地、再发请求、失败回滚 + 一次轻提示。
 - **评论点赞本期不做**（Out of scope，见地图）。
 - 论坛主题串复用同一行组件与同一套动作，不另做样式。
+
+
+## Natural layer（自然层）
+
+Terms locked by [月夜故障 DNA 上的自然层视觉原则](https://github.com/Drayee/ProjectionRoom/issues/43) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Decoration vs feedback** | 装饰 / 确认 | 故障效果（撕裂、阶梯抖动、扫描线）是**装饰**，可以不安；交互反馈是**确认**，必须确定（位移 + 亮度 + 静态双色分离）。两者不许互相借。 |
+| **Three-piece feedback** | 三件套 | 任何可交互面 hover 时必须**同时**：底色 → `--state-hover`、前景 `--dim`→`--text`、卡片 `translateY(-2px)`。描边只作辅助（`--line` 仅 1.45:1，不得单独表达状态）。 |
+| **State tokens** | 状态令牌 | `--state-hover` / `--state-active` / `--state-veil` / `--ring` / `--elev-1|2` / `--shift-card` / `--press-btn` / `--press-icon`；组件里禁写 `rgba(180,108,255,.08)` 类手写状态色。 |
+| **Size-graded press** | 分级按压 | 卡片 hover −2px（不压）、按钮 `scale(.98)`、图标按钮 `scale(.94)`；缩放幅度与尺寸反比。 |
+| **Current-state pill** | 当前态药丸 | 导航当前项 = 静态 `--state-active` 底 + 图标升 `--text` + 1px 右红左紫分离 + `aria-current="page"`；**零新增常驻动画，无滑动**。 |
+| **Hit target** | 命中区 | 最小 44×44（视觉 36px 用伪元素外扩）；焦点环全站统一 `--ring` + `--ring-offset`。 |
+| **Content-page austerity** | 内容页素壳 | 内容页（帖子/档案/论坛/消息/好友/设置）只有顶栏 1 条故障线；噪点与扫描线只许在落地页与房间等待页。 |
+
+### Rules
+
+- **一次性动画同屏 ≤3**（常驻循环仍守 #13 的 ≤5），只许 `transform`/`opacity`；不许把新效果加到长列表的每一行。
+- **reduced-motion 下反馈必须仍在**：三件套靠属性值切换，不依赖 `animation` 到达终态（靠 keyframes `to` 决定颜色的写法在降级下完全不反馈，属回归）。
+- `--dim` 是 4.5:1 下限，**不得再调暗**；色板与故障三色本票不动。
+
+详见 [docs/notes/2026-10-30-natural-layer-visual-principles.md](docs/notes/2026-10-30-natural-layer-visual-principles.md)。
+
+### Open（交给 #46 / to-spec）
+
+- 导航切换是否采用**滑动**指示器（本票只定「不滑动」为默认；若 #46 证明滑动更自然，必须 reduced-motion 下瞬时）。
