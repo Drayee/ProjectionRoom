@@ -170,3 +170,20 @@ Terms locked by [好友搜索可发现性](https://github.com/Drayee/ProjectionR
 
 - 搜索**维持需登录**（防匿名枚举用户名，与 #33 防存在性探测同战线）；游客见登录墙 + 禁用态搜索框示意。
 - 本票零新增组件：消费 AuthorRow/UserAvatar/Button/AsyncState（#44）。
+
+
+## Account settings（账号设置与注销）
+
+Terms locked by [账号设置：并入档案还是保持独立流](https://github.com/Drayee/ProjectionRoom/issues/51) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Settings partition** | 设置区 | `/me?tab=settings` 深链分区；五块：改密码 / 退出所有设备 / 邮箱 / 账号只读信息 / 危险区。 |
+| **Two doors** | 两条门 | 记得密码→**仅当前密码**（`PUT /api/me/password`）；忘了密码→邮箱验证码（现有 `password/otp*` 不动）。登录态门刻意不含验证码——已接受的取舍（找回密码仍靠邮箱码兜底）。 |
+| **Email rebind** | 换绑邮箱 | 发码到**新**地址→确认→置 `email_verified_at`；与管理员代办 PATCH email **并存不同路**。旧邮箱换绑后立即失效。 |
+| **Deletion cooling** | 注销冷静期 | 软删标志 + **30 天**：即时不可对外、登录可撤销（/me 横幅）；到期硬删走后台清扫（I4），CASCADE 带走全部内容。 |
+| **Deleted user display** | 已注销用户 | 冷静期起对外即隐藏：`/user/:id` 404、搜索/关注/粉丝/互关消失、帖子作者显示「已注销用户」；**私聊历史保留**给另一方。 |
+
+### Not doing
+
+- 改用户名（公开且被搜索引用）；头像上传（地图 Out of scope）；注销立即硬删选项。
