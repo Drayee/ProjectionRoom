@@ -21,6 +21,7 @@ import { useRoute } from 'vue-router'
 import AppHeader from './components/ui/AppHeader.vue'
 import TooltipLayer from './components/ui/TooltipLayer.vue'
 import { useAuthStore } from './stores/auth'
+import { useRouteTransition } from './composables/useRouteTransition'
 
 type HeaderVariant = 'app' | 'page' | 'bare'
 
@@ -51,14 +52,51 @@ const chromeless = computed(() => {
   const n = route.name
   return n === 'home' || n === 'login' || n === 'register'
 })
+
+/**
+ * 过渡壳（票 #76）。
+ *
+ * 决策由 `composables/useRouteTransition.ts` 的导航守卫在**换页前**写好，
+ * 这里只把它读出来交给 `<Transition>`：
+ *
+ *   - `name`：过渡名（`page-forward` / `page-back` / `page-lateral` / `page-none`），
+ *     决定 CSS class，也就决定了这次换页是位移、是淡入，还是**根本没有动画**。
+ *   - `--route-shift`：位移量（12px），由决策器给出，CSS 只读不写 ——
+ *     两侧各写一个 12 的那种漂移（界面动 24px / 界面动 0）在这里被结构性地排除。
+ *
+ * ⚠ `page-none`（放映室整页豁免 / reduced-motion 判死 / 首屏 / 同路由）
+ * **刻意不定义任何过渡样式**，因此那几种换页是**瞬时**的。
+ */
+const shell = useRouteTransition()
+
+/** 位移量写进 CSS 变量：CSS 是唯一读它的地方。 */
+const stageStyle = computed(() => ({
+  '--route-shift': `${shell.value.shiftPx}px`,
+}))
 </script>
 
 <template>
   <div class="app" :class="{ chromeless }">
     <AppHeader v-if="variant" :variant="variant" />
-    <router-view v-slot="{ Component }">
-      <component :is="Component" />
-    </router-view>
+    <!--
+      过渡舞台（票 #76）。
+
+      `<Transition>` **不用 mode**：前进/后退要求「新页归零」与「旧页淡出」
+      **同时**发生（票 #45 的决议），串行会把一次换页拉成 480ms 并在中间留一帧空白。
+      代价是新旧两页短暂同时在场，因此旧页必须脱离文档流 ——
+      这件事由 `styles/transition.css` 的 `*-leave-active` 规则负责。
+
+      舞台本身是 `position: relative`：离场的旧页绝对定位在它里面，
+      于是「旧页从顶部淡出」对齐的是**内容区顶部**（顶栏下方），不是视口顶部。
+      顶栏常驻、换页不动（这正是整屏横移被否掉的理由）。
+    -->
+    <div class="route-stage" :style="stageStyle" data-testid="route-stage">
+      <router-view v-slot="{ Component }">
+        <Transition :name="shell.name">
+          <component :is="Component" />
+        </Transition>
+      </router-view>
+    </div>
     <!-- 提示图层挂在路由之外：换页不重建，正在显示的提示不被卸载 -->
     <TooltipLayer />
   </div>
@@ -75,5 +113,16 @@ const chromeless = computed(() => {
 /* 全屏页面（落地页、登录/注册壳）自己占满视口，不额外撑开 */
 .app.chromeless {
   min-height: 100vh;
+}
+
+/*
+ * 过渡舞台（票 #76）。
+ *
+ * `position: relative` 是**必需**的：离场的旧页是 `position: absolute`，
+ * 它的包含块必须是一个已定位的祖先，否则它会贴到**视口**顶部（盖住常驻顶栏），
+ * 而不是内容区顶部。
+ */
+.route-stage {
+  position: relative;
 }
 </style>
