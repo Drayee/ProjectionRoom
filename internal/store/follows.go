@@ -288,6 +288,102 @@ SELECT
 	return ok, nil
 }
 
+// LegacyFollowBackfill 是一次存量回填的结果（供调用方记日志与验收）。
+type LegacyFollowBackfill struct {
+	// FollowsCreated 是新建的关注边条数（accepted 每行 2 条、pending 每行 1 条）。
+	FollowsCreated int
+	// RequestsRetired 是被终结的 pending 请求行数（票 42：pending → 单向 follow）。
+	RequestsRetired int
+}
+
+// BackfillLegacyFollows 把**旧的 friendships 行**回填成关注边（票 42 决议）。
+//
+// # 映射规则（ADR 0001）
+//
+//	accepted → **双向** follow（R→A 与 A→R 各一条）—— 旧好友即互关。
+//	pending  → **单向** follow（requester → addressee）—— 我发出的请求变成我的关注。
+//	blocked  → **不动**。拉黑不走关注边（它有自己的表与谓词），
+//	           且"拉黑方的 follow 被删、被拉黑方的 follow 可留"是 #57 的拉黑事务。
+//
+// # 为什么 pending 的请求行被**终结**（删掉）
+//
+// 票 42 明确"废弃好友请求"：pending 行若留着，请求方在旧界面上仍会看到
+// "等对方处理"，而对方那边已经不会处理了（没有 accept 路径了 —— 那是 #59 的活）。
+// 留着它就是一条**永远等不到的请求**。所以这里把它换成一条单向关注边，
+// 让"我关注了 TA"这件事在关系模型里有位置，而请求本身终止。
+//
+// # 为什么这不是一条**迁移 DDL**
+//
+// 本仓库的迁移规约是「只做加法」（migrate_test.go 的静态检查禁止
+// drop / truncate / delete / update 出现在迁移语句里）。而这段回填要**删行**
+// （终结 pending 请求），它不是"改结构"，是"搬数据"——
+// 所以它是**应用层的一次性回填**，不是迁移步骤。
+//
+// 迁移规约针对的是 DDL；而"把旧数据搬进新表"是一次性的、可重跑的、
+// 需要独立验收的动作（规格的风险登记第 ① 条正是"迁移需在隔离测试库先演练"）。
+//
+// # 幂等
+//
+// 重复调用不会产生第二条边（唯一键 + ON CONFLICT DO NOTHING），
+// 也不会重复终结请求行（第二次找不到 pending 行）。
+// 于是它可以在启动路径上被安全地重复调用。
+//
+// # 调用方
+//
+// 本票（#56）只提供**能力**与真库证据；**何时调用**由 #57 决定
+// （那一票负责存量迁移的演练与 can_dm 换门闩）。
+// 之所以不自动跑：删 pending 请求行是**不可逆**的数据动作，
+// 应当在切换前被显式触发一次，而不是夹在每次启动里。
+func (s *Store) BackfillLegacyFollows(ctx context.Context) (LegacyFollowBackfill, error) {
+	var out LegacyFollowBackfill
+
+	// 先取 pending 的行（在删之前取）：它们的 requester/addressee 决定了
+	// 要补哪一条单向边。
+	type legacyRow struct {
+		ID          int64
+		RequesterID int64
+		AddresseeID int64
+		Status      string
+	}
+	var rows []legacyRow
+	if err := s.db.WithContext(ctx).
+		Table("friendships").
+		Select("id, requester_id, addressee_id, status").
+		Where("status IN (?, ?)", FriendshipAccepted, FriendshipPending).
+		Find(&rows).Error; err != nil {
+		return out, fmt.Errorf("store: 读取旧好友关系失败: %w", err)
+	}
+
+	for _, r := range rows {
+		switch r.Status {
+		case FriendshipAccepted:
+			// 旧好友 = 互关：两个方向各补一条。
+			for _, pair := range [][2]int64{{r.RequesterID, r.AddresseeID}, {r.AddresseeID, r.RequesterID}} {
+				if _, created, err := s.CreateFollow(ctx, pair[0], pair[1]); err != nil {
+					return out, fmt.Errorf("store: 回填关注边失败: %w", err)
+				} else if created {
+					out.FollowsCreated++
+				}
+			}
+		case FriendshipPending:
+			// 旧请求 = 我关注了 TA（单向），然后终结这条请求行。
+			if _, created, err := s.CreateFollow(ctx, r.RequesterID, r.AddresseeID); err != nil {
+				return out, fmt.Errorf("store: 回填关注边失败: %w", err)
+			} else if created {
+				out.FollowsCreated++
+			}
+			res := s.db.WithContext(ctx).
+				Where("id = ? AND status = ?", r.ID, FriendshipPending).
+				Delete(&Friendship{})
+			if res.Error != nil {
+				return out, fmt.Errorf("store: 终结旧好友请求失败: %w", res.Error)
+			}
+			out.RequestsRetired += int(res.RowsAffected)
+		}
+	}
+	return out, nil
+}
+
 // CountFollowers 返回某人的粉丝数（关注他的人数）。
 func (s *Store) CountFollowers(ctx context.Context, userID int64) (int64, error) {
 	if userID <= 0 {

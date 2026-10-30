@@ -287,3 +287,97 @@ func TestFollowCountsCountEdges(t *testing.T) {
 		t.Fatalf("bob 的关注数应为 0，实际 %d", following)
 	}
 }
+
+// TestBackfillLegacyFollowsFollowsTicket42 覆盖票 42 决议的存量迁移映射。
+//
+// 四条判据：
+//  1. accepted → **双向** follow（互关）；
+//  2. pending  → requester→addressee **单向** follow，且**请求行被终结**；
+//  3. blocked  → **不动**（拉黑不走关注边）；
+//  4. **幂等**：重复回填不产生第二条边，也不重复终结。
+func TestBackfillLegacyFollowsFollowsTicket42(t *testing.T) {
+	s, alice, bob := followEnv(t)
+	ctx := context.Background()
+
+	// alice → bob：accepted（旧好友）。
+	if _, err := s.CreateFriendshipRequest(ctx, alice.ID, bob.ID); err != nil {
+		t.Fatalf("造请求失败：%v", err)
+	}
+	if _, err := s.AcceptFriendshipRequest(ctx, 1, bob.ID); err != nil {
+		t.Fatalf("接受请求失败：%v", err)
+	}
+	// carol → alice：pending（旧请求）。
+	carol := seedUser(t, s, "fol-carol")
+	if _, err := s.CreateFriendshipRequest(ctx, carol.ID, alice.ID); err != nil {
+		t.Fatalf("造请求失败：%v", err)
+	}
+	// dave → alice：blocked（拉黑，不动）。
+	dave := seedUser(t, s, "fol-dave")
+	if _, err := s.BlockUser(ctx, dave.ID, alice.ID); err != nil {
+		t.Fatalf("造拉黑失败：%v", err)
+	}
+
+	out, err := s.BackfillLegacyFollows(ctx)
+	if err != nil {
+		t.Fatalf("回填失败：%v", err)
+	}
+	// accepted 贡献 2 条、pending 贡献 1 条。
+	if out.FollowsCreated != 3 {
+		t.Fatalf("应新建 3 条关注边，实际 %d", out.FollowsCreated)
+	}
+	if out.RequestsRetired != 1 {
+		t.Fatalf("应终结 1 条 pending 请求，实际 %d", out.RequestsRetired)
+	}
+
+	// accepted → 双向：alice↔bob 都是互关。
+	okAB, err := s.IsFollowing(ctx, alice.ID, bob.ID)
+	if err != nil || !okAB {
+		t.Fatalf("accepted 应补 alice→bob：ok=%v err=%v", okAB, err)
+	}
+	okBA, err := s.IsFollowing(ctx, bob.ID, alice.ID)
+	if err != nil || !okBA {
+		t.Fatalf("accepted 应补 bob→alice：ok=%v err=%v", okBA, err)
+	}
+
+	// pending → 单向：carol→alice 有，alice→carol 没有。
+	okCA, err := s.IsFollowing(ctx, carol.ID, alice.ID)
+	if err != nil || !okCA {
+		t.Fatalf("pending 应补 carol→alice：ok=%v err=%v", okCA, err)
+	}
+	okAC, err := s.IsFollowing(ctx, alice.ID, carol.ID)
+	if err != nil || okAC {
+		t.Fatalf("pending 不该补反向边：ok=%v err=%v", okAC, err)
+	}
+
+	// blocked → 不动：dave 与 alice 之间没有任何关注边。
+	okDA, err := s.IsFollowing(ctx, dave.ID, alice.ID)
+	if err != nil || okDA {
+		t.Fatalf("blocked 不该补关注边：ok=%v err=%v", okDA, err)
+	}
+
+	// pending 请求行已被终结。
+	var pendingRows int64
+	if err := s.DB().WithContext(ctx).Model(&Friendship{}).
+		Where("status = ?", FriendshipPending).Count(&pendingRows).Error; err != nil {
+		t.Fatalf("统计 pending 失败：%v", err)
+	}
+	if pendingRows != 0 {
+		t.Fatalf("pending 请求行应被终结，实际还有 %d 行", pendingRows)
+	}
+
+	// 幂等：再来一次不新建边。
+	out2, err := s.BackfillLegacyFollows(ctx)
+	if err != nil {
+		t.Fatalf("重复回填失败：%v", err)
+	}
+	if out2.FollowsCreated != 0 {
+		t.Fatalf("重复回填不该新建边，实际新建 %d 条", out2.FollowsCreated)
+	}
+	var total int64
+	if err := s.DB().WithContext(ctx).Model(&Follow{}).Count(&total).Error; err != nil {
+		t.Fatalf("统计关注边失败：%v", err)
+	}
+	if total != 3 {
+		t.Fatalf("库里应有 3 条关注边，实际 %d", total)
+	}
+}
