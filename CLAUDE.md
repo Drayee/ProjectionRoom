@@ -3,7 +3,7 @@
 > **这是 AI 会话进入本项目后的唯一入口。默认只读本文件**，需要动某处时再按下面的路径精确打开那几个文件，不要重新遍历整棵树。
 >
 > **维护约定（必须遵守）**：目录结构、关键约定、命令、部署事实一旦变化，**同步更新本文件**。过时地图比没有地图更危险——后续会话会按它行动。
-> 最近一次同步：**线上六个分区全员显示同一份 mock 假数据的修复**——`build-push.yml` 的「Build frontend」注入 `VITE_MOCK_*: vars.VITE_MOCK_* || '0'`（CI 侧默认翻真实接口；本地 `mode.ts` 仍默认 mock，两侧相反是有意的，见 §8 与 README 适配层一节）。更早：找回密码从「邮件重置链接」改为**邮箱验证码**（`/api/auth/forgot` + `/api/auth/reset` 下线、`/reset` 路由删除、`SendAccountOTP` 去掉 `email_verified_at` 门控、前端两段式表单、新增真机脚本 `verify-forgot.mjs`）；注册改成两段式 + 页内人机验证 + 幂等键；`requireComplete` 必需配置齐全才启动。
+> 最近一次同步：**票 #61 的 UserAvatar 落地**——新增 `client/src/components/ui/UserAvatar.vue`（全站唯一头像组件，取色只走 `utils/avatar.ts` 的 `avatarOf()`），顶栏删除名字哈希 `hsl(...)` 取色（**接受一次视觉回归**：顶栏头像颜色会变）；首批接入好友页/消息/论坛作者块，新增真机脚本 `verify-avatar.mjs`（不需要后端，自起静态服务器跑 mock 域）。更早：**线上六个分区全员显示同一份 mock 假数据的修复**——`build-push.yml` 的「Build frontend」注入 `VITE_MOCK_*: vars.VITE_MOCK_* || '0'`（CI 侧默认翻真实接口；本地 `mode.ts` 仍默认 mock，两侧相反是有意的，见 §8 与 README 适配层一节）。更早：找回密码从「邮件重置链接」改为**邮箱验证码**（`/api/auth/forgot` + `/api/auth/reset` 下线、`/reset` 路由删除、`SendAccountOTP` 去掉 `email_verified_at` 门控、前端两段式表单、新增真机脚本 `verify-forgot.mjs`）；注册改成两段式 + 页内人机验证 + 幂等键；`requireComplete` 必需配置齐全才启动。
 
 ---
 
@@ -135,6 +135,7 @@ powershell -File scripts/run-local.ps1 -Port 8090   # 换端口（自动补 Orig
 | `verify-health` | 卡顿换父与健康度 | 素材用 `mkw_cut`（短素材会假失败） |
 | `verify-auth` | 账号判据（重放撤销、封禁断连、游客进房、**`password/otp` 不泄露账号存在性**、**链接式改密端点已下线**） | 需管理员凭据（`--admin <文件>`），测试库里的管理员会被 store 用例清掉。**换环境时**：发码接口的期望值取决于实例是否配了 SMTP（未配=两条路径都 503，已配=都 200），脚本会先探测并打印它选了哪条 |
 | `verify-forgot` | **找回密码（邮箱验证码）的真机 UI 流程**：`F1` 深链渲染找回密码页签 / `F2` 人机验证子窗体→第 2 段→拿到码 / `F3` 点「设置新密码」**确实发出**请求且 204 / `F4` 成功后切回登录并清空输入 / `F5` 新口令生效旧口令失效 / `F6` **未验证邮箱也能走完找回**（本轮改造的核心） | **实例必须 `PR_OTP_DEV_ECHO=1`**，否则拿不到验证码（脚本会明确报缺 dev echo 而不是假绿）。**刻意不并进 `verify-auth`**：那个脚本允许"没配 SMTP → 503"的口径，而这里必须拿得到码，两者对实例的要求互相矛盾。F3 靠**页面里的 fetch 钩子**判定 —— 本轮那个"点了没反应"的缺陷是静默的（无请求、无报错），只有钩子能区分"没发"与"发了但失败"；已用回退实验验过：把 busy 自锁的修复撤掉，F3/F4/F5 必红 |
+| `verify-avatar` | **UserAvatar（票 #61）真机验收**：同一用户跨页同色、点击落点、键盘可达与无障碍名、**嵌套处不可点**（论坛主题行 / 消息会话行里的头像不是链接）、hover 反馈、reduced-motion 下仍换色不再位移、源码级「取色只有一个源」 | **不需要后端**：脚本自起静态服务器托管 `client/dist` 并把 `/api/*` 回 404，前端默认 mock 域即可跑；**须先 build**。源码级判据要先**去注释**再 grep（组件注释里会提到被删掉的 `hsl(hash)`，直接 grep 会假红） |
 | `verify-connection` | **协议层连通性**：后端 `/healthz`·`/api/ice`·`/api/public-rooms`·静态页面、Vite 页面与 `/api` 代理（识破 SPA 回退成 HTML）、`/ws` 直连与经代理升级、**Origin 白名单四态**（白名单内放行/白名单外 403/同主机异端口 403/无 Origin 放行） | **不依赖 Chrome**，几十毫秒出结论——"页面连不上后端"应先跑它再起浏览器。环境变量 `PR_BACKEND`/`PR_VITE`（`PR_VITE=''` 跳过代理层）/`PR_ALLOWED_ORIGIN`。**Origin 必须用原始 Upgrade 握手验证**：Node 内置 WebSocket 的第二参数只收子协议，传 `{headers:{Origin}}` 会被判非法子协议 → 1006，于是"被拒"与"不支持"同形 |
 | （待补）`verify-public-rooms` / `verify-admin` | 公开房列表与管理端强关/下架/审计 | **尚未在仓库里**（计划 T8 的产出，因故未落地）；需要时按 §6 起实例 + 管理员凭据自建 |
 | `lib/browser.mjs` | 公共库：`startChrome/openTarget/waitFor/createRoom/seedAndEnter/ensureAccount/lastAccount/newCookieJar/findChrome/argOf/percentile` | `createRoom` 会自动取测试账号（账号能力关闭时退化为匿名）；`seedAndEnter` 可传第 7 参 account 给主播窗口播种会话 |
