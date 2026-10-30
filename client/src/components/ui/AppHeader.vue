@@ -20,6 +20,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from './BrandIcon.vue'
 import UserAvatar from './UserAvatar.vue'
 import { useAuthStore } from '../../stores/auth'
+import { isSelfProfile, navSectionOf, type NavSection } from '../../utils/navSection'
 
 const props = withDefaults(defineProps<{ variant?: 'app' | 'page' | 'bare' }>(), {
   variant: 'page',
@@ -61,14 +62,43 @@ const avatarUser = computed(() => {
 /** 登录/注册链接带上当前路径，登录后回到原处。 */
 const redirectQuery = computed(() => ({ redirect: route.fullPath }))
 
-const NAV = [
-  { name: 'public-rooms', icon: 'video', label: '公开房间' },
-  { name: 'posts', icon: 'tips', label: '帖子' },
-  { name: 'forum', icon: 'chat', label: '番剧论坛' },
-  { name: 'friends', icon: 'users-group', label: '好友' },
-  { name: 'messages', icon: 'msg', label: '消息' },
-  { name: 'help', icon: 'help', label: '帮助' },
-] as const
+/**
+ * 分区导航表。`section` 是**归属键**，与 `utils/navSection.ts` 的 `NavSection` 同一批字符串。
+ *
+ * 这张表是"入口 → 分区"的正向映射；反向（"这个路径属于哪个分区"）在
+ * `navSectionOf()` 的前缀表里。两处必须同时改 —— 新增一个导航项却漏改前缀表，
+ * 症状是"点了能进，但那一项永远不亮"。
+ */
+const NAV: ReadonlyArray<{ name: string; icon: string; label: string; section: NavSection }> = [
+  { name: 'public-rooms', icon: 'video', label: '公开房间', section: 'public-rooms' },
+  { name: 'posts', icon: 'tips', label: '帖子', section: 'posts' },
+  { name: 'forum', icon: 'chat', label: '番剧论坛', section: 'forum' },
+  { name: 'friends', icon: 'users-group', label: '好友', section: 'friends' },
+  { name: 'messages', icon: 'msg', label: '消息', section: 'messages' },
+  { name: 'help', icon: 'help', label: '帮助', section: 'help' },
+]
+
+/**
+ * 当前路径属于哪个分区（票 #77）。**唯一判定源**在 `utils/navSection.ts`：
+ * 显式前缀表 + 本人优先，不依赖 vue-router 自带的 `router-link-active`
+ * （那是按路由记录匹配，`/posts/3` 不会点亮 `/posts`，`/forum/7` 不会点亮 `/forum`）。
+ */
+const currentSection = computed(() => navSectionOf(route.path, auth.profile?.id ?? null))
+
+/** 是否停在"我自己的档案页"（点亮头像位）。别人档案页不点亮任何东西。 */
+const onSelfProfile = computed(() => isSelfProfile(route.path, auth.profile?.id ?? null))
+
+/**
+ * 导航项的当前态 = 该分区命中 且 **当前不在本人档案页**。
+ *
+ * 为什么后半个条件：`/user/1`（本人）按规则归"我"，不归任何分区；但 `/user/1`
+ * 的路径**不**命中任何前缀，两者本来就互斥。这半个条件是为将来的 `/me`
+ * 之类的"本人专属页"留的位置 —— 届时 `/me` 会命中前缀、同时也算"本人"，
+ * 而"我"只该有一个高亮（头像位），不能整排也亮。
+ */
+function isActive(section: NavSection): boolean {
+  return currentSection.value === section && !onSelfProfile.value
+}
 
 /**
  * 「消息」入口上的未读角标（wayfinder #30）。
@@ -102,7 +132,9 @@ const unreadLabel = computed(() => {
         v-for="item in NAV"
         :key="item.name"
         class="nav-btn"
+        :class="{ 'is-active': isActive(item.section) }"
         :to="{ name: item.name }"
+        :aria-current="isActive(item.section) ? 'page' : undefined"
         :aria-label="item.name === 'messages' && unreadLabel ? `消息（${unreadLabel} 条未读）` : item.label"
         v-tip="item.label"
       >
@@ -121,7 +153,9 @@ const unreadLabel = computed(() => {
         <RouterLink
           v-if="props.variant !== 'bare'"
           class="nav-btn"
+          :class="{ 'is-active': isActive('public-rooms') }"
           :to="{ name: 'public-rooms' }"
+          :aria-current="isActive('public-rooms') ? 'page' : undefined"
           aria-label="公开房间"
           v-tip="'公开房间'"
         >
@@ -130,7 +164,9 @@ const unreadLabel = computed(() => {
         <RouterLink
           v-if="props.variant !== 'bare'"
           class="nav-btn"
+          :class="{ 'is-active': isActive('help') }"
           :to="{ name: 'help' }"
+          :aria-current="isActive('help') ? 'page' : undefined"
           aria-label="帮助"
           v-tip="'帮助'"
         >
@@ -143,7 +179,9 @@ const unreadLabel = computed(() => {
           <RouterLink
             v-if="auth.profile?.role === 'admin'"
             class="nav-btn"
+            :class="{ 'is-active': isActive('admin') }"
             :to="{ name: 'admin' }"
+            :aria-current="isActive('admin') ? 'page' : undefined"
             aria-label="管理端"
             v-tip="'管理端'"
           >
@@ -151,8 +189,14 @@ const unreadLabel = computed(() => {
           </RouterLink>
           <!-- 头像 = 导航（票 #44：头像位不加编辑态，避免进主页/改图二义）。
                本人 → /me（票 #69 落地后自动生效），他人 → /user/:id。
-               组件内部自问路由表"有 me 吗"，所以这里不用传额外开关。 -->
-          <UserAvatar :user="avatarUser" :self="true" size="md" />
+               组件内部自问路由表"有 me 吗"，所以这里不用传额外开关。
+
+               当前态（票 #77）：停在**本人**档案页时点亮头像位 —— 按规则
+               `/user/<我>` 不归任何分区，所以这时整排分区图标全灭、只有头像亮，
+               用户一眼知道"这是我自己那页"。别人档案页则全灭（那里没有"我的"语义）。 -->
+          <span class="avatar-slot" :class="{ 'is-active': onSelfProfile }">
+            <UserAvatar :user="avatarUser" :self="true" size="md" />
+          </span>
           <button
             class="nav-btn"
             type="button"
@@ -283,20 +327,84 @@ const unreadLabel = computed(() => {
   pointer-events: none;
 }
 
+/* 悬停：票 #43 §2 三件套的顶栏版 —— ① 底 --state-hover ② 前景升 --text
+   ③ 无位移（图标按钮档）。旧实现手写 rgba(180,108,255,.08)，与状态令牌不同源。 */
 .nav-btn:hover {
   color: var(--text);
-  border-color: var(--line);
-  background: rgba(180, 108, 255, 0.08);
+  background: var(--state-hover);
   text-decoration: none;
 }
 
+/* 按压：底色换 --state-active + 按图标档缩放（票 #43 §4：36px 用 --press-icon）。
+   旧值 .92 与原型不一致，这里统一到令牌。 */
 .nav-btn:active {
-  transform: scale(0.92);
+  background: var(--state-active);
+  transform: scale(var(--press-icon));
+}
+
+/* 命中区 44×44（WCAG 2.5.5 AAA，票 #43 §6）：视觉仍是 36px，伪元素向外扩 4px。
+   用 position:absolute 而不是负 margin：负 margin 会改变布局盒，把这一排间距挤歪。 */
+.nav-btn::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
 }
 
 .nav-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/**
+ * 当前态（票 #77；外观规范见票 #43 §5）。
+ *
+ *   形态   静态 pill：background 用 --state-active（比 hover 更亮，两级分得开）
+ *   前景   图标从 --dim 升到 --text
+ *   分离   1px 静态双色：右 +1px 红、左 -1px 紫（与 #13 按钮「右红左紫」同向）
+ *   动画   零新增 —— 切换时**没有**滑动指示器；底色走既有的 --dur-micro 过渡，
+ *          reduced-motion 下由 tokens.css 全局判死，属性值仍然变化（不是靠动画到终态）。
+ *
+ * 为什么要加边框：双色分离靠 text-shadow 表达，而图标是 SVG（BrandIcon），
+ * text-shadow 作用不到它。给按钮本身一条 1px 的实线边框（透明 → accent），
+ * 让"当前态"在图标上也有一个**非颜色**的形态标记（描边本身不承担语义，
+ * 语义由 aria-current 与底色承担，符合票 #13 硬约束 2）。
+ */
+.nav-btn.is-active {
+  color: var(--text);
+  background: var(--state-active);
+  border-color: var(--accent);
+}
+
+/* 双色分离：右红左紫。加在图标上（:deep 穿透 BrandIcon 的 svg 本体），
+   而不是按钮的文本 —— 这些按钮里没有文本节点。 */
+.nav-btn.is-active :deep(.brand-icon) {
+  filter: none;
+  text-shadow:
+    1px 0 0 var(--glitch-r),
+    -1px 0 0 var(--accent);
+}
+
+/* 当前态下悬停：保持已激活的底色，不再回退到 hover 色（否则"当前"看起来像"路过"）。 */
+.nav-btn.is-active:hover {
+  background: var(--state-active);
+}
+
+/* 头像位（票 #77）：本人档案页时，头像外面套一圈与 .nav-btn 同款的静态 pill。
+   用 span 包一层而不是改 UserAvatar —— 头像组件的形状是圆的、契约在 #61 里钉死，
+   不该为了"导航高亮"再长出第二个形态。 */
+.avatar-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+}
+
+.avatar-slot.is-active {
+  background: var(--state-active);
+  border-color: var(--accent);
 }
 
 /* 图标悬停抖动：故障语言（位置不稳），阶梯而非平滑 */
