@@ -20,6 +20,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from './BrandIcon.vue'
 import UserAvatar from './UserAvatar.vue'
 import { useAuthStore } from '../../stores/auth'
+import { prefetchRoute } from '../../utils/routePrefetch'
 
 const props = withDefaults(defineProps<{ variant?: 'app' | 'page' | 'bare' }>(), {
   variant: 'page',
@@ -71,6 +72,19 @@ const NAV = [
 ] as const
 
 /**
+ * 悬停预热（票 #79）：鼠标移到导航项上就把该页 chunk 取回来。
+ *
+ * 为什么是 pointerenter 而不是 mouseenter：pointerenter 在**触屏**上不触发，
+ * 而 mouseenter 会在触屏模拟鼠标时误触发 —— 触屏用户不该因为"手指还没点下去"
+ * 就下载一个页面。
+ *
+ * 失败静默由 `utils/routePrefetch.ts` 保证（catch 吞掉），这里不处理错误。
+ */
+function warmUp(name: string): void {
+  void prefetchRoute(name)
+}
+
+/**
  * 「消息」入口上的未读角标（wayfinder #30）。
  *
  * 只读 `auth.unread` 这一个来源（`stores/auth.ts` 的 `setUnread` 是唯一写入点）：
@@ -105,6 +119,7 @@ const unreadLabel = computed(() => {
         :to="{ name: item.name }"
         :aria-label="item.name === 'messages' && unreadLabel ? `消息（${unreadLabel} 条未读）` : item.label"
         v-tip="item.label"
+        @pointerenter="warmUp(item.name)"
       >
         <BrandIcon :name="item.icon" decorative :size="18" />
         <!-- 未读角标：只在有数字时出现（`null` 与 0 都不显示，理由见 unreadLabel）。 -->
@@ -124,6 +139,7 @@ const unreadLabel = computed(() => {
           :to="{ name: 'public-rooms' }"
           aria-label="公开房间"
           v-tip="'公开房间'"
+          @pointerenter="warmUp('public-rooms')"
         >
           <BrandIcon name="video" decorative :size="17" />
         </RouterLink>
@@ -133,6 +149,7 @@ const unreadLabel = computed(() => {
           :to="{ name: 'help' }"
           aria-label="帮助"
           v-tip="'帮助'"
+          @pointerenter="warmUp('help')"
         >
           <BrandIcon name="help" decorative :size="17" />
         </RouterLink>
@@ -146,6 +163,7 @@ const unreadLabel = computed(() => {
             :to="{ name: 'admin' }"
             aria-label="管理端"
             v-tip="'管理端'"
+            @pointerenter="warmUp('admin')"
           >
             <BrandIcon name="settings" decorative :size="17" />
           </RouterLink>

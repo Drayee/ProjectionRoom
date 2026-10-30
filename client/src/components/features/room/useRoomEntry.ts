@@ -40,11 +40,12 @@ export function useRoomEntry(roomId: () => string) {
   }
 
   onMounted(() => {
-    // 房间标题跟随房间码，便于多标签页区分
-    const prevTitle = document.title
-    document.title = `${roomId().toUpperCase()} · 月喵`
+    // 文档标题**不在这里写**（票 #79 的单点纪律）：
+    // 页面各自写 document.title 会让多标签页下出现多种口径（Vite 默认标题、
+    // 房间码标题、路由页面名各写各的），而用户无从判断哪条才是当前页。
+    // 房间标题现在是路由表里 `meta.title` 的函数形态（取 params.roomId），
+    // 由 utils/routeMeta.ts 统一拼成「<房间码> · 月喵」。
     onBeforeUnmount(() => {
-      document.title = prevTitle
       // 唯一拆除点：不清则信令 / WebRTC / 定时器都不停
       store.leaveRoom()
     })
