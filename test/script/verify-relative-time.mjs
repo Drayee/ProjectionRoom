@@ -4,7 +4,7 @@
  *
  * # 为什么需要真机
  *
- * 六档边界的**算术**由 `test/unit/relative-time.test.ts`（表驱动）钉住；
+ * 六档边界的**算术**由 `client/test/relative-time.test.mjs`（表驱动）钉住；
  * 但下面这几条只能��真浏览器里验：
  *
  *   T1  `<time datetime>` 的属性、`title`/`aria-label` 给的是**精确绝对时间**；

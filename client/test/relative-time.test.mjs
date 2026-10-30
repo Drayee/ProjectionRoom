@@ -9,8 +9,11 @@
  *   node --test "client/test/*.test.mjs"
  *
  * ⚠ 需要 Node ≥ 22.6（类型剥离在 22.6 才可用，23.6 起默认开启）。
- * 本机是 Node 24。CI 的 build-push.yml 目前用 Node 20 —— 那条线**跑不了**这个文件
- * （类型剥离不存在），所以它没有接进 CI；接线需要动 CI 的 Node 版本，属于另一票。
+ * 所以 CI 的 node 版本必须是 22+：build-push.yml 里前端构建仍用 `NODE_VERSION`，
+ * 跑**本文件**的那道门槛单独用 `TEST_NODE_VERSION` —— 两者分开是有意的，
+ * 构建产物不该因为"多一个单测门槛"而改运行时基线。
+ * 用 Node 20 跑这条命令会报 `does not provide an export named ...`：那是版本不够，
+ * 不是被测代码坏了。
  *
  * **期望值全部是字面量**（不是用实现反推）：时间用**本地时间分量**构造
  * （new Date(2026, 9, 30, 12, 0, 0)），这样断言与运行机器的时区无关。

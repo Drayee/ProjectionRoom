@@ -13,15 +13,21 @@
  *
  * 覆盖：
  *   · 六档判据的每一条，以及每档的临界值两侧；
- *   · 非法输入（'not-a-date'、空串）与未来时间（delta < 0）→ 原样透出；
+ *   · 非法输入（'not-a-date'、空串）原样透出；未来时刻走「刚刚」（不显示负数）；
  *   · 绝对日期档的同年 / 跨年两种形态；
- *   · formatAbsoluteTime 的补零形态与非法输入。
+ *   · timeView().full 的补零形态（title / aria-label 的精确绝对时间）。
+ *
+ * ⚠ 与 `client/test/relative-time.test.mjs` 的关系：那个是仓库的**正式单测**
+ * （node:test + assert，`npm --prefix client run test` 会跑它）。本脚本是它的
+ * 人眼可读镜像 —— 一行一行 "ok / FAIL 期望/实际"，用来在被测结果不确定时手跑一遍
+ * 看清到底哪一档偏了。
  *
  * 用法：node test/script/verify-relativetime.mjs
  */
 process.env.TZ = 'Asia/Shanghai'
 
-import { RELATIVE_TIME_TICK_MS, formatAbsoluteTime, formatRelativeTime, parseTimestamp } from '../../client/src/utils/relativeTime.ts'
+import { timeView } from '../../client/src/utils/relativeTime.ts'
+import { TICK_INTERVAL_MS } from '../../client/src/utils/nowTick.ts'
 
 let failed = 0
 let passed = 0
@@ -48,36 +54,39 @@ function at(offsetMs) {
   return new Date(NOW + offsetMs).toISOString()
 }
 
+/** 相对档的文案（校验的是"屏幕上的字"）。 */
+const rel = (iso, now = NOW) => timeView(iso, now).relative
+
 // 表驱动：每行 = [用例名, 输入 iso, 参照 now, 期望文案]
 const RELATIVE_CASES = [
-  // 第 3 档：1 分钟以内 → 「刚刚」
+  // 第 1 档：1 分钟以内 → 「刚刚」
   ['0 秒 → 刚刚', at(0), NOW, '刚刚'],
   ['59.999 秒 → 刚刚（1 分钟的前一刻）', at(-59_999), NOW, '刚刚'],
 
-  // 第 4 档：1 分钟到 1 小时 → 「N分钟前」
-  ['60 秒 → 1分钟前（1 分钟的这一刻）', at(-MINUTE), NOW, '1分钟前'],
-  ['59 分 59 秒 → 59分钟前', at(-(59 * MINUTE + 59_000)), NOW, '59分钟前'],
+  // 第 2 档：1 分钟到 1 小时 → 「N 分钟前」
+  ['60 秒 → 1 分钟前（1 分钟的这一刻）', at(-MINUTE), NOW, '1 分钟前'],
+  ['59 分 59 秒 → 59 分钟前', at(-(59 * MINUTE + 59_000)), NOW, '59 分钟前'],
 
-  // 第 5 档：1 小时到 1 天 → 「N小时前」
-  ['1 小时 → 1小时前（1 小时的这一刻）', at(-HOUR), NOW, '1小时前'],
-  ['23:59:59 → 23小时前', at(-(23 * HOUR + 59 * MINUTE + 59_000)), NOW, '23小时前'],
+  // 第 3 档：1 小时到 1 天 → 「N 小时前」
+  ['1 小时 → 1 小时前（1 小时的这一刻）', at(-HOUR), NOW, '1 小时前'],
+  ['23:59:59 → 23 小时前', at(-(23 * HOUR + 59 * MINUTE + 59_000)), NOW, '23 小时前'],
 
-  // 第 6 档：1 天到 7 天 → 「N天前」
-  ['24 小时 → 1天前（1 天的这一刻）', at(-DAY), NOW, '1天前'],
-  ['6 天 23:59:59 → 6天前', at(-(6 * DAY + 23 * HOUR + 59 * MINUTE + 59_000)), NOW, '6天前'],
-  ['7 天整减 1 毫秒 → 6天前（相对档只覆盖 < 7 天）', at(-(7 * DAY - 1)), NOW, '6天前'],
+  // 第 4 档：1 天到 7 天 → 「N 天前」
+  ['24 小时 → 1 天前（1 天的这一刻）', at(-DAY), NOW, '1 天前'],
+  ['6 天 23:59:59 → 6 天前', at(-(6 * DAY + 23 * HOUR + 59 * MINUTE + 59_000)), NOW, '6 天前'],
+  ['7 天整减 1 毫秒 → 6 天前（相对档只覆盖 < 7 天）', at(-(7 * DAY - 1)), NOW, '6 天前'],
 
-  // 第 7 档：≥ 7 天 → 绝对日期
+  // 第 5、6 档：≥ 7 天 → 绝对日期（同年 / 跨年）
   ['恰好 7 天 → 绝对日期（同年形态）', at(-7 * DAY), NOW, '10月23日'],
   ['7 天整加 1 毫秒 → 仍是绝对日期', at(-(7 * DAY + 1)), NOW, '10月23日'],
   ['跨年：2025-12-25 相对 2026-01-02 → 2025年12月25日', '2025-12-25T12:00:00+08:00', Date.parse('2026-01-02T12:00:00+08:00'), '2025年12月25日'],
   ['同年但相隔很久：2026-01-02 相对 2026-10-30 → 1月2日', '2026-01-02T12:00:00+08:00', NOW, '1月2日'],
 
-  // 第 1、2 档：非法输入与未来时间 → 原样透出（不编一个假时间占位）
+  // 非法输入：原样透出（不编一个假时间占位）
   ['非法串原样透出', 'not-a-date', NOW, 'not-a-date'],
   ['空串原样透出', '', NOW, ''],
-  ['未来时间原样透出（delta < 0）', '2026-10-30T05:00:00.000Z', NOW, '2026-10-30T05:00:00.000Z'],
-  ['未来时间原样透出（字符串形式逐字返回）', '2026-10-30T13:00:00+08:00', NOW, '2026-10-30T13:00:00+08:00'],
+  // 未来时刻：客户端与服务端有时钟偏差，"刚刚"至少不会误导
+  ['未来时间走「刚刚」（不显示负数）', '2026-10-30T13:00:00+08:00', NOW, '刚刚'],
 ]
 
 // 时区守卫：绝对日期档依赖**本地时区**（getFullYear 等），本脚本把 TZ 钉在 +08:00
@@ -90,23 +99,18 @@ const RELATIVE_CASES = [
 
 console.log('== 六档相对时间判据 ==')
 for (const [name, iso, now, expected] of RELATIVE_CASES) {
-  check(name, formatRelativeTime(iso, now), expected)
+  check(name, rel(iso, now), expected)
 }
 
-console.log('\n== parseTimestamp ==')
-check('合法 ISO → 毫秒时间戳', parseTimestamp('2026-10-30T12:00:00+08:00'), NOW)
-check('非法串 → null', parseTimestamp('not-a-date'), null)
-check('空串 → null', parseTimestamp(''), null)
-check('纯空白 → null', parseTimestamp('   '), null)
+console.log('\n== timeView 的精确绝对时间（title / aria-label）==')
+check('合法时刻 → 补零的 YYYY-MM-DD HH:mm', timeView('2026-01-02T03:04:00', NOW).full, '2026-01-02 03:04')
+check('带 +08:00 偏移 → 本地时刻', timeView('2026-10-30T12:00:00+08:00', NOW).full, '2026-10-30 12:00')
+check('非法串 → full 回原文', timeView('not-a-date', NOW).full, 'not-a-date')
+check('非法串不给 datetime（machine 为 null）', timeView('not-a-date', NOW).machine, null)
+check('合法时刻的 machine 是 ISO 串', timeView('2026-10-30T12:00:00+08:00', NOW).machine, '2026-10-30T04:00:00.000Z')
 
-console.log('\n== formatAbsoluteTime（补零形态，用于 title / aria-label）==')
-check("'2026-01-02T03:04:00' 本地 → '2026-01-02 03:04'", formatAbsoluteTime('2026-01-02T03:04:00'), '2026-01-02 03:04')
-check('带 +08:00 偏移 → 本地时刻', formatAbsoluteTime('2026-10-30T12:00:00+08:00'), '2026-10-30 12:00')
-check('非法串 → 空串', formatAbsoluteTime('not-a-date'), '')
-check('空串 → 空串', formatAbsoluteTime(''), '')
-
-console.log('\n== 刷新节拍 ==')
-check('RELATIVE_TIME_TICK_MS = 30 秒', RELATIVE_TIME_TICK_MS, 30_000)
+console.log('\n== 刷新节拍（刻度的唯一真源在 utils/nowTick.ts）==')
+check('TICK_INTERVAL_MS = 30 秒', TICK_INTERVAL_MS, 30_000)
 
 console.log(`\n通过 ${passed} / 失败 ${failed}`)
 console.log(failed === 0 ? '判定：PASS' : '判定：FAIL')
