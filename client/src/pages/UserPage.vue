@@ -29,6 +29,8 @@ import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import * as usersApi from '../api/users'
 import type { PublicProfile } from '../api/users'
+import * as followsApi from '../api/follows'
+import type { FollowRelation } from '../api/follows'
 import { NETWORK_MESSAGE, toHttpError, type HttpError } from '../api/http'
 import { isCapabilityUnavailable } from '../api/mode'
 import { useAuthStore } from '../stores/auth'
@@ -99,6 +101,66 @@ const joinedAt = computed(() => {
   return raw === '' ? '服务端未返回' : raw.slice(0, 10)
 })
 
+// ---------- 关系动作区（wayfinder #56） ----------
+
+/**
+ * 我与 TA 的关系（服务端算好的派生视图）。
+ *
+ * null = 还没查到 / 查不到（游客看不到"我有没有关注 TA" —— 那需要登录）。
+ * 它**不是**本地推出来的：互关与 canDm 都是派生事实（两个方向都有边 + 未被拉黑），
+ * 前端自己算会与服务端漂移（铁律 I3：授权事实只在服务端）。
+ */
+const relation = ref<FollowRelation | null>(null)
+
+/** 关注动作在途（单条锁：只锁这一个按钮，不锁整页）。 */
+const followBusy = ref(false)
+/** 关注动作的失败文案（服务端原样）。 */
+const followError = ref('')
+/** 关注成功的提示（一次性）。 */
+const followNotice = ref('')
+
+/**
+ * 关系动作该显示什么。
+ *
+ * 六种（GLOSSARY「Profile」· 关系动作）：
+ *   - self       本人：没有关注自己的动作；
+ *   - none       还没关注 → 「关注」；
+ *   - following  我关注了 TA → 「已关注」（可取消）；
+ *   - follow-back TA 关注了我 → 「回关」（点完即互关 = 好友）；
+ *   - mutual    互关 → 「互关·发消息」；
+ *   - blocked   拉黑存续期 → 关注按钮整个消失（GLOSSARY：拉黑存续期不给关注按钮）。
+ *
+ * ⚠ **最终判据在服务端**：前端显示"关注"而服务端说 403（拉黑），
+ * 页面会照服务端文案说明。反过来前端显示"已关注"而服务端没有这条边，
+ * 那才是真 bug —— 所以关系态一律取服务端回的那份。
+ */
+const followAction = computed<'self' | 'none' | 'following' | 'follow-back' | 'mutual' | 'blocked'>(() => {
+  if (isSelf.value) return 'self'
+  const r = relation.value
+  if (!r) return 'none'
+  if (r.mutual) return 'mutual'
+  if (r.following) return 'following'
+  if (r.followedBy) return 'follow-back'
+  return 'none'
+})
+
+/** 关系动作按钮的文案（随动作态变）。 */
+const followActionLabel = computed(() => {
+  switch (followAction.value) {
+    case 'following':
+      return '已关注'
+    case 'follow-back':
+      return '回关'
+    case 'mutual':
+      return '互关 · 发消息'
+    default:
+      return '关注'
+  }
+})
+
+/** 「已关注」的次级动作：取消关注（取关是**幂等**的，重复点不报错）。 */
+const canUnfollow = computed(() => followAction.value === 'following')
+
 const selfEmail = computed(() => auth.profile?.email || '未绑定邮箱')
 
 const selfEmailState = computed(() => {
@@ -127,6 +189,10 @@ function resetView(): void {
   saveFieldError.value = ''
   saving.value = false
   draft.value = auth.profile?.displayName ?? ''
+  relation.value = null
+  followBusy.value = false
+  followError.value = ''
+  followNotice.value = ''
 }
 
 /** 按当前 id 决定读什么：本人零请求，他人读公开档案。 */
@@ -154,6 +220,97 @@ async function refresh(): Promise<void> {
 }
 
 /**
+ * 读我与 TA 的关系。
+ *
+ * **只在登录态下读**：关系是私有事实（"我有没有关注 TA"不是公开信息），
+ * 游客访问公开档案时这一栏不出现（服务端也 401）。
+ *
+ * 失败**不**让整页失败：关系动作只是档案的一栏，
+ * 而公开档案（名字、加入时间）在关系读不到时仍然可用。
+ * 失败只落到那一栏的提示上 —— 整页变成"用户不存在"是过度的反应。
+ */
+async function loadRelation(): Promise<void> {
+  if (parsedId.value === 0 || isSelf.value || !auth.isLoggedIn) {
+    relation.value = null
+    return
+  }
+  try {
+    relation.value = await followsApi.getRelation(parsedId.value)
+  } catch (err) {
+    if (isCapabilityUnavailable(err)) {
+      // 整域未上线：那一栏不渲染，其余照常（与页面其它部分的降级口径一致）。
+      relation.value = null
+      return
+    }
+    const e = toHttpError(err)
+    // 401：authedFetch 已经把人送去登录页（带 redirect），这里不重复提示。
+    if (e.status === 401) {
+      relation.value = null
+      return
+    }
+    // 404（对方刚被注销 / 不可见）：关系栏空着，档案其余部分照常。
+    relation.value = null
+  }
+}
+
+/**
+ * 关注 / 回关。
+ *
+ * 用服务端回**权威关系**替换本地状态（不回 void）：互关是派生的，
+ * 本地自己算会与服务端漂移，而"按钮显示已关注但服务端没有这条边"是要避免的症状。
+ */
+async function doFollow(): Promise<void> {
+  if (followBusy.value) return
+  const target = parsedId.value
+  if (target === 0) return
+  followError.value = ''
+  followNotice.value = ''
+  followBusy.value = true
+  try {
+    const next = await followsApi.follow(target)
+    relation.value = next
+    followNotice.value = next.mutual ? '互关成功：你们现在是好友' : '已关注'
+  } catch (err) {
+    const e = toHttpError(err)
+    if (e.status === 401) {
+      followError.value = '登录状态已失效，请重新登录后再试'
+      return
+    }
+    followError.value = messageOf(e)
+  } finally {
+    followBusy.value = false
+  }
+}
+
+/** 取关（幂等：重复点不会报错，服务端也只删一条边）。 */
+async function doUnfollow(): Promise<void> {
+  if (followBusy.value) return
+  const target = parsedId.value
+  if (target === 0) return
+  followError.value = ''
+  followNotice.value = ''
+  followBusy.value = true
+  try {
+    await followsApi.unfollow(target)
+    // 本地状态：把"我关注了 TA"这一位翻掉，其余（TA 关注我 / 计数）由服务端说了算 ——
+    // 但这里不必再打一次 GET：取关只影响**我这一条边**，其余位不变。
+    if (relation.value) {
+      relation.value = { ...relation.value, following: false, mutual: false, canDm: false }
+    }
+    followNotice.value = '已取消关注'
+  } catch (err) {
+    const e = toHttpError(err)
+    if (e.status === 401) {
+      followError.value = '登录状态已失效，请重新登录后再试'
+      return
+    }
+    followError.value = messageOf(e)
+  } finally {
+    followBusy.value = false
+  }
+}
+
+/**
  * 只有 `props.id` 与"登录者 id"的**值**变化才重跑 loader。
  *
  * 刻意拼成字符串而不是 watch 数组：数组每次求值都是新引用，Vue 会当成变化；
@@ -164,6 +321,9 @@ watch(
   () => `${props.id}:${auth.profile?.id ?? ''}`,
   () => {
     void refresh()
+    // 关系单独读：它需要登录态，而公开档案不需要 ——
+    // 两者的准入不同，所以**不**并进 refresh()（那会让登录态变化拖垮档案读取）。
+    void loadRelation()
   },
   { immediate: true },
 )
@@ -287,6 +447,62 @@ async function doLogout(): Promise<void> {
             <p class="mono dim handle">@{{ view.username }}</p>
           </div>
         </header>
+
+        <!-- 关系动作区（wayfinder #56）：关注 / 回关 / 已关注 / 互关·发消息。 -->
+        <section v-if="!isSelf && auth.isLoggedIn" class="relation" aria-labelledby="relation-head">
+          <h2 id="relation-head" class="sr-only">关系动作</h2>
+
+          <!-- 计数：纯数字，**不可点开名单**（名单只在 /me 看自己的，GLOSSARY「Profile」）。 -->
+          <p v-if="relation" class="counts dim">
+            <span><strong>{{ relation.followingCount }}</strong> 关注</span>
+            <span aria-hidden="true">·</span>
+            <span><strong>{{ relation.followerCount }}</strong> 粉丝</span>
+          </p>
+
+          <div class="relation-acts">
+            <!--
+              互关 → 显示「互关 · 发消息」，但**发消息只在互关时可用**（can_dm）。
+              这里把两个动作分开：一个按钮是关系动作（关注/回关/已关注），
+              另一个是消息入口（仅互关且可私聊时出现）。
+              为什么分开：关系动作是幂等的（再点一次不报错），
+              而"发消息"是**跳转** —— 两者混成一个按钮会让"点一下没反应"变成可能。
+            -->
+            <button
+              v-if="followAction !== 'mutual'"
+              type="button"
+              class="primary"
+              :disabled="followBusy"
+              data-testid="follow-button"
+              @click="doFollow"
+            >
+              {{ followBusy ? '处理中…' : followActionLabel }}
+            </button>
+
+            <RouterLink
+              v-else
+              class="primary as-link"
+              :to="{ name: 'messages', query: { peer: parsedId } }"
+              data-testid="follow-message-link"
+            >
+              互关 · 发消息
+            </RouterLink>
+
+            <!-- 取关：只在"我关注了 TA 且未互关"时出现（互关时用「发消息」那一侧）。 -->
+            <button
+              v-if="canUnfollow"
+              type="button"
+              class="ghost"
+              :disabled="followBusy"
+              data-testid="unfollow-button"
+              @click="doUnfollow"
+            >
+              取消关注
+            </button>
+          </div>
+
+          <p v-if="followError" class="alert" role="alert">{{ followError }}</p>
+          <p v-if="followNotice" class="ok" role="status">{{ followNotice }}</p>
+        </section>
 
         <!-- 未登录访问他人档案：公开信息不需要登录，这里把这一点说明白，并给登录入口。 -->
         <p v-if="!auth.isLoggedIn && !isSelf" class="guest-note" role="status">
@@ -439,6 +655,35 @@ async function doLogout(): Promise<void> {
   margin: 0;
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+/* 关系动作区：名片与公开字段之间的一栏。 */
+.relation {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+.counts {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 0;
+  font-size: 13px;
+}
+.counts strong {
+  color: var(--text);
+  font-weight: 700;
+}
+.relation-acts {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+/* 主行动做成链接时的外观：与 .primary 同一套视觉，但保留链接语义。 */
+.as-link {
+  text-decoration: none;
 }
 
 .guest-note {

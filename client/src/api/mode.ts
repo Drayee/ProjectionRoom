@@ -37,7 +37,7 @@ import { HttpError, toHttpError } from './http'
  * 与 `client/.env.example` 的六个 `VITE_MOCK_*` 一一对应；新增域时两处都要加，否则
  * `SWITCHES` 的 `Record` 类型会立刻报缺键（故意的：漏一个就会静默沿用别的域的开关）。
  */
-export type ApiDomain = 'posts' | 'friends' | 'messages' | 'forum' | 'official' | 'users'
+export type ApiDomain = 'posts' | 'friends' | 'messages' | 'forum' | 'official' | 'users' | 'follows'
 
 /**
  * 整域能力尚未上线。
@@ -124,6 +124,10 @@ const SWITCHES: Record<ApiDomain, () => string | undefined> = {
   forum: () => readRaw(import.meta.env.VITE_MOCK_FORUM),
   official: () => readRaw(import.meta.env.VITE_MOCK_OFFICIAL),
   users: () => readRaw(import.meta.env.VITE_MOCK_USERS),
+  // 关注域（wayfinder #56）：
+  //   新增一个域 = 六个开关变七个。**漏加会让 Record 类型立刻报缺键**
+  //   （这是刻意的：静默沿用别的域的开关会让「关注」在真环境里打 mock 接口）。
+  follows: () => readRaw(import.meta.env.VITE_MOCK_FOLLOWS),
 }
 
 /** 该域当前是否走本地 mock（默认 true）。 */
@@ -213,5 +217,6 @@ export function mockSwitchSnapshot(): Record<ApiDomain, boolean> {
     forum: isMock('forum'),
     official: isMock('official'),
     users: isMock('users'),
+    follows: isMock('follows'),
   }
 }

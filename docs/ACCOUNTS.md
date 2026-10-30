@@ -89,6 +89,14 @@ friendships
   created_at / updated_at
   UNIQUE (requester_id, addressee_id)
 
+follows                                       -- 关注边（wayfinder #56；ADR 0001）
+  id          bigserial PK
+  follower_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE
+  followee_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE
+  created_at  timestamptz NOT NULL DEFAULT now()
+  UNIQUE (follower_id, followee_id)             -- 同一条边只能有一条（重复关注是幂等的）
+  CHECK (follower_id <> followee_id)            -- 自关注在数据库侧就被挡住
+
 messages
   id           bigserial PK
   kind         varchar(4) NOT NULL                -- dm | room
@@ -180,6 +188,14 @@ schema_migrations
 `accepted` **对称**（任一方查询都能看到对方，不需要第二条边）；`pending` **有向**（只有 `addressee_id` 能 accept/reject）；`blocked` **有向**（`blocked_by_id` 记录是谁拉黑了谁，被拉黑方发不进消息也发不出请求）。
 这样既不会出现"两条边不同步"的不一致，也能表达拉黑的单向语义。
 拉黑：`POST /api/blocks` → `status=blocked`，**服务端强制**：被拉黑方发不进消息、好友请求被拒、列表互不可见（不是前端隐藏）。
+
+### 7.1b 关注（wayfinder #56；ADR 0001「好友 ≡ 互关」）
+关注是**单向、免同意**的有向边，存 `follows` 表（一对用户可有两条边：A→B 与 B→A 各一行）。
+「互关」因此是**派生**事实（两条边同时存在的合取），不是要维护的状态 —— 免去"忘了更新互关标记"的漂移。
+「好友」是「互关」的产品同义词；好友请求流程（`pending`）随 ADR 0001 退役（见 wayfinder #59）。
+拉黑存续期**双向**禁止新关注（票 42 决议）；拉黑事务（删拉黑方的 follow、保留反向 follow）属 wayfinder #57。
+can_dm(A,B) := mutual_follow(A,B) ∧ NOT blocked_either(A,B) —— 唯一的实现落在 `store.CanDM`。
+端点：`POST /api/follows`（关注，201）/ `DELETE /api/follows/:userId`（取关，204）/ `GET /api/follows/:userId`（我与 TA 的关系 + TA 的关注/粉丝数）。
 
 ### 7.2 私聊
 - 用户通道 `/ws/user`（ticket 必填）：`friend-request` / `friend-accepted` / `friend-removed` / `blocked` / `dm` / `dm-read` / `presence`。

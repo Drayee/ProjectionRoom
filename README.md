@@ -319,6 +319,7 @@ client/src/api/<域>.ts          门面：页面唯一 import 的出口，导出
 | `VITE_MOCK_FORUM` | mock | **真实** | 番剧论坛（`/forum`） |
 | `VITE_MOCK_OFFICIAL` | mock | **真实** | 官方分区（`/official`） |
 | `VITE_MOCK_USERS` | mock | **真实** | 用户公开档案（`/user/:id`） |
+| `VITE_MOCK_FOLLOWS` | mock | **真实** | 关注域（`/api/follows`，档案页关系动作） |
 
 **两侧默认值刻意相反**，这不是笔误：
 
