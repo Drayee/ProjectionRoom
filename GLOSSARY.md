@@ -63,7 +63,7 @@ Terms locked by [收藏域：做不做与产品形状](https://github.com/Drayee
 
 ## Shared object components（共享对象组件）
 
-Terms locked by [共享对象组件契约](https://github.com/Drayee/ProjectionRoom/issues/44) (2026-10-30).
+Terms locked by [共享对象组件契约](https://github.com/Drayee/ProjectionRoom/issues/44) (2026-10-30); pixel-avatar overlay rules by [真头像上传](https://github.com/Drayee/ProjectionRoom/issues/54) (2026-10-30).
 
 | Term | 中文 | Definition |
 | --- | --- | --- |
@@ -214,3 +214,21 @@ Terms locked by [关注与回关的通知渠道与已读语义](https://github.c
 | **Follow events** | 关注事件 | 只两类产生通知：**新粉丝**（follow-created）与**互关**（mutual-follow，文案「互关成为好友」）。**取关/被取关静默**。在线经 FriendPusher→底部 3~5s 自消失 toast；toast 不改变红点生命周期。 |
 | **Mute predicate** | 豁免谓词 | 拉黑存续期双向静默；已注销/封禁不发。与 #52 流谓词同一个 store 层共用实现（`NOT blocked_either ∧ 未注销未封禁`）。 |
 | **Followers endpoint** | 粉丝端点 | `GET /api/followers → {items, new_count}`：列表与红点一端两用；需登录。 |
+
+
+## Real avatar（真头像）
+
+Terms locked by [真头像上传：存储、审核与字母头兜底](https://github.com/Drayee/ProjectionRoom/issues/54) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Avatar overlay** | 覆盖层 | `avatarUrl` 是 UserAvatar 的可选覆盖：空 / onerror（该会话内不重试）/ 被管理端重置 —— 三态全回落 `avatarOf()` 字母头。字母头永存。 |
+| **Browser crop** | 浏览器裁剪 | canvas 裁方形 512px、≤1 MiB、JPEG/WebP（GIF 保留动图）。服务端零图像依赖、不重编码；非方图由 `object-fit` 兜（与 uploads 现安全论证同族）。 |
+| **Moderation four-pack** | 审核四件套 | 人机验证子窗体 + **每人日 5 次**变更频控（记在 PATCH /api/me）+ 管理端 `reset_avatar`（删对象+置空+审计）+ 人工处置。无内容识别、无第三方。 |
+| **URL-as-version** | URL 即版本 | 每次上传新随机 key，PATCH 替换 `users.avatar_url`；长缓存安全；旧对象异步延迟删除（不在请求路径，I4 同族）。 |
+| **Single entry** | 唯一入口 | 改头像只在 `/me?tab=settings`。头像位不加编辑态——#44 定「头像=导航」，避免进主页/改图二义。 |
+| **Zero new endpoint** | 零新端点 | 复用 `POST /api/uploads` 拿 URL + 扩 `PATCH /api/me {avatarUrl}`（校验属本桶 key 形态，**外链注入 400**；null=清除）。 |
+
+### Doc debt
+
+`docs/ACCOUNTS.md` 的非目标「头像/图片上传」一句随实现票改写（决策已翻转）。
