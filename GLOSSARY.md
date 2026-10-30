@@ -187,3 +187,16 @@ Terms locked by [账号设置：并入档案还是保持独立流](https://githu
 ### Not doing
 
 - 改用户名（公开且被搜索引用）；头像上传（地图 Out of scope）；注销立即硬删选项。
+
+
+## Following feed（关注流）
+
+Terms locked by [关注信息流形态：优先推送的消费面](https://github.com/Drayee/ProjectionRoom/issues/52) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Following pill** | 「关注」pill | `/posts?sort=following`：/posts 的第三个排序 pill（最新/热门/关注）。严格时间倒序，**仅我关注的人**的全部帖（普通帖+板块主题串）。不是独立路由、不是顶栏分区。 |
+| **Feed predicate** | 流谓词 | `author ∈ 我 following ∧ ¬blocked_either ∧ 未注销 ∧ 未封禁`；store 层**共用实现**（关注流 / #47 他人帖列表 / #51 注销隐藏同一真源），前端零判断。 |
+| **Guest feed CTA** | 游客流引导 | pill 对游客可见可点；进入后列表区=分区内登录引导（AsyncState empty 形），`returnTo=/posts?sort=following`，不弹走页面。 |
+| **Zero-follow empty** | 零关注空态 | 「还没有关注任何人」+ 深链 `/friends?focus=search`（#50 页头搜索）。不设新鲜度门槛：关注对象只有老帖也照显示。 |
+| **Posts URL contract** | 帖子页 URL 契约 | 三 pill 统一 `?sort=latest\|hot\|following` 进 URL；`utils/postsRoute.ts` 键源。分享 following 给他人=对方的关注流，语义如此。 |
