@@ -59,3 +59,24 @@ Terms locked by [收藏域：做不做与产品形状](https://github.com/Drayee
 
 - **不做**：公开收藏夹、他人可见的收藏、收藏数公开计数、收藏夹分类/标签/备注/导出。
 - 存储为单表 `favorites(user_id, target_type, target_id, created_at)`，主键三元组保证幂等；跨表完整性由服务层校验（对象不存在 → 404，不写孤儿行）。
+
+
+## Shared object components（共享对象组件）
+
+Terms locked by [共享对象组件契约](https://github.com/Drayee/ProjectionRoom/issues/44) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **UserAvatar** | 头像 | 首字母 + `utils/avatar.ts` 五色板的圆形块；**不上传图片**。默认可点跳档案（本人 → `/me`）。嵌套链接场景传 `interactive=false`。 |
+| **RelativeTime** | 相对时间 | 六档：刚刚 / N 分钟前 / N 小时前 / N 天前 / 同年 M月D日 / 跨年 YYYY年M月D日。全站**单一 30s tick**，`title` 给绝对时间。超 7 天回绝对日期。 |
+| **Button / IconButton** | 按钮 | 五态：hover 提亮、active 下沉 1px、focus-visible 外环、disabled 降饱和、**loading 内联 spinner 且锁宽**。新代码禁止裸 `<button>`。 |
+| **AuthorRow** | 作者行 | UserAvatar + displayName + @username + 角色标签 + RelativeTime；`size` = compact / detail / comment。私信气泡头不复用。 |
+| **AsyncState** | 三态门面 | `loading`(骨架屏) / `empty`(图标+一句说明+可选行动) / `error`(人话+重试)。**禁止裸「暂无数据」**。 |
+
+### Single-source boundaries
+
+头像派生（`utils/avatar.ts`）、相对时间（RelativeTime + `useNowTick`）、按钮反馈（`ui/Button`）、三态（`AsyncState`）、作者行（`AuthorRow`）**各只有一个源**；页面里再写私有 `avatarOf` / `shortTime` / 裸 spinner 块视为回归。
+
+### Layering
+
+`ui/` = 纯展示（不 import store / router，props 进事件出）；壳与业务组合在 `features/`。顶栏旧的 `hsl(hash)` 取色已废除，统一走 `avatarOf()`。
