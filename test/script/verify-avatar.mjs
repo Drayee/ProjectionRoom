@@ -41,9 +41,14 @@
  *  A5 **hover 反馈**：悬停时底色提亮（filter）且有轻微位移（transform）。
  *  A6 **reduced-motion**：开启「减少动态效果」后，悬停**仍然换色**（反馈不能消失），
  *     但**不再位移**（动画该判死）。
+ *  A7 **顶栏不再自取色**（源码级）：`AppHeader.vue` 里没有名字哈希 `hsl(...)` 那一套。
+ *     票 #44 决议要求"顶栏那个 `hsl(hash)` 删除，统一走 `avatarOf()`"——
+ *     这是**源码级**判据，因为它要防的是"以后有人又写回一份"。
+ *  A8 **取色只有一个源**（源码级）：全仓只有 `utils/avatar.ts` 定义头像派生，
+ *     页面里不许再有第二份（GLOSSARY「禁止复制边界」）。
  */
 import { createServer } from 'node:http'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { findChrome, openTarget, sleep, startChrome, waitFor } from './lib/browser.mjs'
@@ -325,6 +330,48 @@ async function main() {
       rmBefore.filter + ' → ' + rmAfter.filter)
     record('A6b reduced-motion 下不再位移', rmAfter.transform === rmBefore.transform,
       rmBefore.transform + ' → ' + rmAfter.transform)
+
+    // ---------- A7 / A8 源码级判据（防"以后有人又写回一份"） ----------
+    const SRC = join(REPO_ROOT, 'client', 'src')
+
+    /**
+     * 去掉注释再看。
+     *
+     * 为什么必须去注释：本组件（以及 AppHeader）的**注释里**会提到 `hsl(hash)` 那个
+     * 被删掉的实现（那是"为什么删它"的出处说明）。直接对原文 grep 会把注释里的
+     * 历史名词当成"代码还在用"，判据就变成了假红。
+     */
+    const stripComments = (src) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+
+    const headerSrc = stripComments(
+      readFileSync(join(SRC, 'components', 'ui', 'AppHeader.vue'), 'utf8'),
+    )
+    const headerHasHash = headerSrc.includes('hsl(') || headerSrc.includes('codePointAt')
+    record(
+      'A7a 顶栏不再用名字哈希取色（代码里无 hsl( / codePointAt）',
+      !headerHasHash,
+      headerHasHash ? 'AppHeader.vue 的代码里出现 hsl( 或 codePointAt' : '',
+    )
+
+    // 全仓扫一遍：除 utils/avatar.ts 外，谁还自己定义头像派生？
+    const DERIVATION = /(function\s+avatarOf|const\s+AVATAR_PALETTE)/
+    const offenders = []
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          walk(full)
+          continue
+        }
+        if (!/\.(ts|vue)$/.test(entry.name)) continue
+        if (full.endsWith(join('utils', 'avatar.ts'))) continue
+        if (DERIVATION.test(readFileSync(full, 'utf8'))) offenders.push(full.slice(SRC.length + 1))
+      }
+    }
+    walk(SRC)
+    evidence.derivationOffenders = offenders
+    record('A8 取色只有一个源（utils/avatar.ts 之外没有第二份派生）', offenders.length === 0, offenders.join(', '))
 
     console.log('\n通过 ' + passed + ' / 失败 ' + failed)
     console.log(JSON.stringify(evidence, null, 2))
