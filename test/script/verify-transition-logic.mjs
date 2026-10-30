@@ -22,6 +22,10 @@
  *
  * 用法：node test/script/verify-transition-logic.mjs
  */
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import {
   TRANSITION_SHIFT_PX,
   TRANSITION_DURATION_MS,
@@ -30,6 +34,9 @@ import {
   routeDepth,
   shouldMorphSharedElement,
 } from '../../client/src/utils/routeTransition.ts'
+
+/** 仓库根目录（读 tokens.css 用）。 */
+const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 
 let failed = 0
 let passed = 0
@@ -164,6 +171,17 @@ console.log('\n== 决策理由非空（"为什么没动"必须能解释）==')
     planQueryOnly(),
   ]
   check('每条决策都有理由', cases.every((d) => typeof d.reason === 'string' && d.reason.length > 0), true)
+}
+
+console.log('\n== 唯一真源：CSS 时长 token 与 TS 常量一致 ==')
+{
+  // 决策器的 TRANSITION_DURATION_MS 与 tokens.css 的 --dur-comp 是**同一条约定**。
+  // 两处各写一个 240，改了一处忘了另一处 → 界面动效时长与决策器声明的对不上，
+  // 而这种漂移在真机上很难一眼看出（"看起来还是有动画"）。这里把它钉住。
+  const css = readFileSync(join(REPO_ROOT, 'client', 'src', 'styles', 'tokens.css'), 'utf8')
+  const m = css.match(/--dur-comp:\s*([\d.]+)ms/)
+  const tokenMs = m ? Number(m[1]) : null
+  check('--dur-comp 的值与 TRANSITION_DURATION_MS 一致', tokenMs, TRANSITION_DURATION_MS)
 }
 
 console.log(`\n通过 ${passed} / 失败 ${failed}`)
