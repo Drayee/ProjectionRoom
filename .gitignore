@@ -64,3 +64,13 @@ client/dist-debug/
 projectionroom.exe
 projectionroom_linux
 _migrate/dump/mapped.sql
+# ---- 本机调试产物（lead/子代理运行期产生，绝不能入库）----
+# .local/ 是 dsh 本机状态、undefined/ 是工具把环境变量展开失败留下的目录、
+# %SystemDrive%/ 同源。_jobs.json/_runs.json/_logs.zip 是任务快照。
+/.local/
+/undefined/
+/%SystemDrive%/
+/_jobs.json
+/_runs.json
+/_logs.zip
+/.tmp-test-dsn.txt
