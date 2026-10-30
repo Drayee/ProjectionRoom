@@ -246,11 +246,42 @@ func isSafeTableName(name string) bool {
 	return true
 }
 
-// dropPhaseOneTables 删掉本期建的全部表（含账本），仅供迁移用例回到"空库"。
+// dropPhaseOneTables 删掉 public schema 下的**全部**表（含账本），仅供迁移用例回到"空库"。
 // 只会跑在 _test 库上：requireTestDB 已经拦住了库名不以 _test 结尾的情况。
+//
+// ⚠ **清单是动态取的，不手写**（同 truncateAll 的那条纪律：手写清单会过时）。
+//
+// 0015（wayfinder #56，给 follows 加外键）踩过这个坑：
+// 旧版本手写了一张表清单，漏了 follows。于是 DROP users ... CASCADE 把
+// follows 上的**外键约束**连带删掉了（外键指向被删的表），却把 follows 表本身留下；
+// 接着 CREATE TABLE IF NOT EXISTS follows 变成空操作 ——
+// 迁移"成功"了，可外键再也没回来，而症状是 schema 用例报"缺少约束"，
+// 与"迁移没写对"看起来毫不相干。
+//
+// 动态取清单的根本原因是：只要有一张表手写漏了，它的外键就会在 CASCADE 里被悄悄摘掉。
 func dropPhaseOneTables(t *testing.T, s *Store) {
 	t.Helper()
-	const stmt = `DROP TABLE IF EXISTS password_resets, admin_audit, rooms_meta, sessions, users, schema_migrations CASCADE`
+
+	var tables []string
+	if err := s.DB().Raw(`
+		SELECT tablename FROM pg_tables
+		 WHERE schemaname = 'public'
+		 ORDER BY tablename`).Scan(&tables).Error; err != nil {
+		t.Fatalf("列出业务表失败：%v", err)
+	}
+	if len(tables) == 0 {
+		return // 空库（迁移用例的起点）：没有可清的。
+	}
+
+	// 表名来自 pg_tables（不是用户输入），拼进语句前再过滤一次非法字符做纵深防御。
+	quoted := make([]string, 0, len(tables))
+	for _, name := range tables {
+		if !isSafeTableName(name) {
+			t.Fatalf("跳过非常规表名（不该出现在这个库里）：%q", name)
+		}
+		quoted = append(quoted, `"`+name+`"`)
+	}
+	stmt := `DROP TABLE IF EXISTS ` + strings.Join(quoted, ", ") + ` CASCADE`
 	if err := s.DB().Exec(stmt).Error; err != nil {
 		t.Fatalf("清空测试库结构失败：%v", err)
 	}
