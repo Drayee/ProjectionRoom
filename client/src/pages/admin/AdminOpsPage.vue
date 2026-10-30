@@ -21,6 +21,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import BrandIcon from '../../components/ui/BrandIcon.vue'
+import RelativeTime from '../../components/ui/RelativeTime.vue'
 import { ADMIN_PAGE_SIZE, useAdminStore } from '../../stores/admin'
 import type { AdminAuditRow } from '../../api/admin'
 
@@ -99,14 +100,13 @@ function reloadAudit(): void {
   void store.loadAudit(0)
 }
 
-/** 时间显示：服务端给 RFC3339，这里只把 T 换空格并按本地时区显示到秒。 */
-function shortTime(iso: string): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso.slice(0, 19).replace('T', ' ')
-  const p = (n: number): string => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-}
+/*
+ * 时间显示走 `ui/RelativeTime.vue`（票 #60）。
+ *
+ * 这里原先有一份私有的 `shortTime()`（本地时区到秒）。它被删掉的理由不是"它错了"，
+ * 而是"它又一份"：全站相对时间的真源只有一个（决策票 #44）。悬停仍能拿到精确
+ * 绝对时间（`YYYY-MM-DD HH:mm`），而审计行看的是"多久以前"，不是秒级时刻。
+ */
 
 /** 审计的"对象"：类型 + 标识拼一个可读的串（targetType 可能是 user / room）。 */
 function auditTarget(row: AdminAuditRow): string {
@@ -301,7 +301,7 @@ onBeforeUnmount(() => {
                 </thead>
                 <tbody>
                   <tr v-for="row in store.audit.items" :key="row.id">
-                    <td class="mono">{{ shortTime(row.createdAt) }}</td>
+                    <td class="mono"><RelativeTime :value="row.createdAt" /></td>
                     <td class="mono">#{{ row.actorId }}</td>
                     <td class="action">{{ row.action }}</td>
                     <td class="mono">{{ auditTarget(row) }}</td>
@@ -316,7 +316,7 @@ onBeforeUnmount(() => {
               <li v-for="row in store.audit.items" :key="row.id" class="audit-card">
                 <div class="ac-head">
                   <span class="action">{{ row.action }}</span>
-                  <span class="mono dim">{{ shortTime(row.createdAt) }}</span>
+                  <RelativeTime class="mono dim" :value="row.createdAt" />
                 </div>
                 <p class="ac-line mono">操作者 #{{ row.actorId }} · {{ auditTarget(row) }}</p>
                 <p class="ac-line mono dim">来源 IP {{ row.ip || '—' }}</p>

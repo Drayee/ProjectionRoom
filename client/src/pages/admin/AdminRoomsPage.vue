@@ -22,6 +22,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from '../../components/ui/BrandIcon.vue'
+import RelativeTime from '../../components/ui/RelativeTime.vue'
 import { ADMIN_PAGE_SIZE, useAdminStore } from '../../stores/admin'
 import type { AdminRoom } from '../../api/admin'
 
@@ -144,10 +145,11 @@ async function confirmPending() {
   }
 }
 
-function shortTime(iso: string): string {
-  if (!iso) return '—'
-  return iso.replace('T', ' ').slice(0, 16)
-}
+/*
+ * 时间显示走 `ui/RelativeTime.vue`（票 #60）：原先的私有 `shortTime()` 只是
+ * `iso.replace('T',' ').slice(0,16)` —— 那不加时区换算，直接裁 UTC 串，
+ * 与用户看到的本地时刻差若干小时。删除这份副本顺带修掉那个静默偏差。
+ */
 
 /** 房间状态的单一结论（多个布尔字段压成一句话，避免界面上一堆互相矛盾的徽标）。 */
 function stateText(r: AdminRoom): string {
@@ -293,7 +295,7 @@ function stateClass(r: AdminRoom): string {
                     <span v-if="r.hasPassword" class="badge dim">有密码</span>
                   </td>
                   <td class="mono dim">{{ r.memberCount }} 人 / 深 {{ r.maxDepth }}</td>
-                  <td class="mono dim">{{ shortTime(r.lastSeenAt) }}</td>
+                  <td class="mono dim"><RelativeTime :value="r.lastSeenAt" /></td>
                   <td class="acts">
                     <button
                       v-if="r.inMemory"
@@ -333,7 +335,9 @@ function stateClass(r: AdminRoom): string {
                 <span v-if="r.hasPassword" class="badge dim">有密码</span>
                 <span v-if="r.metadataMissing" class="badge dim">库中无元数据</span>
               </p>
-              <p class="mono dim card-line">{{ r.memberCount }} 人 / 深 {{ r.maxDepth }} · {{ shortTime(r.lastSeenAt) }}</p>
+              <p class="mono dim card-line">
+                {{ r.memberCount }} 人 / 深 {{ r.maxDepth }} · <RelativeTime :value="r.lastSeenAt" />
+              </p>
               <div class="card-acts">
                 <button v-if="r.inMemory" type="button" class="danger" :disabled="store.busyKey !== ''" @click="askClose(r)">强关</button>
                 <button

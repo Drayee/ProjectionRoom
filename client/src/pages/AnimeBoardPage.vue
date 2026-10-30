@@ -17,6 +17,7 @@ import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
+import RelativeTime from '../components/ui/RelativeTime.vue'
 import {
   FORUM_THREADS_EMPTY_TEXT,
   FORUM_THREADS_PAGE_SIZE,
@@ -60,10 +61,15 @@ const failureText = computed(() => {
   return ''
 })
 
-/** 主题串的"最后活跃"：优先 lastReplyAt（服务端排序键），没有就退回创建时间。 */
+/**
+ * 主题串的"最后活跃"取哪个字段：优先 lastReplyAt（服务端排序键），没有就退回创建时间。
+ *
+ * 只**选字段**，不排版 —— 排版归 `ui/RelativeTime.vue`（票 #60）。
+ * 原先这里用 `raw.slice(0, 16).replace('T', ' ')` 裸裁一串 RFC3339，
+ * 那既不是本地时区的正确时刻，也是全站第 N 份私有的时间排版。
+ */
 function lastActive(post: Post): string {
-  const raw = post.lastReplyAt || post.createdAt || ''
-  return raw === '' ? '—' : raw.slice(0, 16).replace('T', ' ')
+  return post.lastReplyAt || post.createdAt || ''
 }
 
 async function load(): Promise<void> {
@@ -217,7 +223,7 @@ watch(
                     {{ thread.author.displayName }} · 评论 {{ thread.commentCount }} · 赞 {{ thread.likeCount }}
                   </span>
                 </span>
-                <span class="last dim">最后回复 {{ lastActive(thread) }}</span>
+                <span class="last dim">最后回复 <RelativeTime :value="lastActive(thread)" /></span>
               </RouterLink>
             </li>
           </ul>

@@ -27,6 +27,7 @@ import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
+import RelativeTime from '../components/ui/RelativeTime.vue'
 import * as usersApi from '../api/users'
 import type { PublicProfile } from '../api/users'
 import { NETWORK_MESSAGE, toHttpError, type HttpError } from '../api/http'
@@ -95,8 +96,7 @@ const view = computed<(PublicProfile & { avatarChar: string; avatarColor: string
 
 const joinedAt = computed(() => {
   const raw = view.value?.createdAt ?? ''
-  // 服务端没返回（老缓存 / 装配缺失）时如实说，不拿空串冒充一个日期。
-  return raw === '' ? '服务端未返回' : raw.slice(0, 10)
+  return { raw, missing: raw === '' }
 })
 
 const selfEmail = computed(() => auth.profile?.email || '未绑定邮箱')
@@ -303,7 +303,10 @@ async function doLogout(): Promise<void> {
           <dt>昵称</dt>
           <dd>{{ view.displayName }}</dd>
           <dt>加入时间</dt>
-          <dd class="mono">{{ joinedAt }}</dd>
+          <dd class="mono">
+            <span v-if="joinedAt.missing">服务端未返回</span>
+            <RelativeTime v-else :value="joinedAt.raw" />
+          </dd>
           <template v-if="isSelf">
             <!-- 以下三项只出现在**本人**视角：它们是账号自己的信息，不是公开档案的一部分。 -->
             <dt>邮箱</dt>
