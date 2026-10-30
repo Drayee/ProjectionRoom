@@ -126,3 +126,28 @@ Terms locked by [月夜故障 DNA 上的自然层视觉原则](https://github.co
 ### Open（交给 #46 / to-spec）
 
 - 导航切换是否采用**滑动**指示器（本票只定「不滑动」为默认；若 #46 证明滑动更自然，必须 reduced-motion 下瞬时）。
+
+
+## Route transition & navigation state（路由过渡与导航当前态）
+
+Terms locked by [路由叙事过渡与导航当前态原则](https://github.com/Drayee/ProjectionRoom/issues/45) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Directional shift** | 方向性位移 | 换页过渡 = 12px 位移 + 淡入，240ms；**不是**整屏横移。顶栏常驻，整屏推会错位。 |
+| **Depth** | 层级 | 路由 `meta.depth`（0 落地 / 1 列表 / 2 详情）。方向由 `to.depth - from.depth` 决定，不用 `router.back()` 推断（URL 上不可区分）。 |
+| **Lateral switch** | 同级切换 | 同 depth 切分区 → 纯交叉淡入，**无位移**（分区之间没有父子关系，硬造方向会误导）。 |
+| **Shared element** | 共享元素 | 三处：帖子卡封面→详情、头像→档案、房间卡→房间；契约是两端 `data-shared="<kind>:<key>"`，用 FLIP 440ms。**只在前进方向触发**，后退一律方向性位移。 |
+| **Zero-wait fallback** | 零等待降级 | 共享元素任一条件不满足（元素缺失/图未解码/rect 为 0）→ 当场退化为 240ms 位移，**不许等待**。 |
+| **data-driven current state** | 数据驱动当前态 | 导航当前项由 `utils/navMatch.ts` 的前缀表判定（**不用** `router-link-active` 默认类），外观按 #43 的静态 pill，必须带 `aria-current="page"`。 |
+| **Transition-exempt** | 过渡豁免 | `/room/:roomId` 整页禁用过渡（WebRTC/播放器怕 DOM 抖动）；首屏、reduced-motion、同路由仅 query 变化同样不做过渡。 |
+| **Lazy routes** | 路由懒加载 | 19 个页面全改 `() => import()`；首包只含外壳 + 落地页；chunk 加载用 AsyncState 骨架；导航项 `pointerenter` 预取。 |
+
+### Rules
+
+- **过渡不等数据**：点击即开始 240ms，新页先骨架；数据慢**不许**延长或重播过渡（否则慢网下就是「点了没反应」）。
+- 每路由 `document.title = "页面名 · 月喵"`，单点设置；换页后焦点进主标题容器 + `aria-live` 播报一次。
+- 过渡只动 `transform`/`opacity`；计入 #43 的「一次性动画同屏 ≤3」。
+- `prefers-reduced-motion` 下换页瞬时：CSS 由 tokens 全局判死，**FLIP 走 WAAPI 必须自己判**（双侧判死，缺一侧会出现「CSS 停了 JS 还在动」）。
+
+详见 [docs/notes/2026-10-30-route-transition-navigation-principles.md](docs/notes/2026-10-30-route-transition-navigation-principles.md)。
