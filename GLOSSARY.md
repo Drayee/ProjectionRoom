@@ -151,3 +151,22 @@ Terms locked by [路由叙事过渡与导航当前态原则](https://github.com/
 - `prefers-reduced-motion` 下换页瞬时：CSS 由 tokens 全局判死，**FLIP 走 WAAPI 必须自己判**（双侧判死，缺一侧会出现「CSS 停了 JS 还在动」）。
 
 详见 [docs/notes/2026-10-30-route-transition-navigation-principles.md](docs/notes/2026-10-30-route-transition-navigation-principles.md)。
+
+
+## Friend discovery（好友搜索可发现性）
+
+Terms locked by [好友搜索可发现性](https://github.com/Drayee/ProjectionRoom/issues/50) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Header search** | 页头搜索 | `/friends` 页头常驻搜索框；输入即出结果面板盖住列表区。**搜索是一种状态，不是一个去处**（原「找朋友」tab 取消）。 |
+| **Friends URL contract** | 好友页 URL 契约 | `/friends?tab=mutual|following|followers|blocked&q=<词>`；tab 与词都进 URL，可分享、刷新不丢、可深链；`?q=` 存在则进页自动搜一次。键名唯一源 `utils/friendsRoute.ts`（与 `dmRoute` 同族）。 |
+| **Discovery deep link** | 找人深链 | 全站「找人」诉求一律指 `/friends?tab=find→(页头搜索)&q=`；**不做**顶栏全局搜索/命令面板。 |
+| **Debounced search** | 防抖搜索 | 300ms 防抖、≥2 字符发请求、清空回列表；保留 Enter/按钮提交给键盘。 |
+| **Result relation button** | 结果关系按钮 | 按 #42 关系态：关注 / 已关注(可取消) / **回关**(点完即互关=好友) / 互关→发消息；「…」=查看档案/拉黑；拉黑存续期不给关注按钮。 |
+| **Guided empty vs not-found** | 引导态 vs 建议态 | 未搜=「输入 TA 的用户名或昵称」引导；搜了 0=「没找到「xxx」…」+旁路深链。把还没搜说成搜不到是误导。 |
+
+### Rules
+
+- 搜索**维持需登录**（防匿名枚举用户名，与 #33 防存在性探测同战线）；游客见登录墙 + 禁用态搜索框示意。
+- 本票零新增组件：消费 AuthorRow/UserAvatar/Button/AsyncState（#44）。
