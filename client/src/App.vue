@@ -19,7 +19,10 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import AppHeader from './components/ui/AppHeader.vue'
+import RouteSkeleton from './components/ui/RouteSkeleton.vue'
 import TooltipLayer from './components/ui/TooltipLayer.vue'
+import { announcement } from './utils/pageAnnouncer'
+import { routePending } from './utils/routeLoadState'
 import { useAuthStore } from './stores/auth'
 
 type HeaderVariant = 'app' | 'page' | 'bare'
@@ -51,16 +54,40 @@ const chromeless = computed(() => {
   const n = route.name
   return n === 'home' || n === 'login' || n === 'register'
 })
+
+/**
+ * 懒加载途中的骨架（票 #79）。
+ *
+ * 只在**换页等待**时出现（routePending > 0），首屏不出现。
+ * 注意它与旧页是**并存**关系：骨架盖在路由出口上方，旧页留在下面 ——
+ * 这样等 chunk 时画面不是空白，也不会出现"内容闪一下再换"。
+ */
+const loading = computed(() => routePending.value > 0)
 </script>
 
 <template>
   <div class="app" :class="{ chromeless }">
     <AppHeader v-if="variant" :variant="variant" />
-    <router-view v-slot="{ Component }">
-      <component :is="Component" />
-    </router-view>
+    <!--
+      路由出口容器：焦点只在这里面找主标题（utils/pageFocus.ts），
+      免得从旧页里捞到一个已经卸载的标题。
+    -->
+    <div id="route-outlet" class="outlet">
+      <router-view v-slot="{ Component }">
+        <component :is="Component" />
+      </router-view>
+      <!-- chunk 在路上：骨架顶着（"点了没反应"的反面）。 -->
+      <RouteSkeleton v-if="loading" class="pending" />
+    </div>
     <!-- 提示图层挂在路由之外：换页不重建，正在显示的提示不被卸载 -->
     <TooltipLayer />
+    <!--
+      换页播报（票 #79）：**全站唯一**的 aria-live 区域。
+      为什么放在外壳里而不是每个页面各写一个：多个 live region 会各念各的，
+      一句页面名被念三遍比不念更糟。
+      为什么 sr-only：它是给读屏的，不是给人看的。
+    -->
+    <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ announcement }}</div>
   </div>
 </template>
 
@@ -75,5 +102,21 @@ const chromeless = computed(() => {
 /* 全屏页面（落地页、登录/注册壳）自己占满视口，不额外撑开 */
 .app.chromeless {
   min-height: 100vh;
+}
+
+/* 路由出口：撑满剩余高度，让内容页的 min-height:100vh 生效 */
+.outlet {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 骨架盖在旧页之上：等待期间画面不空白 */
+.pending {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--bg);
 }
 </style>

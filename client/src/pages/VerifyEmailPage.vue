@@ -34,6 +34,9 @@ onMounted(async () => {
 <template>
   <div class="page">
     <main class="body">
+      <!-- 主标题：换页后焦点要落在这里（票 #79）。这一屏原本只有一行状态文字，
+           没有标题就意味着焦点无处可去（症状是"焦点没动"）。 -->
+      <h1 class="title">验证邮箱</h1>
       <p v-if="state === 'busy'" class="dim">正在验证…</p>
       <p v-else :class="state === 'ok' ? 'ok' : 'alert'" role="status">{{ message }}</p>
     </main>
@@ -43,6 +46,7 @@ onMounted(async () => {
 <style scoped>
 .page { min-height: 100vh; display: flex; flex-direction: column; }
 .body { flex: 1; display: flex; align-items: center; justify-content: center; padding: 40px 20px; }
+.title { margin: 0; font-family: var(--font-glitch); font-size: clamp(28px, 5vw, 40px); }
 .ok { color: var(--ok); }
 .alert { color: var(--danger); }
 </style>
