@@ -18,6 +18,7 @@
 import { computed, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from './BrandIcon.vue'
+import UserAvatar from './UserAvatar.vue'
 import { useAuthStore } from '../../stores/auth'
 
 const props = withDefaults(defineProps<{ variant?: 'app' | 'page' | 'bare' }>(), {
@@ -41,17 +42,20 @@ async function doLogout(): Promise<void> {
   }
 }
 
-/** 头像首字母色：由名字哈希稳定取色（同一用户每次同色）。 */
-const avatarColor = computed(() => {
-  const name = auth.profile?.displayName || auth.profile?.username || '?'
-  let h = 0
-  for (const ch of name) h = (h * 31 + ch.codePointAt(0)!) % 360
-  return `hsl(${h} 65% 42%)`
-})
-
-const avatarLabel = computed(() => {
+/**
+ * 顶栏头像的"人"（票 #61）。
+ *
+ * 顶栏此前用**名字哈希**取 `hsl(...)`：同一个人在顶栏是一个色、在好友页/帖子列表
+ * 又是另一个色（那边走 `utils/avatar.ts` 的五色板）。两个色板 = 用户认不出人。
+ * 票 #44 决议明确"顶栏那个 `hsl(hash)` 删除，统一走 `avatarOf()`"，
+ * 并**接受这次视觉回归**（顶栏头像颜色会变）—— 这就是消除"同一用户两处不同色"的代价。
+ *
+ * 派生仍然只在 `utils/avatar.ts` 里做（唯一源）：这里只把 `id + displayName` 交给
+ * `<UserAvatar>`，不自己算色。
+ */
+const avatarUser = computed(() => {
   const p = auth.profile
-  return p ? `${p.displayName || p.username}（个人主页）` : '账号'
+  return { id: p?.id ?? 0, displayName: p?.displayName || p?.username || '?' }
 })
 
 /** 登录/注册链接带上当前路径，登录后回到原处。 */
@@ -145,14 +149,10 @@ const unreadLabel = computed(() => {
           >
             <BrandIcon name="settings" decorative :size="17" />
           </RouterLink>
-          <RouterLink
-            class="avatar"
-            :to="{ name: 'user', params: { id: String(auth.profile?.id ?? 0) } }"
-            :aria-label="avatarLabel"
-            :style="{ background: avatarColor }"
-          >
-            {{ (auth.profile?.displayName || auth.profile?.username || '?').slice(0, 1) }}
-          </RouterLink>
+          <!-- 头像 = 导航（票 #44：头像位不加编辑态，避免进主页/改图二义）。
+               本人 → /me（票 #69 落地后自动生效），他人 → /user/:id。
+               组件内部自问路由表"有 me 吗"，所以这里不用传额外开关。 -->
+          <UserAvatar :user="avatarUser" :self="true" size="md" />
           <button
             class="nav-btn"
             type="button"
@@ -317,25 +317,6 @@ const unreadLabel = computed(() => {
   100% {
     transform: translateX(0);
   }
-}
-
-.avatar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 700;
-  text-decoration: none;
-  transition: transform var(--dur-micro) var(--ease);
-}
-
-.avatar:hover {
-  transform: scale(1.08);
-  text-decoration: none;
 }
 
 /* bare 形态：只有品牌名，居中偏左 */

@@ -30,6 +30,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
+import UserAvatar from '../components/ui/UserAvatar.vue'
 import * as messagesApi from '../api/messages'
 import { MAX_MESSAGE_BODY } from '../api/messages'
 import { useApiFailure } from '../components/features/common/useApiFailure'
@@ -372,9 +373,9 @@ watch(
                     :aria-current="c.peer.id === activePeer ? 'true' : undefined"
                     @click="openConversation(c.peer.id)"
                   >
-                    <span class="avatar" :style="{ background: c.peer.avatarColor }" aria-hidden="true">
-                      {{ c.peer.avatarChar }}
-                    </span>
+                    <!-- 头像在这一行是**装饰**：整行已经是一个 <button>，
+                         按钮里不能放链接（无效 HTML，且会让点头像变成"点了没反应"）。 -->
+                    <UserAvatar :user="c.peer" :interactive="false" size="md" />
                     <span class="conv-main">
                       <span class="conv-top">
                         <strong class="conv-name">{{ c.peer.displayName }}</strong>
@@ -405,14 +406,7 @@ watch(
 
               <template v-else>
                 <header class="thread-head">
-                  <span
-                    v-if="activeEntry"
-                    class="avatar"
-                    :style="{ background: activeEntry.peer.avatarColor }"
-                    aria-hidden="true"
-                  >
-                    {{ activeEntry.peer.avatarChar }}
-                  </span>
+                  <UserAvatar v-if="activeEntry" :user="activeEntry.peer" size="md" />
                   <div class="thread-who">
                     <strong>{{ activeTitle }}</strong>
                     <!-- 还没聊过时列表里没有这个人：如实说"这是新会话"，
@@ -444,14 +438,9 @@ watch(
                   </p>
                   <ul v-else class="bubbles">
                     <li v-for="m in thread" :key="m.id" class="bubble-row" :class="{ mine: m.mine }">
-                      <span
-                        v-if="!m.mine"
-                        class="avatar sm"
-                        :style="{ background: m.sender.avatarColor }"
-                        aria-hidden="true"
-                      >
-                        {{ m.sender.avatarChar }}
-                      </span>
+                      <!-- 私信气泡头：票 #44 决议「私信气泡头不复用 AuthorRow」，
+                           这里只用 UserAvatar 的圆块（不可点：气泡行里点头像会误以为能进档案）。 -->
+                      <UserAvatar v-if="!m.mine" :user="m.sender" :interactive="false" size="sm" />
                       <div class="bubble-wrap">
                         <p class="bubble">{{ m.body }}</p>
                         <p class="small dim bubble-meta">
@@ -620,23 +609,6 @@ watch(
   white-space: nowrap;
 }
 
-.avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-weight: 700;
-  font-size: 14px;
-  flex: none;
-}
-.avatar.sm {
-  width: 26px;
-  height: 26px;
-  font-size: 12px;
-}
 
 .thread {
   border: 1px solid var(--line);
