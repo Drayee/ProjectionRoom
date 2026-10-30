@@ -200,3 +200,17 @@ Terms locked by [关注信息流形态：优先推送的消费面](https://githu
 | **Guest feed CTA** | 游客流引导 | pill 对游客可见可点；进入后列表区=分区内登录引导（AsyncState empty 形），`returnTo=/posts?sort=following`，不弹走页面。 |
 | **Zero-follow empty** | 零关注空态 | 「还没有关注任何人」+ 深链 `/friends?focus=search`（#50 页头搜索）。不设新鲜度门槛：关注对象只有老帖也照显示。 |
 | **Posts URL contract** | 帖子页 URL 契约 | 三 pill 统一 `?sort=latest\|hot\|following` 进 URL；`utils/postsRoute.ts` 键源。分享 following 给他人=对方的关注流，语义如此。 |
+
+
+## Follow notifications（关注通知）
+
+Terms locked by [关注与回关的通知渠道与已读语义](https://github.com/Drayee/ProjectionRoom/issues/53) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Follow badge** | 粉丝红点 | 两处同数：/friends 粉丝 tab + 顶栏「好友」分区角标。计数 = 新粉丝里**我未回关**且 `followed_at > followers_seen_at` 的人数。**派生值，零新表**（users 新列 `followers_seen_at`）。 |
+| **Second unread** | 第二条未读 | 与消息 `unread`（setUnread 唯一写入点，#30）**完全独立**：两数、两源、两清除点，永不互相覆盖。 |
+| **Seen on open** | 进页即清 | 打开 /friends?tab=followers 即写 `PUT /api/me/followers-seen`（幂等；异步单写守 I4）。不做逐条已读。 |
+| **Follow events** | 关注事件 | 只两类产生通知：**新粉丝**（follow-created）与**互关**（mutual-follow，文案「互关成为好友」）。**取关/被取关静默**。在线经 FriendPusher→底部 3~5s 自消失 toast；toast 不改变红点生命周期。 |
+| **Mute predicate** | 豁免谓词 | 拉黑存续期双向静默；已注销/封禁不发。与 #52 流谓词同一个 store 层共用实现（`NOT blocked_either ∧ 未注销未封禁`）。 |
+| **Followers endpoint** | 粉丝端点 | `GET /api/followers → {items, new_count}`：列表与红点一端两用；需登录。 |
