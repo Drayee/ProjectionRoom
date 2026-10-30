@@ -32,6 +32,24 @@
   --ok: #3ddc97;
   --danger: #ff5c5c;
 
+  /* ---------- 状态层（票 #43 决议：绝对色值，禁 color-mix） ---------- */
+  /* 两档提亮按「叠加固定比例白」换算后写成绝对值 —— 换肤时按键值重算，
+     不要改回 color-mix：那会让对比度随主题漂移（票 #43 §3）。 */
+  --state-hover: #20192c; /* surface + 4.5% 白 */
+  --state-active: #272033; /* surface + 7.5% 白 */
+  /* 无 surface 底（--bg 之上）的裸链接、裸图标用面纱：不再发明第三种底色。 */
+  --state-veil: rgba(255, 255, 255, 0.06);
+  /* 阴影：只有两级，页面不许自己写。 */
+  --elev-1: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --elev-2: 0 10px 28px rgba(0, 0, 0, 0.45);
+  /* 焦点环：全站统一（把原来 :focus-visible 里那两行字变成 token）。 */
+  --ring: 2px solid var(--accent);
+  --ring-offset: 2px;
+  /* 位移与按压：按尺寸分级 —— 卡片 -2px，普通按钮 .98，图标按钮 .94。 */
+  --shift-card: -2px;
+  --press-btn: 0.98;
+  --press-icon: 0.94;
+
   /* ---------- 形状 ---------- */
   --radius: 0; /* B 全直角 */
   --radius-sm: 0;
