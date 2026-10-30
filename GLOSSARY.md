@@ -80,3 +80,22 @@ Terms locked by [共享对象组件契约](https://github.com/Drayee/ProjectionR
 ### Layering
 
 `ui/` = 纯展示（不 import store / router，props 进事件出）；壳与业务组合在 `features/`。顶栏旧的 `hsl(hash)` 取色已废除，统一走 `avatarOf()`。
+
+
+## Post interaction（帖子互动）
+
+Terms locked by [帖子互动面：列表赞、收藏入口与一致性](https://github.com/Drayee/ProjectionRoom/issues/49) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Post card** | 帖子卡 | 链接区（封面/标题/摘要）+ **动作条**（赞/收藏/评论数）两部分；按钮**不在** `<a>` 内。视觉仍是一整块。 |
+| **Action bar** | 动作条 | 顺序固定 **赞 → 收藏 → 评论**；列表、详情、论坛主题串用法相同，只在详情页展开评论。 |
+| **Count formatting** | 计数缩写 | `0` 隐藏数字只留图标；`≥1000` → `1.2k`；`≥10000` → `1.2w`。保留一位小数、去掉 `.0`。 |
+| **Single-row lock** | 单条锁 | 请求在途时只锁该条按钮（loading 态 + 忽略点击），不锁整页、不做防抖。 |
+| **Guest write CTA** | 游客写动作 | 未登录点赞/收藏 → **跳登录并带 `returnTo`**；不灰按钮、不弹提示框；计数照常可见。 |
+
+### Rules
+
+- 赞与收藏**都**乐观更新：先改本地、再发请求、失败回滚 + 一次轻提示。
+- **评论点赞本期不做**（Out of scope，见地图）。
+- 论坛主题串复用同一行组件与同一套动作，不另做样式。
