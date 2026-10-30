@@ -7,5 +7,5 @@ import LandingView from '../components/features/shell/LandingView.vue'
 </script>
 
 <template>
-  <LandingView initial-stage="auth" initial-tab="register" :direct-entry="false" />
+  <LandingView initial-stage="auth" initial-tab="register" :direct-entry="false" page-title="注册" />
 </template>

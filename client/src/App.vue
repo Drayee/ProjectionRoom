@@ -68,7 +68,11 @@ const loading = computed(() => routePending.value > 0)
 <template>
   <div class="app" :class="{ chromeless }">
     <AppHeader v-if="variant" :variant="variant" />
-    <div class="outlet">
+    <!--
+      路由出口容器：焦点只在这里面找主标题（utils/pageFocus.ts），
+      免得从旧页里捞到一个已经卸载的标题。
+    -->
+    <div id="route-outlet" class="outlet">
       <router-view v-slot="{ Component }">
         <component :is="Component" />
       </router-view>

@@ -27,6 +27,15 @@ const props = withDefaults(
     initialStage?: 'hero' | 'auth'
     initialTab?: AuthTab
     directEntry?: boolean
+    /**
+     * 无障碍名（读屏念的页面名）。
+     *
+     * 为什么需要它：这个组件被三页复用 —— 落地页（/）、登录（/login）、注册（/register）。
+     * 标题的 aria-label 写死"月喵"的话，登录页换页后读屏念的是"月喵"，
+     * 而文档标题是"登录 · 月喵" —— 两处口径不一致，读屏用户听到的页面名是错的。
+     * 缺省仍是"月喵"（落地页），由两页登录/注册各自传自己的名字。
+     */
+    pageTitle?: string
   }>(),
   { initialStage: 'hero', initialTab: 'login', directEntry: true },
 )
@@ -100,7 +109,7 @@ onBeforeUnmount(() => {
   <div class="landing" :class="{ open }">
     <main class="stage">
       <header class="hero" :class="{ assembling }">
-        <h1 class="brand" aria-label="月喵">
+        <h1 class="brand" :aria-label="props.pageTitle ?? '月喵'">
           <span class="base" aria-hidden="true">月喵</span>
           <span class="sl s1" aria-hidden="true">月喵</span>
           <span class="sl s2" aria-hidden="true">月喵</span>

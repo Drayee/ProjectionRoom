@@ -1,4 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
+// 落地页**静态导入**（唯一例外）：它是全屏 hero，必须首屏即到。
+// 懒加载它会让首屏多一次 chunk 往返 —— 首屏慢半拍是本项目最不能接受的那种慢。
+// 其余 19 条路由全部走 utils/routePages.ts 的动态 import。
+import HomePage from './pages/HomePage.vue'
 import { PAGE_MODULES } from './utils/routePages'
 
 /**
@@ -43,8 +47,8 @@ export const router = createRouter({
     {
       path: '/',
       name: 'home',
-      component: PAGE_MODULES.home,
-      meta: { header: 'none', title: '月喵' },
+      component: HomePage,
+      meta: { header: 'none', title: '首页' },
     },
     {
       path: '/room/:roomId',
