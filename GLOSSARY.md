@@ -23,3 +23,22 @@ Terms locked by [锁定关注与好友关系模型（互关=好友）](https://g
 
 - Parent map: [自然体验：过渡反馈、对象组件、档案双视角与社交轻互动](https://github.com/Drayee/ProjectionRoom/issues/40)
 - Capability inventory: [docs/notes/2026-10-28-natural-ux-capability-inventory.md](docs/notes/2026-10-28-natural-ux-capability-inventory.md) (pre-decision facts)
+
+
+## Profile（档案）
+
+Terms locked by [他人与本人档案信息架构](https://github.com/Drayee/ProjectionRoom/issues/47) (2026-10-30).
+
+| Term | 中文 | Definition |
+| --- | --- | --- |
+| **Profile page** | 他人档案 | `/user/:id` — 公开名片 + 关系动作 + 该人公开帖与公开放映室。**不含**管理动作。 |
+| **Console** | 管理台 | `/me` — 本人资料编辑、我的帖（含删除）、我的放映室（含未公开/已关闭）、好友/关注/粉丝三列表、账号设置入口。 |
+| **Public view of me** | 我的公开主页 | 本人看 `/user/<自己id>` 的纯公开视角；与 Console 是两个页面，不是同一页的两种状态。 |
+| **Relationship actions** | 关系动作 | 关注 / 取关 / 回关 / 发消息（仅互关）/ 拉黑。好友不可「删除」，只能取关（见 Social graph）。 |
+
+### Visibility (profile content)
+
+- **Posts**: 普通公开帖，倒序无限滚动；无草稿概念。
+- **Rooms**: 同 `GET /api/public-rooms` —— 已公开且未关闭。
+- **Counts**: 关注数 / 粉丝数为纯数字，**不可点开名单**；名单只在 Console 看自己的。
+- **Favorites**: 位留、可见性归收藏域票（#48）决定前不渲染。
