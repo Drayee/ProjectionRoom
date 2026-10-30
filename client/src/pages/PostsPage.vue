@@ -8,6 +8,7 @@ import { useRoute } from 'vue-router'
 import { RouterLink } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
+import RelativeTime from '../components/ui/RelativeTime.vue'
 import * as postsApi from '../api/posts'
 import { useApiFailure } from '../components/features/common/useApiFailure'
 import type { Post } from '../types/posts'
@@ -141,7 +142,11 @@ onBeforeUnmount(() => {
           <img v-if="p.images.length" class="cover" :src="p.images[0]" :alt="`${p.title} 封面`" loading="lazy" />
           <h2>{{ p.title }}</h2>
           <p v-if="p.content" class="excerpt dim">{{ excerpt(p.content) }}</p>
-          <p class="meta dim">{{ p.author.displayName }} · 赞 {{ p.likeCount }} · 评论 {{ p.commentCount }}</p>
+          <p class="meta dim">
+            {{ p.author.displayName }} ·
+            <RelativeTime :value="p.createdAt" /> ·
+            赞 {{ p.likeCount }} · 评论 {{ p.commentCount }}
+          </p>
         </RouterLink>
       </div>
       <div ref="sentinel" class="sentinel" aria-hidden="true" />
