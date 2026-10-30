@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -244,6 +245,86 @@ func isSafeTableName(name string) bool {
 		}
 	}
 	return true
+}
+
+// requireIsolatedSchemaDB 在一个**一次性 schema** 里开库，返回同形的 Store 与两个种子用户。
+//
+// 为什么需要它：有些用例断言的是**全局副作用**——尤其是"一次性动作只可能发生一次"
+// （票 #57 的存量好友回填：版本键落在 schema_migrations 里）。
+// 这类断言在共享的 public schema 上根本立不住：任何一个更早的用例、或一次真实的
+// 启动回填，都会先把版本键落下，于是"第一次应当执行"永远不成立 ——
+// 而且症状会随执行顺序变化，是最难查的那种假红。
+//
+// 做法：用一个临时 schema（名字带纳秒与随机后缀，不会撞名），把 DSN 的 search_path
+// 指过去（**public 留在最后**：扩展与公共对象还能被看到），在其中跑完整迁移。
+// 用例结束 DROP SCHEMA ... CASCADE —— public 侧一个字节都不留。
+//
+// ⚠ 它不清 public 的表，但仍持有 dbTestMu：代价是零，收益是不必再去证明
+// "这两类用例可以并发"。
+func requireIsolatedSchemaDB(t *testing.T) (*Store, *User, *User) {
+	t.Helper()
+	ctx := context.Background()
+
+	baseDSN := testDSN(t)
+	dbTestMu.Lock()
+	t.Cleanup(dbTestMu.Unlock)
+
+	// schema 名必须是合法标识符，且足够独特：并发跑两份测试进程时也不能撞。
+	schema := fmt.Sprintf("pr_iso_%d_%s", time.Now().UnixNano(), randHexSuffix())
+	if !isSafeTableName(schema) {
+		t.Fatalf("生成的 schema 名不合法：%q", schema)
+	}
+
+	// 先连 public 建 schema（此时 search_path 还是默认的）。
+	admin, err := Open(ctx, baseDSN)
+	if err != nil {
+		t.Fatalf("连接测试库失败：%v", err)
+	}
+	if err := admin.DB().Exec(`CREATE SCHEMA ` + schema).Error; err != nil {
+		_ = admin.Close()
+		t.Fatalf("建隔离 schema %s 失败：%v", schema, err)
+	}
+	_ = admin.Close()
+
+	// 再把 search_path 指进去重连：此后所有 DDL/DML 都落在这个 schema 里。
+	isoDSN := baseDSN + " search_path=" + schema + ",public"
+	s, err := Open(ctx, isoDSN)
+	if err != nil {
+		t.Fatalf("连接隔离 schema %s 失败：%v", schema, err)
+	}
+
+	// 清理：先注册"DROP SCHEMA"，后注册"关库"——register 顺序的反序执行让关库先跑。
+	t.Cleanup(func() {
+		cleanup, err := Open(ctx, baseDSN)
+		if err != nil {
+			t.Logf("清理隔离 schema %s 时重连失败（schema 会留在测试库里）：%v", schema, err)
+			return
+		}
+		defer func() { _ = cleanup.Close() }()
+		if err := cleanup.DB().Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`).Error; err != nil {
+			t.Logf("删除隔离 schema %s 失败：%v", schema, err)
+		}
+	})
+	t.Cleanup(func() { _ = s.Close() })
+
+	if _, err := s.Migrate(ctx); err != nil {
+		t.Fatalf("在隔离 schema 里迁移失败：%v", err)
+	}
+
+	// 隔离 schema 是全新的，没有别处留下的行，因此不必 truncateAll。
+	alice := seedUser(t, s, "iso-alice")
+	bob := seedUser(t, s, "iso-bob")
+	return s, alice, bob
+}
+
+// randHexSuffix 给隔离 schema 名补一段随机后缀（只取十六进制，保证是合法标识符）。
+func randHexSuffix() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// 极不可能发生；退化成纳秒尾巴，仍是合法标识符。
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // dropPhaseOneTables 删掉 public schema 下的**全部**表（含账本），仅供迁移用例回到"空库"。

@@ -13,16 +13,19 @@ import (
 // 判据全部落在**库里的真实行**上（不 mock）：私聊的正确性有一半是 DDL 的
 // CHECK 约束与部分索引的形状，那是 mock 验不出来的东西。
 
-// befriend 让 a 与 b 成为 accepted 好友（§7.2 要求私聊限定在好友之间）。
+// befriend 让 a 与 b **互关**（= 好友，ADR 0001；私聊门闩自 #57 起就是 can_dm）。
+//
+// 票 #57 之前这里是"造一条 accepted 好友关系"；门闩换成互关之后，
+// accepted 行不再是发消息的资格 —— 于是夹具也换成两条关注边。
+// 这正是迁移语义在测试夹具上的投影：旧好友必须被回填成互关才继续可聊。
 func befriend(t *testing.T, s *Store, a, b *User) {
 	t.Helper()
 	ctx := context.Background()
-	req, err := s.CreateFriendshipRequest(ctx, a.ID, b.ID)
-	if err != nil {
-		t.Fatalf("发好友请求失败：%v", err)
+	if _, _, err := s.CreateFollow(ctx, a.ID, b.ID); err != nil {
+		t.Fatalf("建 a→b 关注边失败：%v", err)
 	}
-	if _, err := s.AcceptFriendshipRequest(ctx, req.ID, b.ID); err != nil {
-		t.Fatalf("接受好友请求失败：%v", err)
+	if _, _, err := s.CreateFollow(ctx, b.ID, a.ID); err != nil {
+		t.Fatalf("建 b→a 关注边失败：%v", err)
 	}
 }
 

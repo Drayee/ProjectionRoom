@@ -128,13 +128,26 @@ func (s *Store) SendDM(ctx context.Context, senderID, recipientID int64, body st
 			return ErrMessageBlocked
 		}
 
-		// 好友关系：§7.2「服务端先校验关系 + 非拉黑」——"关系"就是必须是 accepted 好友。
+		// 好友关系：§7.2「服务端先校验关系 + 非拉黑」——"关系"就是 can_dm（票 #57 / ADR 0001）。
+		//
+		// 门闩在 #57 从 areFriends(accepted) 换成了 can_dm ≡ 互关 ∧ ¬拉黑。
 		// 非好友之间不允许发私聊（否则私聊退化成"知道 id 就能骚扰任何人"的通道）。
-		friends, err := areFriendsIn(ctx, tx, senderID, recipientID)
+		//
+		// 两句是**两个不同**的失败：已经有拦截时返回 ErrMessageBlocked（403 + MESSAGE_BLOCKED，
+		// 前端文案是"你们之间存在拉黑关系"），否则才是 ErrMessageNotFriends（引导去互关）。
+		// 顺序与 can_dm 里的 ∧ 一致：拉黑优先于"不是好友"。
+		hasBlock, err := hasBlockBetweenIn(ctx, tx, senderID, recipientID)
 		if err != nil {
 			return err
 		}
-		if !friends {
+		if hasBlock {
+			return ErrMessageBlocked
+		}
+		mutual, err := mutualFollowIn(ctx, tx, senderID, recipientID)
+		if err != nil {
+			return err
+		}
+		if !mutual {
 			return ErrMessageNotFriends
 		}
 
