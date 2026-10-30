@@ -21,6 +21,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
+import UserAvatar from '../components/ui/UserAvatar.vue'
 import * as friendsApi from '../api/friends'
 import { isFeatureUnavailable } from '../api/mode'
 import { useApiFailure } from '../components/features/common/useApiFailure'
@@ -386,7 +387,8 @@ watch(section, (next) => {
             <p v-if="friends.length === 0" class="dim">还没有好友。到「找朋友」按用户名加一个人。</p>
             <ul v-else class="rows">
               <li v-for="f in friends" :key="f.relationshipId" class="row">
-                <span class="avatar" :style="{ background: f.user.avatarColor }" aria-hidden="true">{{ f.user.avatarChar }}</span>
+                <!-- 头像 = 导航（票 #61）：点它进对方档案。唯一源在 ui/UserAvatar.vue。 -->
+                <UserAvatar :user="f.user" size="md" />
                 <div class="who">
                   <strong>{{ f.user.displayName }}</strong>
                   <span v-if="presenceLabel(f.presence)" class="small dim">{{ presenceLabel(f.presence) }}</span>
@@ -410,7 +412,7 @@ watch(section, (next) => {
             <p v-if="requests.incoming.length === 0" class="dim">没有待处理的请求。</p>
             <ul v-else class="rows">
               <li v-for="r in requests.incoming" :key="r.relationshipId" class="row">
-                <span class="avatar" :style="{ background: r.user.avatarColor }" aria-hidden="true">{{ r.user.avatarChar }}</span>
+                <UserAvatar :user="r.user" size="md" />
                 <div class="who">
                   <strong>{{ r.user.displayName }}</strong>
                   <span class="small dim">请求加你为好友</span>
@@ -426,7 +428,7 @@ watch(section, (next) => {
             <p v-if="requests.outgoing.length === 0" class="dim">没有等待对方处理的请求。</p>
             <ul v-else class="rows">
               <li v-for="r in requests.outgoing" :key="r.relationshipId" class="row">
-                <span class="avatar" :style="{ background: r.user.avatarColor }" aria-hidden="true">{{ r.user.avatarChar }}</span>
+                <UserAvatar :user="r.user" size="md" />
                 <div class="who">
                   <strong>{{ r.user.displayName }}</strong>
                   <span class="small dim">等待对方处理</span>
@@ -456,7 +458,7 @@ watch(section, (next) => {
               <p v-else-if="hits.length === 0" class="dim">没找到匹配的人。</p>
               <ul v-else class="rows">
                 <li v-for="h in hits" :key="h.id" class="row">
-                  <span class="avatar" :style="{ background: h.avatarColor }" aria-hidden="true">{{ h.avatarChar }}</span>
+                  <UserAvatar :user="h" size="md" />
                   <div class="who">
                     <strong>{{ h.displayName }}</strong>
                     <span class="small dim">{{ relationLabel(h.relation) }}</span>
@@ -509,7 +511,7 @@ watch(section, (next) => {
               <p v-else-if="blocked.length === 0" class="dim">黑名单是空的。</p>
               <ul v-else class="rows">
                 <li v-for="b in blocked" :key="b.user.id" class="row">
-                  <span class="avatar" :style="{ background: b.user.avatarColor }" aria-hidden="true">{{ b.user.avatarChar }}</span>
+                  <UserAvatar :user="b.user" size="md" />
                   <div class="who">
                     <strong>{{ b.user.displayName }}</strong>
                     <span class="small dim">已被你拉黑</span>
@@ -556,7 +558,6 @@ watch(section, (next) => {
   background: var(--surface);
   padding: 10px 14px;
 }
-.avatar { width: 36px; height: 36px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 15px; }
 .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .who strong { font-size: 14px; overflow-wrap: anywhere; }
 .acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }

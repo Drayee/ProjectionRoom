@@ -28,7 +28,7 @@ import {
 import { isCapabilityUnavailable } from '../api/mode'
 import { toHttpError } from '../api/http'
 import { useApiFailure } from '../components/features/common/useApiFailure'
-import { avatarOf } from '../utils/avatar'
+import UserAvatar from '../components/ui/UserAvatar.vue'
 
 const props = defineProps<{ animeId: string }>()
 const route = useRoute()
@@ -205,12 +205,14 @@ watch(
           <ul v-else class="rows">
             <li v-for="thread in threads" :key="thread.id">
               <RouterLink class="thread" :to="{ name: 'post-detail', params: { id: String(thread.id) } }">
-                <span
-                  class="avatar"
-                  :style="{ background: avatarOf(thread.authorId, thread.author.displayName).avatarColor }"
-                  aria-hidden="true"
-                  >{{ avatarOf(thread.authorId, thread.author.displayName).avatarChar }}</span
-                >
+                <!-- 头像 = 导航（票 #61）。但整行已经是 <RouterLink>（进主题串），
+                     链接里不能再套链接 —— 所以这里的头像**不可点**，只做认人用。 -->
+                <UserAvatar
+                  class="board-avatar"
+                  :user="{ id: thread.authorId, displayName: thread.author.displayName }"
+                  :interactive="false"
+                  size="md"
+                />
                 <span class="thread-main">
                   <strong class="thread-title">{{ thread.title }}</strong>
                   <span class="meta dim">
@@ -347,17 +349,6 @@ watch(
   border-color: var(--accent);
   text-decoration: none;
 }
-.avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 700;
-}
 .thread-main {
   display: flex;
   flex-direction: column;
@@ -458,7 +449,7 @@ watch(
       'last last';
     align-items: start;
   }
-  .avatar {
+  .board-avatar {
     grid-area: avatar;
   }
   .thread-main {
