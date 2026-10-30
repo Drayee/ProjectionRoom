@@ -133,6 +133,15 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			"created_at":   {"timestamp with time zone", 0, false},
 			"read_at":      {"timestamp with time zone", 0, true},
 		},
+		// 0015 新增：关注边（wayfinder #56）。列刻意只有四列 ——
+		// 边本身只有"谁关注谁"与"什么时候"两件事，"是不是互关"是**派生**的
+		// （两条边同时存在的合取），不落库（ADR 0001）。
+		"follows": {
+			"id":          {"bigint", 0, false},
+			"follower_id": {"bigint", 0, false},
+			"followee_id": {"bigint", 0, false},
+			"created_at":  {"timestamp with time zone", 0, false},
+		},
 	}
 
 	for table, want := range expected {
@@ -185,6 +194,14 @@ func TestSchemaConstraintsMatchSpec(t *testing.T) {
 		"idempotency_keys": {
 			{"PRIMARY KEY", "scope"},
 		},
+		// 0015：关注边的唯一键是 (follower_id, followee_id)，
+		// 外键两条都指向 users（账号硬删时边跟着走，见迁移注释）。
+		"follows": {
+			{"PRIMARY KEY", "id"},
+			{"UNIQUE", "follower_id"},
+			{"FOREIGN KEY", "follower_id"},
+			{"FOREIGN KEY", "followee_id"},
+		},
 	}
 
 	for table, want := range cases {
@@ -228,6 +245,11 @@ func TestSchemaIndexesExist(t *testing.T) {
 		"messages_dm_sender_idx",
 		"messages_dm_recipient_idx",
 		"messages_room_idx",
+		// 0015（wayfinder #56）：关注列表与粉丝列表各一条索引。
+		// 没有它们，"我的关注"与"TA 的粉丝"会随表变大退化成全表扫 ——
+		// 而这两条正是关注流（#66）与粉丝红点（#67）的入口。
+		"follows_follower_idx",
+		"follows_followee_idx",
 	} {
 		var exists bool
 		const q = `SELECT EXISTS (

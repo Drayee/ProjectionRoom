@@ -650,4 +650,55 @@ END $$`,
 		`ALTER TABLE rooms_meta ADD COLUMN IF NOT EXISTS is_official boolean NOT NULL DEFAULT false`,
 		`ALTER TABLE rooms_meta ADD COLUMN IF NOT EXISTS official_rank int NOT NULL DEFAULT 0`,
 	}},
+
+	// 0015：关注边（follows）。wayfinder #56 —— ADR 0001 的第一层落地。
+	//
+	// # 为什么是**独立的一张表**，而不是复用 friendships
+	//
+	// friendships 表达的是"一段关系只存一行"的状态机（pending / accepted / blocked），
+	// 一对用户最多一行，方向靠 requester / addressee 表达。而 ADR 0001 定的关注是
+	// **有向的、允许成对存在**的边：A→B 与 B→A 是两条独立的行，"互关"是两条边
+	// 同时存在的**合取**，不是一个状态值。
+	//
+	// 把两种形状塞进同一张表会让"互关"退化成一个需要维护的状态字段 ——
+	// 而那正是 ADR 0001 明确不要的东西（"好友 = 互关"必须是**派生**事实，
+	// 否则"回关"与"取关"就要手工维护一个第三种状态，且必然漂移）。
+	//
+	// # 唯一键：同一条边只能有一条
+	//
+	// UNIQUE (follower_id, followee_id)。重复关注是**幂等**的（不是错误）：
+	// 应用层用 ON CONFLICT DO NOTHING 实现"再点一次关注仍然拿到同一条边"，
+	// 唯一键是这条语义的**唯一 owner**（并发下两次同时关注也只能落一条）。
+	//
+	// # 自关注在数据库侧就被挡住
+	//
+	// CHECK (follower_id <> followee_id)。应用层的 400 是第一道（要给用户可读提示），
+	// 这里是最后一道 —— 与 0002 给 username 加 CHECK 是同一条思路：
+	// 约束是唯一能在写入那一刻就失败的地方（代码里的 if 会被下一个调用点忘掉）。
+	//
+	// # 两个外键都是 ON DELETE CASCADE
+	//
+	// 账号被硬删（注销到期清扫，wayfinder #51/#73）时，关注边没有存在的意义：
+	// 留着会让关注数与粉丝数虚高，而那些数是**公开**的。
+	//
+	// # 索引：两条列表各一条，且列顺序与将来的 ORDER BY 一致
+	//
+	//   - follows_follower_idx：我的关注列表（按关注时间倒序）
+	//   - follows_followee_idx：TA 的粉丝列表（按关注时间倒序）
+	//
+	// 后者还是粉丝红点（wayfinder #53/#67）判"新粉丝"的入口
+	//（followed_at > followers_seen_at），前者是关注流（#52/#66）筛作者的入口。
+	// 两条都是范围扫描，不会随表变大退化成全表扫。
+	{version: "0015_follows", statements: []string{
+		`CREATE TABLE IF NOT EXISTS follows (
+id          bigserial PRIMARY KEY,
+follower_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+followee_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+created_at  timestamptz NOT NULL DEFAULT now(),
+UNIQUE (follower_id, followee_id),
+CHECK (follower_id <> followee_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS follows_follower_idx ON follows (follower_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS follows_followee_idx ON follows (followee_id, created_at DESC)`,
+	}},
 }
