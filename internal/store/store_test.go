@@ -400,12 +400,21 @@ func seedUser(t *testing.T, s *Store, username string) *User {
 	return u
 }
 
-// ensureTimeClose 断言两个时间点表示同一个瞬间（timestamptz 的分辨率是微秒，
-// 所以允许 µs 级差异）。用差值比较，避免被时区/位置（Asia/Shanghai vs UTC）干扰。
+// ensureTimeClose 断言两个时间点表示同一个瞬间。
+//
+// 容差是 **10ms 而不是 1µs**：这两个值并不是同一次 time.Now() 的产物 ——
+// 以 `CreateUser` 为例，`LastSeenAt` 由 `applyUserDefaults` 在 INSERT **之前**取，
+// 而 `CreatedAt` 由 GORM 在 INSERT **之中**取，中间隔着一次数据库往返。
+// 本机实测两者可差 500µs 左右，机器越慢差得越多；原来的 1µs 容差因此是
+// "平时绿、偶尔红"的假门槛（曾在一次全量跑里以 506.1µs 失败）。
+//
+// 放宽到 10ms 仍然足以钉住它真正要防的东西：**零值**（0001-01-01）、
+// 写错时区（小时级差）、以及"取的是别的时刻"（秒级差）。
 func ensureTimeClose(t *testing.T, what string, want, got time.Time) {
 	t.Helper()
-	if diff := got.Sub(want); diff > time.Microsecond || diff < -time.Microsecond {
-		t.Fatalf("%s 不是同一个瞬间：want=%s got=%s（差 %s）", what, want.Format(time.RFC3339Nano), got.Format(time.RFC3339Nano), diff)
+	const tolerance = 10 * time.Millisecond
+	if diff := got.Sub(want); diff > tolerance || diff < -tolerance {
+		t.Fatalf("%s 不是同一个瞬间：want=%s got=%s（差 %s，容差 %s）", what, want.Format(time.RFC3339Nano), got.Format(time.RFC3339Nano), diff, tolerance)
 	}
 }
 
