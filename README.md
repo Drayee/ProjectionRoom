@@ -1,198 +1,122 @@
-# ProjectionRoom
+# 月喵 · ProjectionRoom
 
-像 B 站放映室一样的「一起看」房间：**主播播放本地视频，观众同步观看并聊天**。
+> 主播播放**本地**视频，观众通过 WebRTC DataChannel 同步观看 —— 像 B 站放映室，但视频字节从不经过服务器。
 
-服务器只做**信令交换、房间状态与拓扑管理**——它不传输任何视频字节。视频分片由主播通过
-WebRTC DataChannel 直接分发给其他节点（P2P 树状分发 + 多父条带化）。
+作者 **drayee** · 开源：<https://github.com/Drayee/ProjectionRoom>
 
-设计与取舍的完整依据见 [`docs/SPEC.md`](docs/SPEC.md)；实现中任何偏离 SPEC 的地方都应先改那里。
-
-**算法说明**（同步算法 + 数据链路，含时序图与已知偏差）见 [`docs/ALGORITHM.md`](docs/ALGORITHM.md)。
+**服务器只做三件事**：信令交换、房间状态（成员 / 拓扑 / 播放进度）、账号与内容元数据。
+视频分片由主播经 DataChannel 直接分发给观众（P2P 树状分发 + 多父条带化），**服务端不碰任何视频字节**。
 
 ---
 
-## 当前进度
+## 目录
 
-| 里程碑 | 内容 | 状态 |
+- [它长什么样](#它长什么样)
+- [四条不变量](#四条不变量)
+- [快速开始](#快速开始)
+- [主播准备视频](#主播准备视频)
+- [配置](#配置)
+- [前端 mock / real 适配层](#前端-mock--real-适配层)
+- [代码结构](#代码结构)
+- [协议要点](#协议要点)
+- [部署](#部署)
+- [验证](#验证)
+- [文档地图](#文档地图)
+- [已知缺口](#已知缺口)
+- [开发约定](#开发约定)
+
+---
+
+## 它长什么样
+
+| 分区 | 路由 | 说明 |
 | :--- | :--- | :--- |
-| M1 | 房间 / 信令 / 聊天 / 成员列表 / 房主控制 | ✅ 已验证 |
-| **M2** | **分片工具 + WebRTC 分发 + MediaSource 播放 + 播放同步** | ✅ **已验证（真实浏览器实测）** |
-| **M3** | **多层树 + 单链分发模式 + 多父条带化 + 抗慢节点** | **实现中**（A/B 已真机验证；C/D 待验证） |
-| M4 | 稳健性、监控面板、STUN 服务端探测与 TTL 下发（TURN 已彻底退役） | 部分实现（ICE 部分已落地） |
+| 落地页 | `/` | 全屏 hero +「开始」按钮（hero ↔ 登录窗 morph）；登录后进入等待加入房间的占位页 |
+| 放映室 | `/room/:roomId` | 主播控制台 + 观众播放器 + 成员拓扑 + 房间聊天 |
+| 公开房间 | `/rooms` | 免登录浏览已公开且未关闭的房间 |
+| 官方放映区 | `/official` | 运营位次排序的官方 / 推荐房 |
+| 帖子 | `/posts`、`/posts/new`、`/posts/:id` | 三个排序 pill（最新 / 热门 / **关注**）、发帖、详情与评论 |
+| 番剧论坛 | `/forum`、`/forum/:animeId` | 番剧目录 → 板块 → 主题串（主题串复用帖子详情） |
+| 好友 | `/friends` | 页头常驻搜索 + 四个名单 tab（好友=互关 / 关注 / 粉丝 / 黑名单） |
+| 消息 | `/messages?peer=<id>` | 私聊（仅互关可发） |
+| 用户档案 | `/user/:id` | 公开名片（用户名 / 昵称 / 加入时间 / 角色）+ 关注域关系动作；本人视角多出邮箱、邮箱状态与昵称编辑 |
+| 账号 | `/login`、`/register`、`/verify`、`/help` | 两段式注册、邮箱验证码找回密码 |
+| 管理端 | `/admin`、`/admin/rooms`、`/admin/ops` | 用户 / 房间 / 运维（日志、指标、审计） |
 
-### 启动门控（加载不设超时）
+**社交模型一句话**：关注是**单向免同意**的边；**互关即好友**，没有「好友请求」这条流水线（已退役，见 [GLOSSARY](docs/GLOSSARY.md)）。
+**收藏是私人书签**，除自己外全世界看不到，也不计任何公开数字（点赞才是公开表态）。
 
-新节点接入或跳转后**不立即播放**，而是进入"加载中"：缓冲达到 4 片 / 8 秒、
-且时钟偏移估计已收敛（样本 ≥ 6 且最小值 0.8s 内不再下降）才开闸。
-**门控不设超时上限**：上游没数据就一直等，等待超过 20s 时提示"上游带宽可能不足"。
-这修掉了上一轮"起播后 0.2–1.4s 偏差尖峰"的根因（薄缓冲硬播 → 立刻触发大幅矫正）。
+---
 
-### M3 已落地（已验证）
+## 四条不变量
 
-- **`internal/usecase`**：拓扑分配引擎。先按深度择父（树越浅越好）、同深度再比余量/RTT/稳定性；
-  单链模式按实测上行选举分发节点，并带 1.5 倍换防滞回（避免两个差不多的节点来回抢位）；
-  排布容量与**准入容量**分开算 —— 未实测的节点只能参与排布，不能凭猜测开闸。
-- **逐跳时钟中继**：中继转发进度时改写 `parentClockMs`（自己的时钟）与 `parentOffsetMs`（自己到主播的偏移），
-  子节点把偏移做成"本跳 + 父节点"**两级相加**。修复了"多跳叶子的偏差 = 整条路径最小单向延迟"
-  这个结构性偏差：实测深度 1/2/3 的偏差 max 分别为 **78 / 58 / 74 ms**，
-  而修复前深度 2 稳定滞后 ~350ms。
-  两条配套规则是必需的：**只有主父的进度算权威**（备用父与换防前遗留的直连会送来另一套口径的样本），
-  **换父即作废本跳样本**（它们是相对旧父时钟测的，留着会每层恒定偏掉一个时钟原点差）。
-- **自适应条带化**：只向"明确声明拥有该片"的父节点取数；主父积压时才分流给备用父；
-  失败即转投下一个父节点。实测：把某个中继的上行压到 15 kbps 持续 100s，
-  其子节点靠备用父补齐，全程没有卡顿。
-- **门控与卡顿策略**（SPEC §7.3、§7.6）：起播/换父后按"主播时间戳所在分片 + 连续 n 片"开闸（n=4 / 重灌 n=2，无超时）；
-  卡顿上报 `stallCount` → 服务端把当前主父标为避开并立刻重算路径（3s 限流）→ 新路径到位后重新开闸 →
-  分级加速追赶（上限 +25%）→ 滞后 >12s 提示并跳到主播进度 → 目标分片 2.5s 取不到就改按主播当前进度取片。
-- **真机验证**（`test/script/verify-m3.mjs`，4 个独立 Chrome，链式树 host→1→2→3）：
-  - 验收 A：深度 `[0,1,2,3]`，一级节点真的在给下级供片，全员播放；
-  - 验收 B：注入主播上行后进入**单链模式**，主播只有 1 个子节点（分发节点），其余全挂在它下面；
-  - 验收 C：中继时钟两级相加自洽（`offset = hop + parent`），深度 ≥2 的节点确实收到带中继戳的样本；
-  - 验收 D：开闸时刻的连续分片数 ≥ 阈值（27/4、22/2、31/4 片）。
+改任何代码前先确认没违反它们。违反的表现写在右列 —— 那是判断依据，不是比喻。
 
-### 服务端切片服务（M4）
-
-没有 ffmpeg 的用户可以把源视频**上传到服务器**做一次性切片，再一次性下载回本地；
-直播链路上的视频字节仍然只走 P2P，服务器不在分发路径上。
-
-```bash
-# 上传并切片（multipart 字段名固定为 file）
-curl -F "file=@movie.mp4" http://127.0.0.1:8888/api/v1/segment/jobs
-# → {"jobId":"...","state":"queued","queuePosition":0}
-
-# 查状态；done 之后 result 里带分片数与交付形态
-curl http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>
-# ≤1GiB：单次流式 zip；>1GiB：JSON manifest（含 parts 列表）
-curl -o out.zip http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>/result
-curl -o part1.zip http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>/parts/1
-```
-
-配额：并发 2、排队 8、令牌桶 3 作业/分钟（超限 429 + `Retry-After`）、单作业 ≤60 分钟、源文件 ≤16GiB、
-产物保留 30 分钟（TTL 清理）。全部可用 `PR_SEGMENT_*` 覆盖，ffmpeg 路径用 `PR_FFMPEG`。
-不想上传也行：`docs/SEGMENT.md` 里有本地 ffmpeg / `cmd/segmenter` 的完整教程。
-
-> ⚠️ 前端重写（月夜故障 · B）本轮暂未重建服务端切片面板与切片工具下载入口（票 #17），
-> 下面描述的「主播页对应入口」在重建后的 UI 里暂不显示；服务端切片 API 与 `cmd/segmenter` CLI 仍照常可用。
-
-主播页有对应入口：选片区下方的「**本机没有 ffmpeg？交给服务器切片**」展开后可上传视频、
-看排队位次与切片进度，切完可以下载 zip，或者直接**写进一个本地目录并立即开播**
-（`showDirectoryPicker()` + File System Access API；浏览器不支持时退化为"下载 zip 手动解压后再选目录"）。
-服务器连不上或没装 ffmpeg 时，面板会直接说明原因，内嵌的本地切片教程始终可用。
-
-主播页还能直接**下载切片工具（segmenter）+ 照命令行用法自己切**：面板从
-`GET /api/downloads/segmenter` 拿清单，按当前平台高亮推荐那一行，给出体积、sha256
-（可展开/复制）与**下载按钮**，并附校验命令（Windows 用 `Get-FileHash`，Linux / macOS 用
-`shasum -a 256`）与用法：
-
-```bash
-# 三种用法完全等价（都不需要额外装什么）：
-segmenter -in <视频文件> -out <输出目录>
-segmenter "<视频文件>" -out <输出目录>   # 把视频拖到 exe 上就是这个形状（唯一的位置参数）
-segmenter -out <输出目录>                # 双击 exe 后按提示粘贴路径也一样
-```
-
-**本机没有 ffmpeg 也没关系**：exe 会按 `-ffmpeg-dir` → `PATH` → exe 同级目录
-（`./ffmpeg/bin/`、`./ffmpeg/`、`./bin/`）依次找；都没有就打印醒目警告 + **5 秒倒计时**
-（按 Ctrl+C 取消，`-yes` 直接跳过），然后用 net/http 自动下载一份解压到 **exe 同级目录**
-（Windows / macOS 取 `.zip`，用标准库解；Linux 取 `.tar.xz`，交给系统 `tar -xJf`），再找一次。
-下载地址可用 `-ffmpeg-url` 或环境变量 `PR_FFMPEG_URL` 覆盖；已经有 ffmpeg 的用户用
-`-ffmpeg-dir` 指过去即可（旧名 `-ffmpeg` 仍然可用）。**下载或解压失败不会静默**：
-会打印手动安装指引。
-
-> 注意：CLI 只在上面这几处 + 自动下载目录里找，**不会去扫系统里其它安装位置**
-> （服务端切片用的 `PR_FFMPEG` 发现顺序仍会扫 Windows 常见安装目录）。
-> ffmpeg 装在别处（例如 `D:\Program Files (x86)\ffmpeg-…\bin`）时，用 `-ffmpeg-dir` 指过去，
-> 或把该目录加进 `PATH`。
-
-**要不要转码它自己判断**：先用 ffprobe 探测，视频 ∈ {h264, av1, vp9} 且音频 ∈ {aac, opus, 无}
-→ 只做 `-c copy` 无损重新封装；否则自动转码成 H.264/AAC（`libx264 veryfast crf 23` +
-`aac 128k`）。直通 AV1/VP9 时会明确提示"只有在支持它的浏览器里能播（Safari、部分 Firefox
-不行）；要最大兼容请加 `-transcode 1200k`"。
-
-> 已知限制：本机切片器（`internal/service/mp4`）只认 avc1/avc3/av01 + mp4a/Opus 的采样格式，
-> 所以 **VP9（vp09）直通会在切片这一步被拒绝** —— 此时工具会明确提示"请加 `-transcode 1200k`
-> 重跑"，而不是静默产出一个播不了的目录。
-
-| 参数 | 默认 | 说明 |
+| 编号 | 内容 | 违反的表现 |
 | :--- | :--- | :--- |
-| `-in` | 空 | 输入视频；不给时按「位置参数 → 常见目录按文件名找 → 交互式询问」的顺序找 |
-| `-name` | 空 | 想找的文件名；不给时用 `-out` 的目录名（与旧一键脚本一致） |
-| `-search-by-name` | `true` | 是否在 桌面/下载/视频/文档/当前目录/exe 同级目录 里按文件名找 |
-| `-out` | `./room-media` | 输出（分片）目录 |
-| `-transcode` | 空 | 强制转码到该视频码率（如 `1200k`）；优先于自动判定 |
-| `-fragment` | `false` | 强制无损重新封装（`-c copy`）；优先于自动判定 |
-| `-frag-sec` | `2` | 分片目标时长（秒） |
-| `-pack` | `100` | 每 N 片合成一个 `pack-*.bin`；`1` = 不打包 |
-| `-uplink-mbps` | `12` | 主播上行估计（Mbps），仅用于打印容量提示 |
-| `-ffmpeg-dir` | 空 | ffmpeg/ffprobe 所在目录或可执行文件（别名 `-ffmpeg`） |
-| `-ffmpeg-url` | 按平台 | ffmpeg 下载地址（也认环境变量 `PR_FFMPEG_URL`） |
-| `-yes` | `false` | 跳过自动下载前的 5 秒倒计时（仍然会下载） |
+| **I1** | 服务端不经手视频字节（分片只在 peer 之间走 DataChannel） | 出现「服务端中转媒体」的代码路径 |
+| **I2** | 房间**实时状态**（成员 / 拓扑 / 播放进度 / 位图）只在内存；DB 只存**元数据**与周期快照 | 每次同步都写库；房间状态以库为准 |
+| **I3** | **授权 100% 在服务端**；前端缓存的 `role` 只决定「显示什么」 | 前端路由守卫 / `v-if` 被当作授权 |
+| **I4** | 任何 DB 写入都不在 WS / REST 处理路径上（事件类走异步单写协程） | 在 handler 里同步写库 |
 
-切完回主播页「选择分片目录」选中输出目录即可开播。工具走的是「**单条复用 fMP4 + 按 moof
-切分**」，产物格式与服务端切片完全一致，**不需要用户自己拼 index.json**，也不会再出现
-"丢音轨 / 分片互相覆盖"的坏切片；结束时打印分片数/文件数/体积/码率 + K0 容量提示
-（**K0 是能带几个直连子节点，不是能带几个人**）+ 下一步。二进制由
-`scripts/build-segmenter.ps1` 交叉编译到 `client/dist/downloads/`，下载目录可用
-`PR_DOWNLOADS_DIR` 覆盖。
-
-> Go 版不再做"引号 / `$` 符号校验"：参数是用 exec 数组直接传给 ffmpeg 的，不经过 shell，
-> 不再有旧 `.ps1` 那种"路径里有引号就会被打断"的问题。
-
-> ⚠️ **不要把 `-out` 指到 `client/dist` 里面**（包括 `client/dist/room-media`）：`client/dist` 是
-> 静态托管根，产物会被当成静态资源公开发布，`/downloads/room-media/...` 任何人可下 ——
-> 直播分片就绕过了 WebRTC 直连链路。输出到仓库外的目录，或至少放在 `client/dist` 之外的路径。
-
-```bash
-# 界面验收：真实 Chrome 里展开入口、确认面板/探测徽标/教程/切片工具清单，并留一张截图
-node test/script/verify-segment-ui.mjs
-```
-
-### M2 已交付
-
-- **`cmd/segmenter`**：把本地视频切成 `init.mp4` + `pack-*.bin`（或 `c00001.m4s…`）+
-  `index.json`。**只下载一个 exe 就能用**：自动找输入（`-in` / 位置参数=拖拽 / 常见目录按
-  文件名找 / 交互式询问）、自动找 ffmpeg（`-ffmpeg-dir` → `PATH` → exe 同级目录 →
-  5 秒倒计时后自动下载）、自动判定直通或转码（`-fragment` / `-transcode 1200k` 可强制），
-  并直接打印"这个码率下主播能带几个直连子节点"。
-- **切片正确性的判据**：init + 全部分片按序拼接必须与原文件**逐字节相同**，
-  且每个分片都以 `moof` 开头。按固定字节数切分会产生"半个 moof"，浏览器会直接抛错。
-- **前端播放链路**：`useMediaIndex`（选片 + `isTypeSupported` 硬校验）→
-  `useWebRTC`（星形直连 + 预协商 DataChannel + `getStats` 上行估算）→
-  `useChunkRequester`（二进制帧 + 超时）→ `useChunkPlayer`（MediaSource）→
-  `useSyncClock`（NTP 最小滤波 + 三级漂移矫正）。
-- **容量闸门**：拿到实测上行前 `mode=pending`；之后按 `1+K0` 拒绝超额观众，且只拦新加入、不踢人。
-
-### 实测数据（真实 Chrome，两个独立浏览器实例）
-
-| 指标 | 实测 | SPEC 目标 |
-| :--- | :--- | :--- |
-| 观众起播耗时 | **0.4s** | 1–3s |
-| 同步偏差 max / p95 | **190ms / 130ms** | < 500ms |
-| 房主暂停 → 观众跟随 | 是 | 是 |
-| 房主跳转 → 观众跟随 | 跳转后位置一致（偏差 0s） | 跟随 |
-| 分片交付 | 74 次，0 超时，0 失败 | — |
-
-复现方式见下方「验收」。
+> I4 的例子：房间元数据投递、审计日志、关注通知、头像旧对象清理，全部**入队后立即返回**。
 
 ---
 
 ## 快速开始
 
-前置：Go 1.26+、Node 20+；`ffmpeg` **可选**（本地切片工具会自己下载一份，服务端切片才需要它）。
+**前置**：Go 1.26+（`go.mod` 写死）、Node 18+（Vite 6 的要求；本仓库按 20+ 开发）、PostgreSQL 16+。
+`ffmpeg` **可选**（本地切片器会自己下载一份；只有服务端切片才必须装）。
 
-```bash
-# 终端 1：服务端（默认 127.0.0.1:8888）
-go run ./cmd
+服务端**要求配置齐全才启动**：缺 `PR_DB_DSN` / `PR_JWT_SECRET`(≥32 字节) / `PR_PUBLIC_BASE_URL` /
+发信通道（SMTP 三件套或 `PR_OTP_DEV_ECHO=1`）/ 前端产物（`PR_SERVE_STATIC=true` 时）任一项，
+`config.requireComplete` 会**逐条列出并拒绝启动**。只想要功能不全的窄实例（例如只跑信令）时，
+必须**显式**写 `PR_REQUIRE_COMPLETE=0`。
 
-# 终端 2：前端（默认 127.0.0.1:5173，/api 与 /ws 自动代理到服务端）
-cd client
-npm install
-npm run dev
+### 推荐路径：一键起本机库 + 服务
+
+```powershell
+powershell -File scripts/setup-local-db.ps1    # 建 pr_app 角色 + 两个库，生成 .env.local（幂等）
+powershell -File scripts/run-local.ps1         # 读 .env.local 起服务，默认 http://127.0.0.1:8888
+powershell -File scripts/run-local.ps1 -Port 8090   # 换端口（脚本会自动补 Origin 白名单）
 ```
 
-浏览器打开 http://127.0.0.1:5173 ，一个窗口「创建房间」当主播，另一个窗口用房间码「加入房间」。
+`run-local.ps1` 会在启动前做一次**预检**，把「等它编译完再报错」变成「现在就说清缺什么」。
 
-### 主播准备视频
+### 前端开发
+
+```bash
+cd client
+npm install
+npm run dev        # http://127.0.0.1:5173，/api、/ws、/downloads 自动代理到后端
+```
+
+⚠️ **Vite 的代理默认指向 `http://127.0.0.1:8080`，而 `run-local.ps1` 默认监听 `8888`** —— 两者不一致时
+页面能打开但所有接口 404。要么显式指定后端：
+
+```powershell
+$env:PR_SERVER_URL = 'http://127.0.0.1:8888'; npm --prefix client run dev
+```
+
+要么用 `run-local.ps1 -Port 8080`。这个不一致是**有意的默认值**（8080 是生产容器端口），不是 bug。
+
+### 单端口（页面 + API + WS 同源）
+
+```bash
+npm --prefix client run build      # 产物在 client/dist（已 gitignore）
+go run ./cmd                       # → http://127.0.0.1:8888 同时是页面、API 与 /ws
+```
+
+路由优先级固定为 **`/healthz` → `/api/*` → `/ws` → `/assets/*` → 其它真实文件 → SPA 回退 `index.html`**，
+页面永远不会顶掉业务路由。静态目录缺失**不影响启动**：只打一条 WARN，`/api`、`/ws`、`/healthz` 照常可用。
+
+---
+
+## 主播准备视频
+
+月喵只同步**本地**视频：主播先把源视频切成 fMP4 分片目录，再在主播控制台点「选择本地分片目录」。
+
+### 本地切片器（推荐）
 
 ```bash
 # 一条命令搞定：探测编码后自动决定（能直通就只重新封装，不能就自动转码）
@@ -206,104 +130,78 @@ go run ./cmd/segmenter -name movie.mp4 -out ./room-media
 go run ./cmd/segmenter -in movie.mp4 -out ./room-media -transcode 1200k
 ```
 
-然后在主播控制台点「选择分片目录」，选中 `room-media/` 即可开播。
+**要不要转码它自己判断**：ffprobe 探测后，视频 ∈ {h264, av1, vp9} 且音频 ∈ {aac, opus, 无}
+→ 只做 `-c copy` 无损重新封装；否则转码成 H.264/AAC。
 
-`segmenter` 会打印探测结果、处理依据、产物摘要与容量提示，例如：
+**本机没有 ffmpeg 也没关系**：按 `-ffmpeg-dir` → `PATH` → exe 同级目录（`./ffmpeg/bin/`、`./ffmpeg/`、`./bin/`）
+依次找；都没有就打印警告 + **5 秒倒计时**（Ctrl+C 取消，`-yes` 跳过），然后自动下载解压到 exe 同级目录。
+下载或解压失败不会静默 —— 会打印手动安装指引。
 
+预编译版本从主播控制台的下载面板取：`GET /api/downloads/segmenter` 返回清单（平台 / 文件名 / 字节数 / sha256 / 下载 URL）。
+URL 有两种来源 —— 配了对象存储时由 CI 把二进制与清单一起传到 MinIO 桶、URL 走 `/files/...`（见 `docs/STORAGE-MINIO.md`）；
+否则回落到静态托管 `/downloads/<file>`。构建：`scripts/build-segmenter.ps1`（5 个平台目标，产物落 `client/dist/downloads/`）。
+
+> ⚠ 已知限制：本地切片器（`internal/service/mp4`）只认 avc1/avc3/av01 + mp4a/Opus 的采样格式，
+> 所以 **VP9（vp09）直通会在切片这一步被拒** —— 工具会提示「请加 `-transcode 1200k` 重跑」，不会静默产出播不了的目录。
+
+### 交给服务器切片（没有 ffmpeg 时）
+
+```bash
+curl -F "file=@movie.mp4" http://127.0.0.1:8888/api/v1/segment/jobs
+# → {"jobId":"...","state":"queued","queuePosition":0}
+curl http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>
+curl -o out.zip http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>/result
 ```
-探测: 时长 801.3 秒（13.4 分钟）  视频=h264  音频=aac
-判定: 视频 h264 与音频 aac 都在直通集合内 → 直通：只做 -c copy 重新封装，不重新编码
-...
-容量提示（按主播上行 12.0 Mbps 估算，K0 = floor(上行 × 0.8 ÷ 码率)，上限 8）:
-  K0 = 8
-  注意：K0 是主播能直接带几个子节点，不是能带几个人；其余成员挂在这些直连节点下面。
-  扇出模式：主播可直接服务 8 个一级节点，其余成员挂到它们下面。
 
-接下来：在主播页点「选择分片目录」选中 ./room-media 即可开播。
-```
+配额：并发 2、排队 8、3 作业/分钟（超限 429 + `Retry-After`）、单作业 ≤60 分钟、源文件 ≤16 GiB、
+产物保留 30 分钟。全部可用 `PR_SEGMENT_*` 覆盖。**直播链路上的视频字节仍然只走 P2P** ——
+服务端切片是一次性预处理，不在分发路径上。详见 [`docs/SEGMENT.md`](docs/SEGMENT.md)。
 
-### 配置
+---
 
-服务端全部配置都有面向本机开发的默认值，可用环境变量覆盖：
+## 配置
 
-| 变量 | 默认值 | 说明 |
+全部定义与默认值在 [`internal/config/config_struct.go`](internal/config/config_struct.go) +
+[`config_load.go`](internal/config/config_load.go)（每个字段都有中文注释）。用户可抄的模板是
+[`.env.example`](.env.example)。**本机开发用 `.env.local`（已 gitignore）**，生产用 `/opt/projectionroom/.env`（root:600）。
+
+### 必需项
+
+| 变量 | 说明 |
+| :--- | :--- |
+| `PR_DB_DSN` | PostgreSQL 连接串（启动期触发幂等迁移）。缺 → 拒绝启动 |
+| `PR_JWT_SECRET` | access token 的 HS256 密钥，**≥32 字节**（`openssl rand -hex 32`）。缺或过短 → 拒绝启动 |
+| `PR_PUBLIC_BASE_URL` | 邮件链接的对外基地址。**没有默认值** —— 给默认值会让「漏配」静默指向另一个环境 |
+| `PR_SMTP_HOST` / `_USER` / `_PASS` | 注册与改密码都靠邮箱验证码。本机没有 SMTP 时用 `PR_OTP_DEV_ECHO=1` 代替 |
+| `PR_OTP_DEV_ECHO` | **仅本机开发**：`1` 时验证码明文回显在响应里。与已配 SMTP 同时开启会**拒绝启动** |
+
+### 最常改的几项
+
+| 变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
 | `PR_ADDR` | `127.0.0.1:8888` | 监听地址 |
+| `PR_ALLOWED_ORIGINS` | 含 `127.0.0.1:5173`、`localhost:5173`、`127.0.0.1:8888`、`localhost:8888` | 允许连 `/ws` 的来源，**唯一判据**（同源不再隐式放行 —— DNS rebinding 曾据此绕过）。**换端口 / 上域名必须跟着改**，否则「页面能开、`/ws` 一律 403」 |
+| `PR_SERVE_STATIC` / `PR_STATIC_DIR` | `true` / `client/dist` | 是否托管前端产物（单端口部署的总开关） |
 | `PR_MAX_MEMBERS` | `16` | 房间成员硬上限（真实上限由实测上行算出的 `1+K0` 决定） |
 | `PR_DEFAULT_STREAM_BPS` | `2000000` | 尚未拿到 mediaIndex 时的码率估计 |
-| `PR_STUN_URLS` | 7 条（见下表） | 逗号分隔的 STUN 候选列表，整体覆盖默认值 |
-| `PR_ICE_MAX_STUN` | `5` | 单次下发给浏览器的 STUN 条数上限（= 恒选 4 席 + 1 个轮询席位） |
-| `PR_ICE_PROBE_INTERVAL` | `60s` | 服务端重新探测一轮 STUN 的周期（上限 `1h`） |
-| `PR_ICE_TTL` | `300s` | `/api/ice` 与建房间响应里 ICE 载荷的有效期（允许范围 `(0, 1h]`） |
-| `PR_STATIC_DIR` | `client/dist` | 前端构建产物目录（相对**进程工作目录**解析，请在仓库根目录启动） |
-| `PR_SERVE_STATIC` | `true` | 是否由 Go 服务端托管前端页面（单端口部署的总开关） |
-| `PR_ALLOWED_ORIGINS` | `127.0.0.1:5173,localhost:5173,127.0.0.1:8888,localhost:8888` | 允许连 `/ws` 的浏览器来源（逗号分隔，支持 `*.example.com`）。**S-5 之后这是唯一判据**：同源不再隐式放行（那条兜底可被伪造的 `Host` 满足，是 DNS rebinding 的绕过路径）。默认值覆盖两种**本机**入口：开发态（Vite 5173）与单端口态（Go 8888）。**公网/隧道部署必须把对外域名加进来**，否则症状是"页面能打开、但一直显示『已断开，正在自动重连』"，服务端只留一行 403 日志 |
-
-### 账号层（ACCOUNTS 一期）
-
-> ⚠ **本实例要求配置齐全才启动**：缺任何必需项（数据库、密钥、对外基地址、发信通道、
-> 前端产物）都会在启动期**逐条列出并拒绝启动**，不会退化成"页面能开、点下去才 503"。
-> 只想要功能不全的实例（例如只跑信令）时，显式设置 `PR_REQUIRE_COMPLETE=0`。
-
-| 环境变量 | 默认 | 说明 |
-| :--- | :--- | :--- |
-| `PR_DB_DSN` | **必填** | PostgreSQL 连接串（启动期触发幂等迁移）。缺 → 拒绝启动 |
-| `PR_JWT_SECRET` | **必填** | access token 的 HS256 密钥，**至少 32 字节**（`openssl rand -hex 32`）。缺或过短 → **拒绝启动**：缺密钥的症状是"所有已登录用户随机掉线"，看起来像网络故障，极难归因 |
-| `PR_PUBLIC_BASE_URL` | **必填** | 邮件里链接的对外基地址。**没有默认值**：给一个默认值会让"漏配"静默指向另一个环境，而症状是"用户点开链接进了别人的站点" |
-| `PR_SMTP_HOST` / `_USER` / `_PASS` | **必填**（或用 dev echo） | 注册与改密码都靠邮箱验证码，没有发信通道等于注册不可用。本机没有 SMTP 时用 `PR_OTP_DEV_ECHO=1` 代替（见下） |
-| `PR_OTP_DEV_ECHO` | `0` | **仅本机开发**：`1` 时验证码会明文回显在接口响应里（前端会以"调试"样式显示）。打开它会废掉"邮箱归属"这件事，因此与已配 SMTP 同时开启会**拒绝启动** |
-| `PR_OTP_TTL` | `5m` | 邮箱验证码有效期（`1m`~`30m`）。6 位数字的猜测空间只有 100 万，时间窗口是防御维度之一 |
-| `PR_REQUIRE_COMPLETE` | 开启校验 | `0`/`false` = 跳过"必需配置齐全"这道启动闸。**只有刻意要功能不全的实例时才写** |
-| `PR_ACCESS_TTL` | `15m` | access token 有效期（上限 `24h`）。它只存内存 + `sessionStorage`，**不进 localStorage** |
-| `PR_REFRESH_TTL` | `720h` | refresh 会话有效期（`1h`~`1年`）。refresh 是 HttpOnly Cookie 里的不透明串，库里只存 sha256，每次刷新轮换且检测重放 |
-| `PR_BCRYPT_COST` | `12` | 口令哈希代价（`10`~`14`）；本机实测 12 ≈ 0.57s/次 |
-| `PR_AUTH_HASH_CONCURRENCY` | `4` | 并发 bcrypt 闸门容量（`1`~`64`）。拿不到闸门**立刻返回 429 而不是排队**：排队会让响应时间无上界，且队列本身成为第二个被打爆的资源 |
-| `PR_WS_TICKET_TTL` | `30s` | WebSocket 一次性票据有效期（上限 `10m`）。浏览器 WebSocket 无法自定义请求头，所以账号身份走票（而不是把 token 塞进 URL） |
-| `PR_TRUSTED_PROXIES` | `127.0.0.1,::1` | 允许其 `X-Forwarded-For` 被采信的来源；显式设为**空** = 谁都不信（服务端直接对外的形态）。默认只信任本机反代 —— 否则任何人加一行伪造头就能把每 IP 限速全部绕过 |
+| `PR_ROOM_HOST_GRACE` | `60s` | 主播断线宽限期：期内房间保留、**永不回收**，客户端用同码自动重建 |
+| `PR_TRUSTED_PROXIES` | `127.0.0.1,::1` | 允许其 `X-Forwarded-For` 被采信的来源。**配错会让按 IP 限速退化成全局限速** |
+| `PR_OTP_TTL` | `5m` | 邮箱验证码有效期（`1m`~`30m`） |
+| `PR_ACCESS_TTL` / `PR_REFRESH_TTL` | `15m` / `720h` | access 只存内存 + `sessionStorage`（**不进 localStorage**）；refresh 是 HttpOnly Cookie，每次刷新轮换 + 重放检测 |
 | `PR_AUTH_LOGIN_PER_MINUTE` / `_BURST` | `10` / `5` | 登录尝试的每 IP 令牌桶（失败也计入，挡撞库） |
-| `PR_AUTH_REGISTER_PER_MINUTE` / `_BURST` | `5` / `3` | 注册与**发验证码**的每 IP 令牌桶（同样跑 bcrypt，所以更严） |
-| `PR_AUTH_REFRESH_PER_MINUTE` / `_BURST` | `30` / `10` | 刷新的每 IP 令牌桶（多标签页会叠加，故比登录宽松） |
+| `PR_AUTH_REGISTER_PER_MINUTE` / `_BURST` | `5` / `3` | 注册与发验证码（同样跑 bcrypt，所以更严） |
+| `PR_ICE_PROBE_INTERVAL` / `PR_ICE_TTL` | `60s` / `300s` | 服务端 STUN 探测周期与下发载荷有效期 |
+| `PR_ICE_MAX_STUN` | `5` | 单次下发的 STUN 条数上限（= 恒选 4 席 + 1 个轮询席位） |
+| `PR_SECURITY_CSP` | 严格 CSP | 本地跑验收矩阵时临时放行 `http://127.0.0.1:*` |
+| `PR_STORAGE_ENDPOINT` 等 | 空 = 未启用 | 对象存储（MinIO）。**Endpoint 与 PublicBaseURL 是两件事**，混用会得到「上传成功但图片显示不出来」 |
 
-#### 注册与改密码（邮箱验证码）
+> 全部 **87 个** `PR_*` 变量都在 `config_load.go` 里，非法取值**直接报错、不静默回退**。
 
-注册是**两段式**，用户看到的就是"先账号密码、翻一页填邮箱"：
+---
 
-```
-POST /api/auth/register/start    {username, password}          → {ticket, expiresIn}   （不建号）
-POST /api/auth/register/email    {ticket, email}               → 204（发出验证码）
-POST /api/auth/register/verify   {ticket, code}                → 201（建号 + 会话）
-POST /api/auth/password/otp      {email}                       → 200（恒定，发改密验证码）
-POST /api/auth/password/otp/reset {email, code, password}      → 204（改密 + 撤销全部会话）
-```
+## 前端 mock / real 适配层
 
-四条刻意的设计：
-
-- **昵称不在注册里填**：默认等于用户名（服务端 `SanitizeDisplayName` 同一口径），之后在设置页改。
-- **人机验证在页内子窗体里**（不是 `window.open`）：弹窗会被拦截，被挡住时用户只能看到
-  "请允许弹窗"——那是一次白跑。子窗体还能保住表单里已填的内容。
-  它是**摩擦**而不是安全边界：题面与校验都在前端，读源码即可绕过；真正的防线是
-  验证码错误计数（落库）+ 发送冷却 + 每 IP/每邮箱限流。
-- **验证码错误计数落库**（`password_resets.attempts`，5 次即作废）：放内存的话重启
-  一次就清零，而 6 位数字只有 100 万种。
-- **写操作支持幂等键**（`Idempotency-Key` 头，UUID）：同键同体只执行一次（双击不会建两个
-  账号、也不会让第一封验证码立刻作废）；**同键不同体返回 409**——那是客户端 bug，
-  不能返回旧结果。
-
-**找回密码只有验证码这一条路**：`POST /api/auth/forgot` 与 `POST /api/auth/reset`
-（邮件里的一次性重置链接）已下线，旧邮件里的 `/reset#token=…` 链接因此失效。
-原因不是链接不安全（256 bit 比 6 位数字更抗爆破），而是它必须要求"邮箱已验证"
-（否则攻击者填受害者的邮箱，受害者点开链接就把**攻击者账号**的密码改了），
-于是未验证邮箱的老账号永远找不回密码 —— 而对外响应又是恒定的 200，用户只看到
-"已发送"却收不到信。验证码没有这个两难：码只发给邮箱的真实持有者，
-所以它**对未验证邮箱也开放**。注册后的"验证你的邮箱"链接（`/verify#token=…`）仍然保留。
-
-**无 TLS 的已知缺口**：当前部署是明文 http，因此 refresh Cookie **不带 `Secure`**（有一条测试断言
-把它钉住：上 TLS 之前不该加，否则浏览器会直接丢弃它）。上 TLS 后应立即补 `Secure` 并收紧 `SameSite`。
-
-### 前端 mock / real 适配层（分区逐个翻真）
-
-部分分区（帖子、好友、消息、番剧论坛、官方、用户公开档案）的后端接口按域分批上线，
-前端因此分成两层：**门面 + 两份同形状实现**，由环境变量在构建期二选一。
+部分分区按域分批上线，前端因此分成**门面 + 两份同形状实现**，由构建期环境变量二选一：
 
 ```
 client/src/api/<域>.ts          门面：页面唯一 import 的出口，导出形状固定
@@ -311,295 +209,223 @@ client/src/api/<域>.ts          门面：页面唯一 import 的出口，导出
         └── api/real/<域>.ts    真实 HTTP 实现
 ```
 
-| 环境变量 | **本地**默认 | **CI/生产**默认 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `VITE_MOCK_POSTS` | mock | **真实** | 帖子域（`/posts` ×3） |
-| `VITE_MOCK_FRIENDS` | mock | **真实** | 好友域（`/friends`） |
-| `VITE_MOCK_MESSAGES` | mock | **真实** | 消息域（`/messages`） |
-| `VITE_MOCK_FORUM` | mock | **真实** | 番剧论坛（`/forum`） |
-| `VITE_MOCK_OFFICIAL` | mock | **真实** | 官方分区（`/official`） |
-| `VITE_MOCK_USERS` | mock | **真实** | 用户公开档案（`/user/:id`） |
-| `VITE_MOCK_FOLLOWS` | mock | **真实** | 关注域（`/api/follows`，档案页关系动作） |
+八个开关：`VITE_MOCK_{POSTS,FRIENDS,MESSAGES,FORUM,OFFICIAL,USERS,FOLLOWS,FAVORITES}`
+（`client/src/api/mode.ts`，每个都是**静态成员访问** —— Vite 只替换静态形式）。
 
-**两侧默认值刻意相反**，这不是笔误：
-
-- **本地不设变量 → mock**（`client/src/api/mode.ts` 的语义）。前端先行的施工期要的就是这个，
-  配错也退化成"还是 mock"，不会退化成整片分区 404。
-- **CI 不设仓库变量 → 真实接口**（`.github/workflows/build-push.yml` 里回退成 `0`）。
-  2026-10-28 线上六个分区对所有人都显示同一份假数据（`/messages?peer=2` 恒为写死的
-  「放映员」），根因就是 CI 什么都没设、静默沿用了"默认 mock"。**生产走 mock 从来不是
-  任何人的决定，只是没人想起来配它** —— 而"忘了配"在两种默认下后果不对称：
-  开发忘配一切照常，生产忘配是所有人看到硬编码的好友与消息。
-
-所以要在某个环境**显式**退回 mock：仓库 Settings → Secrets and variables → Actions →
-**Variables** 里把对应变量设成 `1`（六个独立设，支持逐域翻真）。构建日志会打印本次生效的
-六个开关，别靠猜。
-
-翻成真实实现后，若该域的服务端路由还没注册（返回 404），页面渲染
-「该分区后端尚未上线」空态（`client/src/components/ui/CapabilityNotice.vue`），
-**不是**裸的「请求失败（HTTP 404）」—— 后者看起来像整个后端挂了。这与
-`useAuthForm.ts` 把 `/api/auth/*` 的 404 解释成「账号能力未启用（游客模式）」是同一条约定。
-
-⚠ **翻真后不要拿"bundle 里还有 mock 的中文人名"当判据**：两份实现都会进产物
-（`mode.ts` 记着的几 KB 刻意取舍，换掉运行期配置注入面），grep 字符串证明不了走的是哪条路。
-要看的是页面实际发出了哪些 `/api/*` 请求。
-
-这些变量是**构建期常量**（Vite `import.meta.env` 静态替换）：改完要重启 dev server 或重新构建。
-模板见 [`client/.env.example`](client/.env.example)。
-
-默认 STUN 列表（顺序即默认优先级，2026-02 本机实测 UDP Binding Request 往返）：
-
-| STUN | 实测 RTT | 说明 |
+| 环境 | 不设变量时 | 为什么 |
 | :--- | :--- | :--- |
-| `stun:stun.douyucdn.cn:18000` | 11ms | |
-| `stun:stun.hitv.com:3478` | 32ms | |
-| `stun:stun.chat.bilibili.com:3478` | 46ms | |
-| `stun:stun.miwifi.com:3478` | 119ms | |
-| `stun:stun.cloudflare.com:3478` | 203ms | **粘性**：有 AAAA，负责 IPv6 srflx 候选 |
-| `stun:stun.l.google.com:19302` | 236ms ↔ 4s 超时 | **粘性**：有 AAAA；时好时坏 |
-| `stun:stun.qq.com:3478` | 4s 无响应 | 留在列表里由探测打分自然沉底/落选 |
+| **本地** | mock | 前端先行施工期要的就是这个；配错也退化成「还是 mock」，不会退化成整片分区 404 |
+| **CI / 生产** | **真实接口** | `.github/workflows/build-push.yml` 注入 `vars.VITE_MOCK_* \|\| '0'` |
 
-服务端每 `PR_ICE_PROBE_INTERVAL` 探一轮，按 RTT 与跨窗口成功率打分，然后按**延迟优先**选入：
-**实测最快的 2 条 + 本轮健康的粘性 2 条恒选**，剩下 `PR_ICE_MAX_STUN - 4 = 1` 个席位
-在次优候选里加权轮询（所以默认上限是 5；4 会让轮询剩 0 席）。算法与公式见
-[`docs/ALGORITHM.md` §1.6](docs/ALGORITHM.md)。`/api/ice` 与 `POST /api/rooms`
-的响应形状如下，`iceServers` 与退役 TURN 之前完全一致（只做加法）：
+**两侧默认值刻意相反**：2026-10-28 线上六个分区对所有人显示同一份硬编码假数据
+（`/messages?peer=2` 恒为「放映员」），根因正是 CI 什么都没设、静默沿用了「默认 mock」。
+生产走 mock 从来不是任何人的决定，只是没人想起来配它 —— 而「忘了配」在两种默认下后果不对称。
 
-```json
-{
-  "iceServers": [{"urls": "stun:stun.douyucdn.cn:18000"}],
-  "ttlSeconds": 300,
-  "expiresAt": 1760000000,
-  "probe": {
-    "probedAt": 1760000000,
-    "intervalSeconds": 60,
-    "scores": [
-      {"url": "stun:stun.douyucdn.cn:18000", "rttMs": 11, "ok": true, "score": 0.982, "selected": true}
-    ]
-  }
-}
-```
+要在某个环境**显式**退回 mock：仓库 Settings → Variables → 把对应变量设成 `1`。构建日志会打印生效的开关快照。
 
-`probe.scores` **覆盖全部候选**（不只下发的那几条），所以排障时能直接看出"某条为什么落选"。
+> ⚠ 别拿「bundle 里还有 mock 的中文人名」当判据 —— 两份实现都会进产物。看页面实际发出的 `/api/*` 请求。
+
+翻真后若该域后端路由未注册（404），页面渲染「该分区后端尚未上线」空态（`ui/CapabilityNotice.vue`），
+**不是**裸的「请求失败（HTTP 404）」。
 
 ---
 
-## 单端口部署 / 内网穿透
+## 代码结构
 
-开发态是两个端口（Vite 5173 + Go 8888）。要在局域网或公网给外部用，就把前端构建产物交给 Go 托管：
-**API、`/ws`、页面全部在同一个端口上**，于是一条隧道指向这一个端口就够了。
+```
+cmd/                    入口：main.go（读配置 → InitializeApp → 起服务 → 优雅退出）
+  wire.go               只有 //go:build wireinject 头 + InitializeApp，无业务代码
+  wire_gen.go           `go tool wire ./cmd` 生成（提交，不手改）
+  segmenter/            本地切片器 CLI（独立 main 包，交叉编译成用户下载的 exe）
 
-前端只使用相对路径 `/api` 与 `/ws`，WebSocket 地址按页面协议推导
-（`client/src/stores/room.ts`：`location.protocol === 'https:' ? 'wss' : 'ws'`），
-所以同源托管之后不需要任何额外配置。
+internal/bootstrap/     装配根（无业务逻辑）：ProviderSet + db / auth / admin / engine / mail / storage 装配块
+                        ⚠ provider 声明顺序 = 创建顺序，cleanup 反序（关服务 → flush 写队列 → 关连接池）
+internal/service/       核心服务层：manager/room/assign/mode（房间、成员、拓扑分配）
+                        account.go（账号流程 + 管理端用户类用例；身份与授权事实的唯一落点）
+                        hub.go（WS 连接与广播）、logring.go、server.go
+                        auth/（bcrypt、JWT、WS 票据）、limiter/、ice/（STUN 探测打分）、
+                        mp4/（解析切片）、segment/（服务端切片队列）、mail/
+internal/handler/       HTTP 适配层：router.go / ws.go / wsuser.go（信令入口）、middleware.go、
+                        auth.go / register.go（账号）、admin.go / users.go / follows.go /
+                        friendships.go（社交）、posts.go / anime.go / messages.go /
+                        favorites.go（内容）、publicroom.go / roommeta.go / segment.go /
+                        uploads.go / static.go / downloads.go、errors.go（错误码映射）
+internal/store/         唯一持久化 owner（GORM）：gorm/migrate/migrations、user/session/roommeta/
+                        audit/writer（异步事件写入器）、posts/anime/messages/follows/favorites、
+                        otp/draft/idempotency
+internal/config/        全部环境变量、默认值与校验
+internal/model/         领域模型、错误码、wire.go（解码前预算）、pb_convert.go
+internal/pb/            生成代码（勿手改）；真源 proto/projection_room.proto
+internal/storage/       对象存储的唯一出口（MinIO / S3）：PutImage / Remove / EnsureBucket
+internal/utils/         与业务无关的小工具
 
-```bash
-# 1. 构建前端（产物在 client/dist，已 gitignore）
-npm --prefix client install     # 首次
-npm --prefix client run build
+client/src/pages/       20 个页面（17 个主页面 + admin/ 三页），全部 () => import() 懒加载
+client/src/components/ui/        纯展示组件：AppHeader / UserAvatar / AuthorRow / ActionBar /
+                                 AsyncState / Button / IconButton / MarkdownView / RelativeTime /
+                                 MemberList / TopologyBadge / RouteSkeleton / TooltipLayer …
+client/src/components/features/  壳与业务组合：auth / common / room / rooms / shell
+client/src/api/         门面 + mock / real 两套实现（见上一节）
+client/src/stores/      Pinia：auth / room / roomMeta / publicRooms / admin
+client/src/utils/       路由契约与共享逻辑（avatar / count / relativeTime / navSection /
+                        postsRoute / friendsRoute / dmRoute / routeTransition …）
+client/src/styles/      tokens / base / transition
+client/src/gen/         protobuf 生成代码
 
-# 2. 起服务：默认就会托管 client/dist
-go run ./cmd                    # → http://127.0.0.1:8888 同时是页面、API 与 /ws
-
-# 3. 需要局域网/公网可访问时，监听所有网卡
-PR_ADDR=0.0.0.0:8888 go run ./cmd
+proto/                  projection_room.proto（唯一真源）
+test/script/            真机验收与诊断脚本（32 个 + lib/browser.mjs 公共库，见下）
+test/resource/          媒体夹具（已 gitignore）
+scripts/                setup-local-db / run-local / build-segmenter / gen-proto / minio / 迁移
+docs/                   见「文档地图」
 ```
 
-Windows PowerShell 里等价写法：
+**依赖方向**：`handler → service → store`；`model` / `utils` 不反向依赖任何层。
+`internal/` 下任何代码都不得读写视频数据（I1）。
+
+---
+
+## 协议要点
+
+- **protobuf 是唯一真源**：`proto/projection_room.proto` → `internal/pb/*.go` + `client/src/gen/*.ts`
+  （`scripts/gen-proto.ps1`）。改协议只改 proto，不手改生成物。
+- **WS 信封**：1 字节类型前缀 + protobuf 体；信令走 `/ws?roomId=<码>&clientId=<id>[&ticket=<票据>]`。
+  - **无 `ticket` = 游客**（观众免登录进房是产品决定，别加拦截）；带票据则绑定账号，票据**单次使用 + 30s 过期**。
+  - **Origin 白名单是唯一判据**（见 `PR_ALLOWED_ORIGINS`）。
+- **DataChannel**：negotiated id=0，1 字节 kind 前缀（`0x01` 控制 / `0x02` init / `0x03` 媒体 / `0x04` tail）
+  + 7 字节媒体头；64 KiB 分片 + `bufferedAmount` 背压。
+- **房间码**：`^[A-Z0-9]{4,12}$`；建房**必须登录**且响应下发一次性 `hostToken`
+  （主播断线宽限期内接回主播位必须携带）。
+- **ICE**：**TURN 已彻底退役**。服务端周期性实测 STUN 并打分下发（最快 2 条 + 健康粘性 2 条恒选），
+  载荷带 `ttlSeconds` / `expiresAt` / `probe`，`probe.scores` 覆盖**全部候选**（排障时能看出某条为什么落选）。
+- **解码前预算**：`internal/model/wire.go` 用 protowire 扫 repeated 元素数，**先于** `Unmarshal` 拒绝
+  （曾出现「4 MiB 帧展开成 140 万个对象 → 3.9 GB」）。
+- **启动门控**：新节点接入后不立即播放，缓冲达 4 片 / 8 秒且时钟偏移估计收敛才开闸，**不设超时上限**
+  （上游没数据就一直等，超 20s 提示「上游带宽可能不足」）。细节见 [`docs/ALGORITHM.md`](docs/ALGORITHM.md)。
+
+---
+
+## 部署
+
+**生产形态（2026-10-19 起）**：Docker Compose 双容器，对外只有 **80** 一个入口。
+
+```
+浏览器 → nginx (0.0.0.0:80) → 127.0.0.1:8080 → container「projectionroom-app」(network_mode: host)
+                                                     ↓
+                                              宿主机 PostgreSQL 16 (127.0.0.1:5432)
+                                              容器「pr-minio」(:9000 / 控制台 :9001)
+```
+
+- **两个容器都用 `network_mode: host`**：宿主机 PG 只监听回环，bridge 网络连不上；代价是容器不能做端口映射。
+- **数据库不在 compose 里**：本机已有 PG 16 且存着生产数据，再起一个 pg 容器会争抢 5432 并让「数据到底在哪」变成两个答案。
+- **对象存储**：桶 `pr-files`，匿名只读（只给 `s3:GetObject`，不给 ListBucket），浏览器经 `/files/` 反代到 9000。
+- **CI**：`.github/workflows/build-push.yml` 推镜像到 GHCR（Secret 名 **`REGISTRY_TOKEN`**），
+  `deploy.yml` 从 GHCR 拉镜像部署。镜像标签是提交 sha，回滚 = 再跑一次旧 sha。
+  ⚠ Dockerfile **不能**带 `-tags wireinject`（会选中空壳 `cmd/wire.go`，`InitializeApp` 返回 nil → 启动即 SIGSEGV）。
+
+详见 [`docs/DEPLOY-SINGLE-PORT.md`](docs/DEPLOY-SINGLE-PORT.md) 与 [`docs/STORAGE-MINIO.md`](docs/STORAGE-MINIO.md)。
+
+**内网穿透**：页面、`/api`、`/ws` 同源之后，一条隧道指向一个端口就够了。三条注意：
+
+1. 隧道给 HTTPS 时页面会走 `wss://`（信令地址由 `location.protocol` 推导，不硬编码），隧道必须支持 WS 升级。
+2. **隧道只解决「页面 + 信令」，媒体仍然是 P2P** —— 打洞失败时隧道帮不上忙，而 TURN 已退役。
+3. 切片接口受隧道限制（源文件上限 16 GiB / 作业 60 分钟，而免费隧道常只有几十 MB / 30~100s），
+   大视频远程上传大概率在隧道层先被拒。稳妥做法是在服务器本机切好再分批下载产物。
+
+---
+
+## 验证
+
+### 门槛（每次改完都要全绿）
+
+```bash
+gofmt -l ./cmd ./internal                 # 必须无输出
+go build ./... && go vet ./...
+go vet -tags wireinject ./cmd && go tool wire check ./cmd
+go test ./... -count=1 -timeout 900s      # 12 个有测试的包
+
+npm --prefix client run typecheck
+npm --prefix client run build             # 含 vue-tsc；产物必须 0 个 window.__pr
+npm --prefix client test                  # 5 个前端单测（node --test）
+```
+
+前端渲染判据：`grep -rn "v-html" client/src` 命中 ≤1 且只在 `ui/MarkdownView.vue`；`grep -rn "innerHTML" client/src` 为 0。
+
+### 真库测试
+
+`internal/store` 的用例依赖真库，否则 Skip。**测试库与生产库是两个库**，DSN 的 `dbname` 必须含 `_test`（用例里有护栏）。
 
 ```powershell
-$env:PR_ADDR = '0.0.0.0:8888'; go run ./cmd
+$env:PR_TEST_DB_DSN = 'host=127.0.0.1 port=5432 user=pr_app password=<见 .env.local> dbname=projectionroom_test sslmode=disable'
+go test ./internal/store/ -count=1
 ```
 
-然后用任意内网穿透工具把隧道指向这个端口，例如：
+⚠ 真库用例会 **TRUNCATE 表** —— 手工 fixture（如验收用的管理员账号）跑过之后就没了，需要重建。
+⚠ **测试实例收尾必须停进程**：曾有一个后台实例直连测试库、绕过用例的跨进程隔离锁，导致 store 用例随机红。
 
-```bash
-# frp（服务端 frps + 本地 frpc）
-frpc tcp --server_addr <frps 地址> --server_port 7000 --local_ip 127.0.0.1 --local_port 8888 --remote_port 8888
+### 真机验收（`test/script/*.mjs`，headless Chrome）
 
-# ngrok / cloudflared（直接指本地端口）
-ngrok http 8888
-cloudflared tunnel --url http://127.0.0.1:8888
-```
+共 32 个脚本 + `lib/browser.mjs` 公共库。**按需跑，不必全跑**；每条的完整前置条件见
+[`CLAUDE.md` §7](CLAUDE.md)（那是脚本契约的唯一真源，改脚本先读它）。
 
-隧道把外部请求转给本机 `8888`，页面、`/api`、`/ws` 一起可达。路由优先级固定为
-**`/healthz` → `/api/*` → `/ws` → `/assets/*` → 其它真实文件 → SPA 回退 `index.html`**，
-所以页面永远不会顶掉业务路由。
-
-**三条必须知道的注意：**
-
-1. **隧道给 HTTPS 时，页面会走 `wss://`。** 信令地址由 `location.protocol` 推导（见上），
-   https 页面连的是 `wss://<域名>/ws`；隧道必须支持 WebSocket 升级（frp 的 http 类型、
-   ngrok、cloudflared 都支持，但某些只做 HTTP 转发的反代会在升级时失败）。
-   页面本身如果是 https，混用 `ws://` 会被浏览器按混合内容拦掉——这也是必须推导而不是硬编码的原因。
-2. **隧道只解决「页面 + 信令」，媒体仍然是 P2P。** 视频分片走 WebRTC DataChannel，
-   不经过隧道，也不经过服务器（不变量 I1）。因此双向打洞失败时（对称 NAT、严格公司网络），
-   就是连不上——隧道对 P2P 打洞没有任何帮助。**TURN 已彻底退役**（原因见下），
-   所以现在的 ICE 配置里只有 STUN；打洞成功与否完全取决于双方的 NAT 类型。
-
-### 为什么不再有 TURN
-
-**已移除**：`PR_TURN_URLS` / `PR_TURN_USER` / `PR_TURN_PASS` 三个环境变量、
-`config.ICEConfig` 里的 TURN 字段，以及 `/api/ice`（与建房间响应）里的 `turn:` 条目。
-设置这三个环境变量现在是无声无息的空操作，`/api/ice` 里不会再出现任何 `turn:` 项。
-
-移除的原因（实测结论）：
-
-- 私有 TURN（`turn:10.23.170.132:3478`）对**公网观众不可达**：它是私网地址，且隧道不转发 UDP。
-  对公网观众而言它的存在只会让候选收集多等一轮超时，成本是负的。
-- 一台"只对主播一侧可达"的中继没有任何意义：中继必须双方都能连上才能转发媒体，
-  而 ICE 一旦把不可达的 TURN 收进候选，浏览器仍会在它上面浪费收集时间甚至把
-  `relay` 候选当成可用路径。
-- 没有可用 TURN 时，公开 STUN 列表的质量就成了打洞成功率的全部——所以本次同时把
-  "谁可用"的判断从浏览器搬到服务端（服务端探测 + 打分 + TTL 下发，见上表与
-  [`docs/ALGORITHM.md` §1.6](docs/ALGORITHM.md)）。
-
-**什么条件下才该重新引入 TURN**：同时满足下面三条才值得做，缺一条都会退化成
-"多一轮超时、零收益"：
-
-1. 有一台**公网可达**的中继（要有公网 IP 或域名的 VPS，且 UDP 3478 真的通得过；
-   纯 HTTP 隧道与只转 TCP 的反代都不行——TURN 靠 UDP 转发媒体）；
-2. 房间成员真的会落在对称 NAT / 严格公司网络下面（否则直连成功率本来就很高）；
-3. 接受中继的带宽成本（中继转发的是**视频字节**，这是唯一一处会让成本模型从 P2P
-   退回 CDN 的地方，与不变量 I1 直接冲突，必须是有意识的决策而不是顺手打开）。
-
-重新引入时不要恢复"字段留着不用"的半退役状态：要么按上面的条件实配并做真机验证，
-要么就保持现在的纯 STUN 形态。
-3. **分片上传/下载接口受隧道限制。** `/api/v1/segment/*` 的源文件上限是 **16 GiB**、
-   作业时长上限 **60 分钟**（`PR_SEGMENT_MAX_SOURCE_BYTES` / `PR_SEGMENT_MAX_DURATION`），
-   而隧道通常有自己的最大请求体与超时（很多免费隧道只有几十 MB / 30~100s），
-   大视频远程上传大概率会在隧道层先被拒或超时。稳妥做法：在服务器本机（或局域网内）先切好分片，
-   再把产物通过隧道分批下载（≥1 GiB 时接口会自动返回 JSON manifest + 分批链接）。
-
-静态目录缺失（还没构建前端 / `PR_STATIC_DIR` 指错）**不影响服务启动**：
-服务端只打一条 WARN 并在页面路径上返回 404 提示，`/api`、`/ws`、`/healthz` 照常工作
-（所以 `go run ./cmd` 不装前端也能当纯信令服务器跑）。
-
----
-
-## 验收
-
-### 自动化（服务端 + 前端单测）
-
-```bash
-gofmt -l ./cmd ./internal          # 必须为空
-go vet ./... && go vet -tags wireinject ./cmd
-go test ./...                      # 7 个有测试的包（含 cmd/segmenter 的一键流程）
-
-cd client && npm run typecheck && npm run build
-```
-
-`cmd/segmenter` 的测试里有两条不需要真 ffmpeg 的关键用例：用 `httptest` 提供一个小 zip
-验证"下载→解压→找到工具"，以及用 `testdata/stubtools`（假 ffmpeg/ffprobe）把整条
-一键流程跑到产出 `index.json`（假 ffmpeg 会把收到的参数写进 `PR_STUB_LOG`，用来证明
-"找到了工具并把它作为 ffmpeg 路径传下去"）。
-
-### 竞态检测（-race）
-
-Windows 上 Go 的 `-race` 需要 gcc 兼容驱动（mingw-w64），MSVC/clang 都不行；
-本机没有 mingw 时用容器跑（Docker Desktop 即可，不动主机）：
-
-```bash
-docker run --rm -v "D:/IT/program/go-program/ProjectionRoom:/app" -v pr-gomod:/go/pkg/mod \
-  -w /app -e GOPROXY=https://goproxy.cn,direct -e GOSUMDB=off -e GOTOOLCHAIN=local \
-  golang:1.26 sh -c "go test -race ./..."
-```
-
-`GOPROXY` 必须指到能通的源（容器里直连 `proxy.golang.org` 会被拒）。
-最后一次全绿：`config / handler / model / service/mp4 / service/segment / usecase` 全部 ok。
-容器里没有 ffmpeg，正好顺带覆盖"服务器缺 ffmpeg"这条分支。
-
-### 真实浏览器实测（M2 验收脚本）
-
-需要 Go 服务端与 Vite dev server 都在运行，且准备一个分片目录：
-
-```bash
-# 默认就用仓库自带的测试素材 test/resource/short_video/cut（25s），无需额外准备
-node test/script/verify-m2.mjs
-
-# 也可以指向自己切出来的分片目录
-node test/script/verify-m2.mjs --media ./room-media --duration 120
-
-# M3：多层树 / 单链分发（可注入实测上行，因为 headless 的 getStats 不产生估计值）
-node test/script/verify-m3.mjs --nodes 4 --host-uplink 12000000 --uplink 1=12000000
-node test/script/verify-m3.mjs --media ./room-media --nodes 4 --host-uplink 800000 --uplink 1=6000000
-```
-
-### 诊断脚本（两端取证）
-
-验收脚本只给 PASS/FAIL；排障时用这两个把两端状态并列打出来：
-
-```bash
-# 观众拿不到分片：连接/请求/应答/门控/播放器 + 取数失败原因与主播应答日志
-node test/script/diag-chunks.mjs
-
-# 房主控制的时序（200ms 采样）：control=按钮暂停 / native=原生控件暂停 / join-order=观众先入房后开播
-node test/script/diag-control.mjs --scenario native
-
-# 写入本地目录分阶段计时（zip 解析 vs 逐文件写入、重复写快路径）
-node test/script/diag-write.mjs
-```
-
-### 大文件 / 真实场景
-
-`test/resource/` 下的素材（大体积二进制，已 gitignore）：
-
-| 素材 | 规格 | 说明 |
+| 分组 | 脚本 | 需要什么 |
 | :--- | :--- | :--- |
-| `short_video/cut` | 25s / 26 片 / 4.5Mbps | 验收脚本默认素材（已切好，含 index.json） |
-| `middle_mkv_video.mkv` | 2.9min H.264+AAC | 中等长度 |
-| `middle_mp4_video.mkv` | 13.4min H.264+AAC / 111MB | **真实大文件**：实测服务端 2.0s 切出 578 片、单次 zip 111.7MiB、下载 2.9s |
-| `big_mp4_video.mp4` | 142min AV1+Opus / 3.9GB | 超过 60min 配额，应被拒（前端会先本地判时长，不白传） |
+| **协议连通** | `verify-connection` | 不需要 Chrome，几十毫秒出结论 —— **「页面连不上后端」先跑它** |
+| **播放链路** | `verify-m2`、`verify-m3`、`verify-m4*`、`verify-room-resume`、`verify-ice`、`verify-health`、`verify-schedule`、`verify-unassigned`、`verify-segment-ui` | 媒体夹具 + 调试钩子（`VITE_DEBUG_HOOKS=1`）；`verify-room-resume` 的 `--grace` 必须与服务端一致 |
+| **账号** | `verify-auth`、`verify-forgot` | 管理员凭据 / `PR_OTP_DEV_ECHO=1` |
+| **社交与内容** | `verify-following`、`verify-follows`、`verify-favorites`、`verify-post-actions`、`verify-friends` | 真后端 + 多账号；部分要 `VITE_MOCK_*=0` 构建 |
+| **视觉与结构** | `verify-avatar`、`verify-authorrow`、`verify-navstate`、`verify-transition`、`verify-transition-logic`、`verify-relative-time`、`verify-route-title`、`verify-routelazy` | **不需要后端**（自起静态服务器 + `/api/*` 回 404，跑 mock 域），但**须先 build** |
+| **诊断** | `diag-chunks`、`diag-control`、`diag-write`、`verify-large` | 排障用，两端状态并列打印 |
 
-```bash
-# 大文件端到端：上传 → 服务端切片 → 取产物，打印每阶段耗时与产物形态
-node test/script/verify-large.mjs
-node test/script/verify-large.mjs --source test/resource/big_mp4_video.mp4   # 预期被配额拒绝
-```
-
-
-脚本会启动**两个独立的 Chrome 实例**（不能是同一实例的两个标签页：后台标签会被冻结/节流，
-既会让 CDP 调用挂死，也会把 200ms 的同步循环拖成 1s，那测的就不是同步精度了），
-分别扮演主播与观众，然后测量起播耗时、全程偏差分布、暂停/跳转/继续的跟随情况，
-并输出 `PASS` / `FAIL`。
-
-页面通过 `window.__pr.snapshot()` 暴露结构化状态快照（`client/src/debug.ts`），脚本只读快照、不抠 DOM 文本。
+需要调试钩子的脚本：`$env:VITE_DEBUG_HOOKS='1'; npm --prefix client run build`（生产构建刻意没有 `window.__pr`）。
 
 ---
 
-## 项目结构
+## 文档地图
 
-```
-cmd/                    入口：main.go 只有 加载配置 → InitializeApp → Run
-cmd/init.go             Init 聚合根与 Run()（wire 图与 main 的唯一交点）
-cmd/wire.go             wire.Build 依赖声明（inject 侧，勿手写 wire_gen.go）
-cmd/wire_gen.go         `go tool wire ./cmd` 生成的装配代码（提交，不手改）
-cmd/segmenter/          视频分片工具（一键流程：找输入/找或下载 ffmpeg/探测判定 + moof 边界切片 + index.json）
-internal/config/        配置结构与加载（环境变量覆盖）
-internal/handler/       gin 路由、/ws 处理、错误映射与前端静态资源托管（HTTP/协议适配层）
-internal/usecase/       业务用例：房间生命周期、拓扑分配、模式判定、换防（唯一状态权威）
-internal/model/         数据契约：消息模型、分片索引、protobuf 转换
-internal/service/       WebSocket 信令层（Hub）与 HTTP 服务器生命周期
-internal/service/mp4/   fragmented MP4 解析与按 moof 边界切分
-internal/utils/         与业务无关的小工具（随机码、切片比较）
-internal/pb/            protoc 生成的 protobuf 代码
-client/                 Vue 3 + TS + Vite 前端（播放链路在 src/composables/）
-test/script/          真实浏览器验收与诊断脚本（verify-m2 / verify-m3 / verify-segment-ui / diag-*）
-test/resource/        测试素材（大体积二进制，已 gitignore；脚本默认用 short_video/cut）
-docs/SPEC.md            设计文档（协议、拓扑、同步算法、里程碑与验收标准）
-```
+**根目录只留三个 md**：`README.md`（本页，用户门面）、`CLAUDE.md`（AI 会话的唯一入口地图）、
+`AGENTS.md`（技能配置指针）。**其余全部在 [`docs/`](docs/README.md)** —— 那里是文档总索引，按
+「现行规范 / 决策记录 / 实施计划与报告 / 笔记 / 归档」五组编排。
 
-**依赖方向**：`handler → usecase → model`；基础设施（`service*`）只通过接口被用例引用
-（`wire.Bind(new(usecase.Broadcaster), new(*service.Hub))`），`utils`/`model` 不反向依赖任何层。
+最常打开的四份：
 
-**不变量**：`internal/` 下任何代码都不得读写视频数据；服务器的职责边界在 SPEC §3 有明确表格。
+| 文档 | 什么时候读 |
+| :--- | :--- |
+| [`docs/SPEC.md`](docs/SPEC.md) | 改协议、房间状态机、拓扑分配之前 —— 它是设计与取舍的**完整依据** |
+| [`docs/ALGORITHM.md`](docs/ALGORITHM.md) | 改同步算法、分片分发、ICE 打分之前（含时序图与已知偏差） |
+| [`docs/ACCOUNTS.md`](docs/ACCOUNTS.md) | 改账号 / 社交 / 管理端 / 持久化之前 |
+| [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | 写文档或命名新概念之前 —— 有歧义的词在这里定死，每条注明锁定它的 issue 与日期 |
+
+`docs/archive/` 里是已过时的流程文档（旧部署、迁移指南），每篇顶部有横幅说明被什么取代。
+**照做会出错**，只在追溯时读。里面的凭据已脱敏为 `<REDACTED>`。
+
+---
+
+## 已知缺口
+
+按优先级：
+
+1. **无 TLS**：当前是明文 http，因此 refresh Cookie **不带 `Secure`**（有测试断言钉住 —— 上 TLS 之前不该加，
+   否则浏览器会直接丢弃它）。上 TLS 后应立即补 `Secure` 并收紧 `SameSite`。
+2. **`GET /api/rooms/mine`**：「我的房间」目前只读本标签页 `sessionStorage`。
+3. **`client/dist/downloads/room-media` 应移出静态根**：本机跑单端口实例时它会被静态托管（公网可下载）。
+   生产镜像已通过 `.dockerignore` 排除，所以这个缺口只在本地实例上存在。
+4. **房间元数据「投递失败只记日志」**：补偿（启动对账 / 重投）待公开列表扩大后一起做。
+5. **`/about` 仍是内容占位**（等作者提供内容）。
+6. **`scripts/` 下若干迁移脚本仍含历史明文口令**（已归档文档里的已脱敏，脚本里的待清理）。
 
 ---
 
 ## 开发约定
 
-- 消息字段在 `internal/model/message.go` 与 `client/src/types/protocol.ts` 各有一份，
-  改动必须同步 —— 它们是同一个协议的两份投影；线上编码为 protobuf
-  （`proto/projection_room.proto` 是唯一源，转换点见 `internal/model/pb_convert.go` 与 `client/src/types/codec.ts`）。
-- 分片索引在 `internal/model/index.go` 与 `client/src/types/media.ts` 同理。
-- 前端改动期间建议先停掉 Vite：Windows 上文件写入的原子替换会与它的 watcher 抢锁（EBUSY）。
+- **语言**：注释与提交信息用中文；代码标识符用英文；字符串一律 **ASCII 引号**。
+- **提交**：`<type>(<scope>): <描述>`（feat / fix / docs / refactor / chore），一次任务一次提交；
+  `git push` 仅在明确要求时执行。
+- **前端渲染**：一切用户可控内容走**文本插值**（`{{ }}`）；唯一例外是 `ui/MarkdownView.vue`
+  （`marked` 解析 + `DOMPurify.sanitize()` 后注入）。
+- **看着像重复、但输出格式不同的工具函数不要合并**：例如 `service.humanBytes`（`"512 MiB"`）与
+  `segment.HumanBytes`（`"512.00 MiB"`）—— 合并会静默改日志文案并打挂测试。合并前先证明「逐字等价」。
+- **`data-testid` 与主行动按钮文案是验收脚本的契约**：改名 / 删除会打挂 `test/script/**`，改之前先 grep 一遍谁在用。
+- **改完 `internal/bootstrap/ProviderSet` 的 provider 列表后**：重新 `go tool wire ./cmd` 并核对生成代码里的
+  创建序列与 cleanup 反序（关服务 → flush 写队列 → 关连接池）。
+- **编辑含中文的源文件用编辑器 / 编辑工具**，不要用 PowerShell 直接读写（GBK 乱码）。
+- **遇到语义不清、或需要人拍板的点：停下来问**，带着选项和推荐问。
+- **目录结构、关键约定、命令、部署事实一旦变化，同步更新 `CLAUDE.md`** —— 过时地图比没有地图更危险。

@@ -1,3 +1,7 @@
+> ⚠️ **已归档（2026-11-02）：本文描述的是 2026-10-19 之前的历史流程，已不再适用。**
+> 现行做法见 [`docs/DEPLOY-SINGLE-PORT.md`](../DEPLOY-SINGLE-PORT.md) 与 [`docs/STORAGE-MINIO.md`](../STORAGE-MINIO.md)：对外只有 **80** 一个入口（nginx 反代到 `127.0.0.1:8080`），部署形态是 **Docker Compose 双容器**（`projectionroom-app` + `pr-minio`，均 `network_mode: host`），不再有 systemd 单元，也不再手工 `docker build` + `scp` 二进制上服务器。
+> 保留本文仅为追溯历史；文中凭据已脱敏为 `<REDACTED>`，真实值见服务器 `/opt/projectionroom/.env`（root:600）与 GitHub 仓库 Secrets。
+
 # 🚀 快速手动部署方案（替代 GitHub Actions）
 
 ## ⏱️ 预计时间：5-10 分钟
@@ -7,9 +11,9 @@
 ## Step 1: 在服务器上安装 Docker + PostgreSQL
 
 ```powershell
-# SSH 连接到服务器（使用密码 Qwertyui1234）
+# SSH 连接到服务器（使用密码 <REDACTED>）
 ssh root@60.205.212.25
-# 密码：Qwertyui1234
+# 密码：<REDACTED>
 
 # ① 确认 Docker 已安装（上一步已完成）
 docker --version
@@ -23,7 +27,7 @@ sudo -u postgres dropdb --if-exists projectionroom
 sudo -u postgres createdb projectionroom
 
 # 设置密码（临时，后续会更新 .env）
-psql -U postgres -d projectionroom -c "CREATE USER pr_app WITH PASSWORD 'woOzWJFQn4Ilp93GSLkjYc75PfBt';"
+psql -U postgres -d projectionroom -c "CREATE USER pr_app WITH PASSWORD '<REDACTED>';"
 psql -U postgres -d projectionroom -c "GRANT ALL PRIVILEGES ON DATABASE projectionroom TO pr_app;"
 
 # 退出 SSH
@@ -44,7 +48,7 @@ openssl rand -hex 32 > .secret_jwt
 
 # ② 创建 .env 文件
 cat > .env << EOF
-PR_DB_DSN=host=localhost port=5432 user=pr_app password=woOzWJFQn4Ilp93GSLkjYc75PfBt dbname=projectionroom sslmode=disable TimeZone=Asia/Shanghai
+PR_DB_DSN=host=localhost port=5432 user=pr_app password=<REDACTED> dbname=projectionroom sslmode=disable TimeZone=Asia/Shanghai
 PR_JWT_SECRET=$(type .secret_jwt)
 PR_PUBLIC_BASE_URL=http://60.205.212.25
 PR_SMTP_HOST=smtp.qq.com

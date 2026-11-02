@@ -1,3 +1,8 @@
+> ⚠️ **已归档（2026-11-02）：本文描述的是 2026-10-19 之前的 systemd + 手工 docker 流程，已不再适用。**
+> 现行做法见 [`docs/DEPLOY-SINGLE-PORT.md`](../DEPLOY-SINGLE-PORT.md) 与 [`docs/STORAGE-MINIO.md`](../STORAGE-MINIO.md)：对外只有 **80** 一个入口（nginx 反代到 `127.0.0.1:8080`），部署形态是 **Docker Compose 双容器**（`projectionroom-app` + `pr-minio`，均 `network_mode: host`），CI 推镜像到 GHCR 后由 `deploy.yml` 按 sha 拉取部署，部署后必须过 `/healthz`。
+> 文中的 yachiyo 数据迁移（686 用户）**已完成**，完成报告见 [`docs/reports/MIGRATION-2026-10-19.md`](../reports/MIGRATION-2026-10-19.md)。
+> 保留本文仅为追溯历史；文中凭据已脱敏为 `<REDACTED>`，真实值见服务器 `/opt/projectionroom/.env`（root:600）与 GitHub 仓库 Secrets。
+
 # 🎯 旧项目迁移到 ProjectionRoom - 最终部署方案总结
 
 ## ✅ 已完成的核心开发
@@ -66,7 +71,7 @@
 #   Value: <your PAT here>
 
 # ③ 服务器访问凭据（二选一）
-#   Option A: SERVER_PASSWORD = Qwertyui1234（密码明文，不安全）
+#   Option A: SERVER_PASSWORD = <REDACTED>（密码明文，不安全）
 #   Option B: SSH_KEY_FILE 路径（推荐）
 ```
 

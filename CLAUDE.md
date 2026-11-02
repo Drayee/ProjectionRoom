@@ -44,7 +44,7 @@
 | `client/` | Vue 3 + TS + Vite（月夜故障 · B 重建后）：`src/pages/`、`src/components/{ui,features}/`、`src/styles/{tokens,base,transition}.css`、`src/stores/`、`src/api/`、`src/utils/`、`src/gen/`(生成的原型代码)、`public/icons/`(**本地 SVG 图标，用多少复制多少**)、`public/fonts/`、`scripts/prune-dist.mjs`(构建后清理陈旧产物)。旧 `src/views/` 与根级 `src/components/` 已删（零残留） |
 | `test/script/` | 真机验收脚本（headless Chrome，见 §6） |
 | `test/resource/` | 媒体夹具（`short_video/cut`、`mkw_cut` 等） |
-| `docs/` | `SPEC.md`(房间与信令协议)、`ALGORITHM.md`、`SEGMENT.md`、`ACCOUNTS.md`(账号/社交/管理端规格)、`plans/`(实施计划)、`reports/`(验收报告) |
+| `docs/` | **文档总索引是 `docs/README.md`**（五组：现行规范 / 决策记录 / 实施计划与报告 / 笔记 / 归档）。现行规范：`SPEC.md`(房间与信令协议)、`ALGORITHM.md`、`SEGMENT.md`、`ACCOUNTS.md`(账号/社交/管理端规格)、`DEPLOY-SINGLE-PORT.md`、`STORAGE-MINIO.md`、`GLOSSARY.md`(术语唯一源)；另有 `adr/`、`agents/`(技能配置)、`plans/`、`reports/`、`notes/`、`prototypes/`、`archive/`(已过时，每篇顶部有横幅) |
 
 ## 3. 关键协议与约定
 

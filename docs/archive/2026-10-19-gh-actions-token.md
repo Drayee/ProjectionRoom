@@ -1,3 +1,8 @@
+> ⚠️ **已归档（2026-11-02）：本文描述的是 2026-10-19 之前的历史流程，已不再适用。**
+> 最要紧的过时点是 **Secret 名**：本文全篇让读者建 `GITHUB_REGISTRY_TOKEN`，而现行工作流实际读的是 **`REGISTRY_TOKEN`** —— `.github/workflows/build-push.yml:170` 的 `password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_REGISTRY_TOKEN }}`（`REGISTRY_TOKEN` 优先，旧名只作兜底）。**只建旧名会看起来"配了却仍然 Unauthorized"**。部署环节见 [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml)（Secret `SSH_PRIVATE_KEY` 或 `SSH_PASSWORD`，按 sha 精确部署，部署后必须过 `/healthz`）。
+> 现行部署形态与入口见 [`docs/DEPLOY-SINGLE-PORT.md`](../DEPLOY-SINGLE-PORT.md)（对外只有 **80**，nginx 反代到 `127.0.0.1:8080`）与 [`docs/STORAGE-MINIO.md`](../STORAGE-MINIO.md)；文中"手工 docker + systemd"的上下文已整体作废。
+> 保留本文仅为追溯历史；文中凭据已脱敏为 `<REDACTED>`，真实值见服务器 `/opt/projectionroom/.env`（root:600）与 GitHub 仓库 Secrets。
+
 # GitHub Actions Token 设置指南
 
 ## 🎯 用途

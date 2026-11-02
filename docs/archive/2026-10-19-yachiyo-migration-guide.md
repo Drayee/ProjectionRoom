@@ -1,3 +1,8 @@
+> ⚠️ **已归档（2026-11-02）：本文描述的是 2026-10-19 之前的历史流程，已不再适用。**
+> **yachiyo 数据迁移（686 用户）已经完成**，完成报告见 [`docs/reports/MIGRATION-2026-10-19.md`](../reports/MIGRATION-2026-10-19.md)；本文的"部署流程"一节（systemd + 手工 `docker build`/`scp` 二进制、`docker compose down && up`）整体作废。
+> 现行部署形态见 [`docs/DEPLOY-SINGLE-PORT.md`](../DEPLOY-SINGLE-PORT.md)（对外只有 **80** 一个入口，nginx 反代到 `127.0.0.1:8080`）与 [`docs/STORAGE-MINIO.md`](../STORAGE-MINIO.md)（对象存储）；部署形态是 **Docker Compose 双容器**（`projectionroom-app` + `pr-minio`，均 `network_mode: host`），由 `.github/workflows/deploy.yml` 按 sha 精确部署并在部署后校验 `/healthz`。
+> 保留本文仅为追溯历史；文中凭据已脱敏为 `<REDACTED>`，真实值见服务器 `/opt/projectionroom/.env`（root:600）与 GitHub 仓库 Secrets。
+
 # Yachiyo → ProjectionRoom 数据迁移指南
 
 ## 📋 概述
@@ -73,7 +78,7 @@ python3 scripts/import_yachiyo.py \
 
 ```bash
 # ① 本地导出 SQL dump
-PGPASSWORD=yuanshen123 pg_dump -h localhost -U postgres -d yachiyo \
+PGPASSWORD=<REDACTED> pg_dump -h localhost -U postgres -d yachiyo \
     --data-only --column-inserts \
     -t users -t posting > _migrate/yachiyo_data.sql
 

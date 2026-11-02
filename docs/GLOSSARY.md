@@ -1,5 +1,10 @@
 # Glossary
 
+> 术语表：产品与实现里**有歧义、或曾经被误解**的词在这里定死。
+> 每条都注明锁定它的 GitHub Issue 与日期，改口径前先看那条决议。
+> 本文件被 `client/src/**` 与 `internal/**` 的注释按名字引用（`GLOSSARY「Social graph」`），
+> 移动或改名会让那些引用失效。
+
 ## Social graph（自然体验 map 决议）
 
 Terms locked by [锁定关注与好友关系模型（互关=好友）](https://github.com/Drayee/ProjectionRoom/issues/42) (2026-10-30).
@@ -31,7 +36,7 @@ Terms locked by [锁定关注与好友关系模型（互关=好友）](https://g
 ### Related
 
 - Parent map: [自然体验：过渡反馈、对象组件、档案双视角与社交轻互动](https://github.com/Drayee/ProjectionRoom/issues/40)
-- Capability inventory: [docs/notes/2026-10-28-natural-ux-capability-inventory.md](docs/notes/2026-10-28-natural-ux-capability-inventory.md) (pre-decision facts)
+- Capability inventory: [notes/2026-10-28-natural-ux-capability-inventory.md](notes/2026-10-28-natural-ux-capability-inventory.md) (pre-decision facts)
 
 
 ## Profile（档案）
@@ -130,7 +135,7 @@ Terms locked by [月夜故障 DNA 上的自然层视觉原则](https://github.co
 - **reduced-motion 下反馈必须仍在**：三件套靠属性值切换，不依赖 `animation` 到达终态（靠 keyframes `to` 决定颜色的写法在降级下完全不反馈，属回归）。
 - `--dim` 是 4.5:1 下限，**不得再调暗**；色板与故障三色本票不动。
 
-详见 [docs/notes/2026-10-30-natural-layer-visual-principles.md](docs/notes/2026-10-30-natural-layer-visual-principles.md)。
+详见 [notes/2026-10-30-natural-layer-visual-principles.md](notes/2026-10-30-natural-layer-visual-principles.md)。
 
 ### Open（交给 #46 / to-spec）
 
@@ -159,7 +164,7 @@ Terms locked by [路由叙事过渡与导航当前态原则](https://github.com/
 - 过渡只动 `transform`/`opacity`；计入 #43 的「一次性动画同屏 ≤3」。
 - `prefers-reduced-motion` 下换页瞬时：CSS 由 tokens 全局判死，**FLIP 走 WAAPI 必须自己判**（双侧判死，缺一侧会出现「CSS 停了 JS 还在动」）。
 
-详见 [docs/notes/2026-10-30-route-transition-navigation-principles.md](docs/notes/2026-10-30-route-transition-navigation-principles.md)。
+详见 [notes/2026-10-30-route-transition-navigation-principles.md](notes/2026-10-30-route-transition-navigation-principles.md)。
 
 
 ## Friend discovery（好友搜索可发现性）
