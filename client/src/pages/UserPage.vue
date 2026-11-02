@@ -28,6 +28,8 @@ import { RouterLink, useRoute } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import RelativeTime from '../components/ui/RelativeTime.vue'
+import AuthorPostsBlock from '../components/features/profile/AuthorPostsBlock.vue'
+import AuthorRoomsBlock from '../components/features/profile/AuthorRoomsBlock.vue'
 import * as usersApi from '../api/users'
 import type { PublicProfile } from '../api/users'
 import * as followsApi from '../api/follows'
@@ -452,13 +454,6 @@ async function doLogout(): Promise<void> {
         <section v-if="!isSelf && auth.isLoggedIn" class="relation" aria-labelledby="relation-head">
           <h2 id="relation-head" class="sr-only">关系动作</h2>
 
-          <!-- 计数：纯数字，**不可点开名单**（名单只在 /me 看自己的，GLOSSARY「Profile」）。 -->
-          <p v-if="relation" class="counts dim">
-            <span><strong>{{ relation.followingCount }}</strong> 关注</span>
-            <span aria-hidden="true">·</span>
-            <span><strong>{{ relation.followerCount }}</strong> 粉丝</span>
-          </p>
-
           <div class="relation-acts">
             <!--
               互关 → 显示「互关 · 发消息」，但**发消息只在互关时可用**（can_dm）。
@@ -533,6 +528,38 @@ async function doLogout(): Promise<void> {
             <dd>{{ roleLabel(view.role) }}</dd>
           </template>
         </dl>
+
+        <!--
+          内容块（票 #68）：TA 的帖子 → TA 的放映室。
+          两块各自管自己的加载/空/错与无限滚动，页面只负责按块序摆位置。
+          **收藏块刻意不渲染**：收藏是私人书签（票 #64 / 决议 #48），
+          除本人外全世界看不到 —— 他人档案页上连"这里本来有个块"的痕迹都不该有。
+        -->
+        <AuthorPostsBlock v-if="parsedId !== 0" :user-id="parsedId" />
+        <AuthorRoomsBlock v-if="parsedId !== 0" :user-id="parsedId" />
+
+        <!--
+          关注数 / 粉丝数：**纯数字，不可点**（决议 #47 块序第 ⑤ 项）。
+          名单只在 /me 看自己的（GLOSSARY「Profile」）—— 把它做成链接等于
+          给别人开一条"谁关注了谁"的探查通道，而那不在本票范围内。
+        -->
+        <section v-if="relation" class="counts-block" aria-labelledby="counts-head">
+          <h2 id="counts-head" class="sr-only">关注与粉丝</h2>
+          <p class="counts dim" data-testid="profile-counts">
+            <span><strong>{{ relation.followingCount }}</strong> 关注</span>
+            <span aria-hidden="true">·</span>
+            <span><strong>{{ relation.followerCount }}</strong> 粉丝</span>
+          </p>
+        </section>
+
+        <!--
+          本人访问自己的 /user/:id：这里是**纯公开视角**（决议 #47）。
+          管理台 `/me` 在票 #69 落地，届时这条提示会带一个真的跳转；
+          现在只说明"你看到的不是管理界面"，避免误以为功能丢了。
+        -->
+        <p v-if="isSelf" class="guest-note" role="status">
+          这是别人看到的你的公开页。资料编辑与内容管理会搬到「我的管理台」（票 #69 落地）。
+        </p>
 
         <!-- 本人：昵称编辑 -->
         <section v-if="isSelf" class="edit" aria-labelledby="edit-head">

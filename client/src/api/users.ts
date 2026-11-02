@@ -27,12 +27,23 @@ import * as real from './real/users'
 type UsersApi = {
   getPublicProfile(userId: number): Promise<import('../types/users').PublicProfile>
   updateDisplayName(displayName: string): Promise<import('../types/users').MyProfile>
+  /** 票 #68：他人档案的两块内容（免登录，分页语义与帖子列表一致）。 */
+  listAuthorPosts(
+    userId: number,
+    options?: { page?: number; pageSize?: number },
+  ): Promise<import('../types/users').AuthorPostList>
+  listAuthorRooms(
+    userId: number,
+    options?: { page?: number; pageSize?: number },
+  ): Promise<import('../types/users').AuthorRoomList>
 }
 
 const impl: UsersApi = isMock('users') ? mock : real
 
 export const getPublicProfile = impl.getPublicProfile
 export const updateDisplayName = impl.updateDisplayName
+export const listAuthorPosts = impl.listAuthorPosts
+export const listAuthorRooms = impl.listAuthorRooms
 
 /** 类型再导出：页面从门面拿类型，不必知道 `types/users.ts` 的位置。 */
-export type { MyProfile, PublicProfile } from '../types/users'
+export type { AuthorPostList, AuthorRoomItem, AuthorRoomList, MyProfile, PublicProfile } from '../types/users'

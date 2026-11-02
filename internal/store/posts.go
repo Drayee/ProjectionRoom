@@ -293,29 +293,8 @@ func (s *Store) ListPosts(ctx context.Context, sort ListPostsSort, limit, offset
 		rows = rows[:limit]
 	}
 
-	if viewerID > 0 && len(rows) > 0 {
-		ids := make([]int64, 0, len(rows))
-		for i := range rows {
-			ids = append(ids, rows[i].ID)
-		}
-		var likedIDs []int64
-		if err := s.db.WithContext(ctx).Table("post_likes").
-			Where("user_id = ? AND post_id IN ?", viewerID, ids).
-			Pluck("post_id", &likedIDs).Error; err != nil {
-			return nil, false, fmt.Errorf("store: 查询点赞状态失败: %w", err)
-		}
-		set := make(map[int64]struct{}, len(likedIDs))
-		for _, id := range likedIDs {
-			set[id] = struct{}{}
-		}
-		favSet, err := s.favoritedPostIDs(ctx, viewerID, ids)
-		if err != nil {
-			return nil, false, err
-		}
-		for i := range rows {
-			_, rows[i].Liked = set[rows[i].ID]
-			_, rows[i].Favorited = favSet[rows[i].ID]
-		}
+	if err := s.fillPostInteractionFlags(ctx, viewerID, rows); err != nil {
+		return nil, false, err
 	}
 	return rows, hasMore, nil
 }
@@ -408,6 +387,95 @@ func (s *Store) ListAnimeThreads(ctx context.Context, animeID int64, sort ListAn
 	return rows, hasMore, nil
 }
 
+// ListPostsByAuthor 返回某个作者的一页公开帖（票 #68 的他人档案页）。
+//
+// 与 ListPosts 的关系：**同一套形状，只多一条"按作者筛"**。刻意不合并成一个
+// `ListPosts(…, authorID)` —— 那会让信息流与档案页共用一个参数位，而两者的
+// 准入完全不同（信息流分 sort 枚举，档案页永远按时间倒序；档案页还多一道
+// "这个人本身可不可见"的判断）。共用一个函数会让下一个改 sort 的人
+// 不得不先读懂档案页为什么传了 sort 却被忽略。
+//
+// 三条口径：
+//
+//  1. **可见性走 applyAuthorVisibility**（与关注流同一个实现，见 flow.go）：
+//     作者被封禁 → 一条都不给；看客与作者任一方拉黑 → 一条都不给。
+//     这是"档案 404 但子资源还能读到"那条泄漏的防线。
+//  2. **时间倒序**（created_at DESC, id DESC）：与 `/api/posts?sort=latest` 同口径。
+//  3. **liked / favorited 在这里批量算**（同 ListPosts）：前端复用同一个 Post 形状。
+//
+// authorID <= 0 时返回空列表而不是报错：调用方（handler）已经在更早的一步
+// 校验过 id 的合法性，这里再报一次错只会多一条不可达的分支。
+func (s *Store) ListPostsByAuthor(ctx context.Context, authorID int64, limit, offset int, viewerID int64) ([]Post, bool, error) {
+	if authorID <= 0 {
+		return []Post{}, false, nil
+	}
+	if limit <= 0 {
+		limit = defaultPostLimit
+	}
+	if limit > maxPostListLimit {
+		limit = maxPostListLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	db := s.db.WithContext(ctx).
+		Table("posts AS p").
+		Select("p.*, u.display_name AS author_name").
+		Joins("JOIN users u ON u.id = p.author_id").
+		Where("p.author_id = ?", authorID).
+		Order("p.created_at DESC, p.id DESC")
+	db = s.applyAuthorVisibility(db, viewerID, "p.author_id")
+
+	var rows []Post
+	if err := db.Limit(limit + 1).Offset(offset).Find(&rows).Error; err != nil {
+		return nil, false, fmt.Errorf("store: 查询作者帖列表失败: %w", err)
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	if err := s.fillPostInteractionFlags(ctx, viewerID, rows); err != nil {
+		return nil, false, err
+	}
+	return rows, hasMore, nil
+}
+
+// fillPostInteractionFlags 给一页帖子补 liked / favorited（viewerID <= 0 时全 false）。
+//
+// 抽出来的理由与 favoritedPostIDs 相同：这是**第三处**做同一件事的地方
+// （ListPosts / ListAnimeThreads / ListPostsByAuthor），而"哪些行亮着"的口径
+// 必须只有一份 —— 否则加一个新列表就会漏掉收藏位。
+func (s *Store) fillPostInteractionFlags(ctx context.Context, viewerID int64, rows []Post) error {
+	if viewerID <= 0 || len(rows) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	var likedIDs []int64
+	if err := s.db.WithContext(ctx).Table("post_likes").
+		Where("user_id = ? AND post_id IN ?", viewerID, ids).
+		Pluck("post_id", &likedIDs).Error; err != nil {
+		return fmt.Errorf("store: 查询点赞状态失败: %w", err)
+	}
+	set := make(map[int64]struct{}, len(likedIDs))
+	for _, id := range likedIDs {
+		set[id] = struct{}{}
+	}
+	favSet, err := s.favoritedPostIDs(ctx, viewerID, ids)
+	if err != nil {
+		return err
+	}
+	for i := range rows {
+		_, rows[i].Liked = set[rows[i].ID]
+		_, rows[i].Favorited = favSet[rows[i].ID]
+	}
+	return nil
+}
+
 // favoritedPostIDs 是 liked 批查询的收藏版：一次问清"这 N 篇里哪些已收藏"。
 //
 // 抽成一个函数而不是在三处（信息流列表 / 板块主题串 / 详情）各写一遍：
@@ -470,20 +538,11 @@ func (s *Store) PostByID(ctx context.Context, id int64, viewerID int64) (*Post, 
 		return nil, fmt.Errorf("store: 查询帖子失败: %w", err)
 	}
 	if viewerID > 0 {
-		var cnt int64
-		if err := s.db.WithContext(ctx).Table("post_likes").
-			Where("post_id = ? AND user_id = ?", id, viewerID).Count(&cnt).Error; err != nil {
-			return nil, fmt.Errorf("store: 查询点赞状态失败: %w", err)
-		}
-		row.Liked = cnt > 0
-
-		// 收藏与点赞同一趟回填（票 #64）：详情页的动作条要同时知道两件事，
-		// 分两次查会让"以后再加一个布尔"变成再加一次往返。
-		favSet, err := s.favoritedPostIDs(ctx, viewerID, []int64{id})
-		if err != nil {
+		rows := []Post{row}
+		if err := s.fillPostInteractionFlags(ctx, viewerID, rows); err != nil {
 			return nil, err
 		}
-		_, row.Favorited = favSet[id]
+		row = rows[0]
 	}
 	return &row, nil
 }

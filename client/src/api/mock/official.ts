@@ -87,3 +87,32 @@ export function mockRoomTitle(roomId: string): string | null {
   if (!room) return null
   return room.title === '' ? '未命名房间' : room.title
 }
+
+/**
+ * 某位房主的公开放映室（票 #68 的档案页内容块用）。
+ *
+ * 按 `ownerName` 匹配 —— mock 的 `OFFICIAL_ROOMS` 只有昵称没有 owner id，
+ * 而档案页拿到的恰恰是昵称（`PublicProfile.displayName`）。真实实现按
+ * `rooms_meta.owner_user_id` 精确匹配，两者在这里的差异只影响 mock 态，
+ * 而且"重名房主会互相看到对方的房"在 8 人的假数据里不会发生。
+ *
+ * 刻意**不**复用 `listOfficialRooms`：那个带分页与 `official` 回显，
+ * 档案页要的是"这个人的全部公开房、按最近活跃倒序"，两套语义混一起会让
+ * "为什么这里少了一间房"变成一个要读两个文件才能回答的问题。
+ */
+export function mockRoomsByOwner(ownerName: string): Array<{
+  roomId: string
+  title: string
+  createdAt: string
+  lastSeenAt: string
+}> {
+  if (!ownerName) return []
+  return OFFICIAL_ROOMS.filter((r) => r.ownerName === ownerName).map((r) => ({
+    roomId: r.roomId,
+    title: r.title,
+    // mock 没有真实时间线：用固定值让"最近活跃"的展示有个确定的形状，
+    // 而不是每次刷新都变（那会让真机脚本的判据不稳定）。
+    createdAt: '2024-06-01T12:00:00Z',
+    lastSeenAt: '2024-06-01T12:00:00Z',
+  }))
+}

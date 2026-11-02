@@ -284,6 +284,10 @@ func NewRouter(
 	// 共用 `/api/users` 前缀，而 gin 按段分节点（静态段优先），顺序不影响匹配 ——
 	// 但把"搜索"与"看某个人"排在一起，读注册表时能一眼看出这个前缀下有几件事。
 	registerUserProfileRoutes(api, accountDeps.UserProfile, cfg, accountDeps.Service)
+	// 他人档案的两个只读内容块（票 #68）：TA 的帖、TA 的公开放映室。
+	// 紧跟在档案端点之后：两者共用 `/api/users/:id` 前缀与同一条「账号可见性」判据，
+	// 读注册表时应当相邻 —— 档案 404 而子资源 200 是一条存在性旁路。
+	registerAuthorContentRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
 	// 关注边（wayfinder #56）。注册在好友域之后：两者共享「拉黑」这条谓词，
 	// 但关注是**独立**的路由前缀（/api/follows），不与 /api/friends 混用。
 	registerFollowRoutes(api, accountDeps.Store, cfg, accountDeps.Service)

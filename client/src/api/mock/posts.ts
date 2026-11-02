@@ -218,6 +218,24 @@ function withFavorite(post: Post): Post {
   return { ...post, favorited: isFavorited('post', String(post.id)) }
 }
 
+/**
+ * 某位作者的全部帖（票 #68 的档案页内容块用）。
+ *
+ * 返回**未分页**的全集，由调用方切页：档案页的无限滚动与帖子列表是同一套
+ * limit/offset 语义，把切页放在一处（`api/mock/users.ts`）比两边各切一次更不容易错。
+ *
+ * 过滤掉不可见作者（被封禁 / 双向拉黑）与服务端 `applyAuthorVisibility` 同口径 ——
+ * 但注意档案页**先判账号可见性**（不存在/被封禁直接 404），所以这里实际上只需要
+ * 处理"我看 TA 的帖"这一侧：拉黑存续期公开内容仍可看（票 #42 §4），
+ * 所以**不**按拉黑过滤。这与 `mockAuthorVisibleInFlow`（关注流要滤）刻意不同。
+ */
+export function mockPostsByAuthor(authorId: number): Post[] {
+  return allPosts
+    .filter((p) => p.authorId === authorId)
+    .map(withFavorite)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+}
+
 /** 单篇帖子（主题串也是帖子）。 */
 export async function getPost(id: number): Promise<Post> {
   const post = allPosts.find((p) => p.id === id)

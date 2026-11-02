@@ -174,6 +174,50 @@ func (s *Store) ListPublicRoomIDs(ctx context.Context, limit int) ([]string, err
 	return ids, nil
 }
 
+// ListPublicRoomsByOwner 返回某人**已公开且未关闭**的房间元数据（票 #68 的他人档案页）。
+//
+// 与 ListPublicRoomIDs 的差别只有一条筛选（`owner_user_id = ?`），但两者刻意
+// 是**两个函数**而不是"给它加一个 owner 参数"：
+//
+//   - ListPublicRoomIDs 返回的是**房间码**，它的调用方是公开房列表 —— 那个端点
+//     要把码与内存实况求交（没有主播的房间不进列表）；
+//   - 本函数返回**整行元数据**，因为档案页要的是"这个人开过哪些房"这个
+//     **历史事实**：房间现在没开播也算（否则"我的放映室"会在下播后变成空的）。
+//
+// 排序 last_seen_at DESC, room_id ASC：与公开房列表同方向（最近活跃的在前），
+// 补 room_id 让整序确定 —— 少了它，同一 last_seen_at 的行在翻页边界上会重复或漏行。
+func (s *Store) ListPublicRoomsByOwner(ctx context.Context, ownerID int64, limit, offset int) ([]RoomMeta, bool, error) {
+	out := make([]RoomMeta, 0, limit)
+	if ownerID <= 0 {
+		return out, false, nil
+	}
+	if limit <= 0 {
+		limit = defaultPublicRoomLimit
+	}
+	if limit > maxPublicRoomLimit {
+		limit = maxPublicRoomLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	err := s.db.WithContext(ctx).
+		Model(&RoomMeta{}).
+		Where("owner_user_id = ? AND is_public = ? AND closed_at IS NULL", ownerID, true).
+		Order("last_seen_at DESC, room_id ASC").
+		Limit(limit + 1).Offset(offset). // 多取一行：hasMore 的判据（同帖子列表）
+		Find(&out).Error
+	if err != nil {
+		return nil, false, fmt.Errorf("store: 查询房主的公开房列表失败: %w", err)
+	}
+
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
+}
+
 // ListRoomMetas 按房间码批量取元数据，返回 room_id → 元数据 的映射（T1）。
 //
 // 为什么是批量而不是循环调用 RoomMetaByID：公开房列表（T2）与管理端房间列表（T4）

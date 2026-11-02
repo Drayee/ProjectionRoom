@@ -34,7 +34,8 @@ import { HttpError, requestJSON } from '../http'
 import { CapabilityUnavailable } from '../mode'
 import { useAuthStore } from '../../stores/auth'
 import type { AuthedFetch } from '../http'
-import type { MyProfile, PublicProfile } from '../../types/users'
+import { toPost, type ServerPost } from './posts'
+import type { AuthorPostList, AuthorRoomItem, AuthorRoomList, MyProfile, PublicProfile } from '../../types/users'
 
 /** 取认证 fetch（延迟到调用时：模块加载期 Pinia 可能还没装配）。 */
 function fetcher(): AuthedFetch {
@@ -135,6 +136,98 @@ export async function updateDisplayName(displayName: string): Promise<MyProfile>
       status: raw.status,
       createdAt: raw.createdAt,
     }
+  } catch (err) {
+    throw toUsersError(err)
+  }
+}
+
+/**
+ * 服务端 `GET /api/users/:id/posts` 的响应（票 #68 的 `authorPostList`）。
+ *
+ * `items` 里的每一条与 `GET /api/posts` 的单条**逐字同形**（服务端复用了
+ * `postView`），所以这里直接复用 `ServerPost` —— 多造一份形状就等于多一套
+ * 适配层，而"同一个 Post 在两处字段不同"迟早会漂。
+ */
+interface ServerAuthorPostList {
+  items: ServerPost[]
+  hasMore: boolean
+}
+
+/** 服务端 `GET /api/users/:id/rooms` 的一行（`authorRoomItem`）。 */
+interface ServerAuthorRoomItem {
+  roomId: string
+  title: string
+  createdAt: string
+  lastSeenAt: string
+}
+
+interface ServerAuthorRoomList {
+  items: ServerAuthorRoomItem[]
+  hasMore: boolean
+}
+
+/**
+ * 档案内容块的每页条数。
+ *
+ * 与帖子列表（`PAGE_SIZE = 20`）取同一个数：档案页的无限滚动与帖子列表是
+ * 同一个交互，两处用不同的页大小会让"翻到第几页"在用户心里有两个答案。
+ * 服务端默认值也是 20（`profilePageDefaultLimit`），三处一致。
+ */
+const AUTHOR_PAGE_SIZE = 20
+
+/**
+ * 读某人公开帖（票 #68）。免登录。
+ *
+ * 门面签名用 `page`（1 起）而不是 `offset`：页面只该关心"第几页"，
+ * 而服务端收的是偏移。换算只在这一处发生 —— 两个概念不在页面里混用，
+ * 也就不可能出现"某处按 0 起、某处按 1 起"的 off-by-one。
+ *
+ * 404 的两种含义与档案端点完全一致（NoRoute 纯文本 = 整域未上线；
+ * JSON `NOT_FOUND` = 这个人不存在或不可见），所以复用同一个 `toUsersError`。
+ */
+export async function listAuthorPosts(
+  userId: number,
+  options: { page?: number; pageSize?: number } = {},
+): Promise<AuthorPostList> {
+  const pageSize = Math.max(1, options.pageSize ?? AUTHOR_PAGE_SIZE)
+  const page = Math.max(1, options.page ?? 1)
+  try {
+    const body = await requestJSON<ServerAuthorPostList>(
+      fetcher(),
+      `/api/users/${userId}/posts?limit=${pageSize}&offset=${(page - 1) * pageSize}`,
+    )
+    const items = (body?.items ?? []).map(toPost)
+    return { items, hasMore: body?.hasMore === true }
+  } catch (err) {
+    throw toUsersError(err)
+  }
+}
+
+/**
+ * 读某人公开放映室（票 #68）。免登录。
+ *
+ * 可见性与 `GET /api/public-rooms` **完全同口径**（已公开且未关闭）：这不是
+ * 前端自己筛的，而是服务端 `ListPublicRoomsByOwner` 的 WHERE 条件。前端再筛
+ * 一遍会让"两边不一致时以谁为准"变成一个没有答案的问题。
+ */
+export async function listAuthorRooms(
+  userId: number,
+  options: { page?: number; pageSize?: number } = {},
+): Promise<AuthorRoomList> {
+  const pageSize = Math.max(1, options.pageSize ?? AUTHOR_PAGE_SIZE)
+  const page = Math.max(1, options.page ?? 1)
+  try {
+    const body = await requestJSON<ServerAuthorRoomList>(
+      fetcher(),
+      `/api/users/${userId}/rooms?limit=${pageSize}&offset=${(page - 1) * pageSize}`,
+    )
+    const items: AuthorRoomItem[] = (body?.items ?? []).map((raw) => ({
+      roomId: typeof raw.roomId === 'string' ? raw.roomId : '',
+      title: typeof raw.title === 'string' ? raw.title : '',
+      createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
+      lastSeenAt: typeof raw.lastSeenAt === 'string' ? raw.lastSeenAt : '',
+    }))
+    return { items, hasMore: body?.hasMore === true }
   } catch (err) {
     throw toUsersError(err)
   }

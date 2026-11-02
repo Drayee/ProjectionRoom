@@ -64,8 +64,7 @@ func (s *Store) applyAuthorVisibility(db *gorm.DB, viewerID int64, authorCol str
 	return db
 }
 
-// applyFollowingScope 把"只看我关注的人"挂到查询上。
-//
+// applyFollowingScope 把"只看我关注的人"挂到查询上。//
 // 与 `applyAuthorVisibility` 分开是刻意的：可见性是"能不能看见"，
 // 关注范围是"要不要只挑这一批"。合成一个函数会让他人档案页（要可见性、
 // 不要关注范围）无处可调，最后又变成两处手写。

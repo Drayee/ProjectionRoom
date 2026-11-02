@@ -18,7 +18,9 @@
  */
 import { HttpError } from '../http'
 import { useAuthStore } from '../../stores/auth'
-import type { MyProfile, PublicProfile } from '../../types/users'
+import { mockPostsByAuthor } from './posts'
+import { mockRoomsByOwner } from './official'
+import type { AuthorPostList, AuthorRoomItem, AuthorRoomList, MyProfile, PublicProfile } from '../../types/users'
 
 /** 与 `service.MaxDisplayNameLen` 一致。 */
 const MAX_DISPLAY_NAME = 32
@@ -124,4 +126,57 @@ export async function updateDisplayName(displayName: string): Promise<MyProfile>
     status: me.status,
     createdAt: me.createdAt,
   }
+}
+
+/**
+ * 档案内容块的每页条数：与帖子列表、服务端默认值三处一致（20）。
+ */
+const AUTHOR_PAGE_SIZE = 20
+
+/** 取这个人的显示名（mock 态下"别人来看我"要用 store 里的新名字）。 */
+function displayNameOf(userId: number): string {
+  const me = useAuthStore().profile
+  if (me && me.id === userId) return me.displayName
+  return PEOPLE.find((p) => p.id === userId)?.displayName ?? ''
+}
+
+/**
+ * `GET /api/users/:id/posts` 的 mock（票 #68）。
+ *
+ * 存在性先判：不存在的人抛 404（与真实现同一条分诊 —— 页面靠它渲染
+ * 「用户不存在」，而不是"这个人没发过帖"）。
+ */
+export async function listAuthorPosts(
+  userId: number,
+  options: { page?: number; pageSize?: number } = {},
+): Promise<AuthorPostList> {
+  if (!Number.isInteger(userId) || userId <= 0) throw notFound()
+  if (!PEOPLE.some((p) => p.id === userId) && useAuthStore().profile?.id !== userId) {
+    throw notFound()
+  }
+  const pageSize = Math.max(1, options.pageSize ?? AUTHOR_PAGE_SIZE)
+  const page = Math.max(1, options.page ?? 1)
+  const all = mockPostsByAuthor(userId)
+  const start = (page - 1) * pageSize
+  return { items: all.slice(start, start + pageSize), hasMore: start + pageSize < all.length }
+}
+
+/**
+ * `GET /api/users/:id/rooms` 的 mock（票 #68）。
+ *
+ * 同样先判存在性。可见性与公开房列表同口径 —— mock 里 `OFFICIAL_ROOMS`
+ * 本身就是"公开且未关闭"的那批，所以不需要额外筛。
+ */
+export async function listAuthorRooms(
+  userId: number,
+  options: { page?: number; pageSize?: number } = {},
+): Promise<AuthorRoomList> {
+  if (!Number.isInteger(userId) || userId <= 0) throw notFound()
+  const name = displayNameOf(userId)
+  if (name === '') throw notFound()
+  const pageSize = Math.max(1, options.pageSize ?? AUTHOR_PAGE_SIZE)
+  const page = Math.max(1, options.page ?? 1)
+  const all: AuthorRoomItem[] = mockRoomsByOwner(name)
+  const start = (page - 1) * pageSize
+  return { items: all.slice(start, start + pageSize), hasMore: start + pageSize < all.length }
 }
