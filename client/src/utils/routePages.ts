@@ -10,7 +10,7 @@
  * 写成 `import(path)`（变量路径）会让打包器无法静态分析，整包回到一个 chunk 里
  * —— 那正是懒加载要消灭的状态。
  *
- * 页面清单（19 条路由 / 19 个组件；/login 与 /register 共用 LandingView，
+ * 页面清单（20 条路由 / 20 个组件；/login 与 /register 共用 LandingView，
  * 打包器会自动把它抽成共享 chunk）。
  *
  * **落地页（/）不在这一份里**：它由 router.ts 静态 import。理由见那里的注释 ——
@@ -28,6 +28,7 @@ export const PAGE_MODULES = {
   'admin-ops': () => import('../pages/admin/AdminOpsPage.vue'),
   about: () => import('../pages/ComingSoonPage.vue'),
   user: () => import('../pages/UserPage.vue'),
+  me: () => import('../pages/MePage.vue'),
   friends: () => import('../pages/FriendsPage.vue'),
   official: () => import('../pages/OfficialPage.vue'),
   forum: () => import('../pages/ForumPage.vue'),

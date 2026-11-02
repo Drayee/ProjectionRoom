@@ -311,6 +311,42 @@ GET    /api/favorites?type=post|room|anime&before=&limit=
 
 ---
 
+### 7.6 档案双路由与 `/me` 管理台（wayfinder #47 / 票 #68 / 票 #69）
+
+**两条地址，两种视角**：
+
+- `/user/:id` —— **公开橱窗**。对谁都一样，包括本人访问自己的 id（决议 #47：
+  旧实现在同一地址里按 `isSelf` 切两套视图，症状是"同一个链接，登录前后是两个页面"，
+  分享与后退都说不清）。块序固定为：名片 → 关系动作区 → TA 的帖子 → TA 的放映室 →
+  关注数/粉丝数（**纯数字不可点**）→ 收藏块**不渲染**（收藏是私人书签，票 #64）→
+  不存在/被封禁统一 404 空态。本人访问时额外一条提示 + 去管理台的链接。
+- `/me` —— **本人的管理台**。三个分区，`?tab=overview|relations|settings` 进 URL
+  （键名唯一源 `client/src/utils/meRoute.ts`，与 `dmRoute`/`friendsRoute`/`postsRoute` 同族）：
+  概览（资料编辑 + 我的帖子 + 我的放映室）、关系（四份名单 + 黑名单入口）、
+  设置（票 #71 填内容，地址已钉住）。顶栏头像的落点是 `/me`（票 #69 起），
+  头像位的"点亮"语义随之扩到 `/me`（`utils/navSection.ts` 的 `isSelfProfile`）——
+  从 `/me` 点「查看我的公开主页」跳到 `/user/<我>` 时头像位若灭掉，
+  用户会以为跳出了账号上下文。
+
+**作者内容的两个只读端点**（票 #68，均**免登录**）：
+
+```
+GET /api/users/:id/posts?limit&offset   → { items: postView[], hasMore }
+GET /api/users/:id/rooms?limit&offset   → { items: { roomId, title, createdAt, lastSeenAt }[], hasMore }
+```
+
+- 选**子资源**而不是 `GET /api/posts?authorId=`：两者准入不同（一个是公开档案的一部分，
+  一个是帖子分区）、前缀已存在（`/api/users/:id` 本来就有）、查询意图不同
+  （"这个人写过什么" vs "帖子列表按作者筛"）。规格 #55 第 116 行允许二选一，**不双开**。
+- 帖复用 `postView`（含 `favorited`），所以前端同一个 PostCard 直接吃。
+- 房**刻意只回四个字段**：没有成员数、主播在线、房主名 —— 那些是内存实况，
+  属于公开房列表（`GET /api/public-rooms`），不是"这个人开过哪些房"的历史事实。
+  口径与公开房列表一致：`is_public = true AND closed_at IS NULL`。
+- 可见性走 `store.applyAuthorVisibility`（未封禁 ∧ 双向无拉黑）—— 与关注流**同一个实现**，
+  所以"被拉黑之后看不到对方的帖"在档案页与关注流上必然一致。
+  **拉黑不改公开内容的可读性**（票 #42 §4）：档案页上的帖会消失，但那篇帖的详情页仍然 200。
+- 不存在与被封禁的账号一律 404 同一个空态（防存在性探测）。
+
 ## 8. 管理端
 
 - 前端 `/admin` 独立视图；**所有** `/api/admin/*` 由服务端 `RequireAdmin` 保护（前端 `v-if` 只控显示）。
@@ -343,6 +379,8 @@ GET    /api/favorites?type=post|room|anime&before=&limit=
   POST   /api/auth/ws-ticket
 用户
   PATCH  /api/me                   GET  /api/users/:id
+  GET    /api/users/:id/posts?limit&offset    GET /api/users/:id/rooms?limit&offset
+  （票 #68：作者内容子资源，**免登录**；刻意没有 ?authorId= 变体，规格 #55 允许二选一不双开）
 好友 / 关注（票 #59 之后）
   POST   /api/follows                       DELETE /api/follows/:userId
   GET    /api/follows/:userId               GET    /api/follows?tab=mutual|following|followers

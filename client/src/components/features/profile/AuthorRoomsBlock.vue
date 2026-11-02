@@ -31,7 +31,17 @@ import { isCapabilityUnavailable } from '../../../api/mode'
 import { toHttpError } from '../../../api/http'
 import type { AuthorRoomItem } from '../../../types/users'
 
-const props = defineProps<{ userId: number }>()
+const props = withDefaults(
+  defineProps<{
+    /** 房主 id。`/me` 传自己的 id，档案页传路由里的 id。 */
+    userId: number
+    /** 块标题：他人档案页「TA 的放映室」，`/me` 说「我的放映室」（票 #69）。 */
+    title?: string
+    /** 主语：他人视角用「TA」，本人视角用「你」。只影响文案，不影响行为。 */
+    self?: boolean
+  }>(),
+  { title: 'TA 的放映室', self: false },
+)
 
 const items = ref<AuthorRoomItem[]>([])
 const page = ref(1)
@@ -128,7 +138,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="block" aria-labelledby="author-rooms-head">
     <div class="block-head">
-      <h2 id="author-rooms-head" class="block-title">TA 的放映室</h2>
+      <h2 id="author-rooms-head" class="block-title">{{ props.title }}</h2>
       <span v-if="state === 'ready'" class="dim small">{{ items.length }} 间</span>
     </div>
 
@@ -137,7 +147,9 @@ onBeforeUnmount(() => {
       :state="state === 'capability' ? 'capability' : state"
       :title="
         state === 'empty'
-          ? 'TA 还没开过公开放映室'
+          ? props.self
+            ? '你还没开过公开放映室'
+            : 'TA 还没开过公开放映室'
           : state === 'error'
             ? '放映室没读出来'
             : state === 'capability'
@@ -146,7 +158,9 @@ onBeforeUnmount(() => {
       "
       :hint="
         state === 'empty'
-          ? '只列已公开且未关闭的房间 —— 私密房与已关闭的房不在这里出现。'
+          ? props.self
+            ? '在公开房间页开一间房，它会出现在这里。'
+            : '只列已公开且未关闭的房间 —— 私密房与已关闭的房不在这里出现。'
           : state === 'error'
             ? errorText
             : undefined

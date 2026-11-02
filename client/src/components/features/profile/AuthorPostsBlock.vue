@@ -31,7 +31,23 @@ import { isCapabilityUnavailable } from '../../../api/mode'
 import { toHttpError } from '../../../api/http'
 import type { Post } from '../../../types/posts'
 
-const props = defineProps<{ userId: number }>()
+const props = withDefaults(
+  defineProps<{
+    /** 作者 id。`/me` 传自己的 id，档案页传路由里的 id。 */
+    userId: number
+    /**
+     * 块标题。
+     *
+     * 同一个组件被两个地方用（票 #69）：他人档案页说「TA 的帖子」，
+     * `/me` 说「我的帖子」。**不是**让调用方自定义样式，只是换主语 ——
+     * 所以空态文案也跟着主语变（见 `title` / `hint` 的计算）。
+     */
+    title?: string
+    /** 主语：他人视角用「TA」，本人视角用「你」。只影响文案，不影响行为。 */
+    self?: boolean
+  }>(),
+  { title: 'TA 的帖子', self: false },
+)
 
 const items = ref<Post[]>([])
 const page = ref(1)
@@ -149,7 +165,7 @@ function excerpt(content: string, max = 72): string {
 <template>
   <section class="block" aria-labelledby="author-posts-head">
     <div class="block-head">
-      <h2 id="author-posts-head" class="block-title">TA 的帖子</h2>
+      <h2 id="author-posts-head" class="block-title">{{ props.title }}</h2>
       <span v-if="state === 'ready'" class="dim small">{{ items.length }} 篇</span>
     </div>
 
@@ -158,7 +174,9 @@ function excerpt(content: string, max = 72): string {
       :state="state === 'capability' ? 'capability' : state"
       :title="
         state === 'empty'
-          ? 'TA 还没发过帖'
+          ? props.self
+            ? '你还没发过帖'
+            : 'TA 还没发过帖'
           : state === 'error'
             ? '帖子没读出来'
             : state === 'capability'
@@ -167,7 +185,9 @@ function excerpt(content: string, max = 72): string {
       "
       :hint="
         state === 'empty'
-          ? '等 TA 发第一条，或者去帖子广场看看别人在聊什么。'
+          ? props.self
+            ? '说说今晚想一起看什么 —— 第一帖可能就是你写的。'
+            : '等 TA 发第一条，或者去帖子广场看看别人在聊什么。'
           : state === 'error'
             ? errorText
             : undefined
@@ -179,8 +199,8 @@ function excerpt(content: string, max = 72): string {
       <RouterLink
         v-if="state === 'empty'"
         class="cta"
-        :to="{ name: 'posts' }"
-      >去帖子广场</RouterLink>
+        :to="props.self ? { name: 'post-editor' } : { name: 'posts' }"
+      >{{ props.self ? '去发第一帖' : '去帖子广场' }}</RouterLink>
     </AsyncState>
 
     <template v-else>

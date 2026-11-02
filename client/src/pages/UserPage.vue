@@ -1,27 +1,27 @@
 <script setup lang="ts">
 /**
- * 用户档案页（`/user/:id`）。wayfinder #32：从「只支持本人」扩到公开档案。
+ * 公开档案页（`/user/:id`）。wayfinder #32 起步，#68 扩成完整公开视角，
+ * #69 把管理动作整体搬去 `/me`。
  *
- * 三种视角，读不同的数据源：
+ * ## 这一页现在只有**一种**视角
  *
- *   1. **他人**（含未登录）→ `GET /api/users/:id`（免登录）。只渲染公开白名单：
- *      用户名 / 昵称 / 头像字符 / 加入时间 / 角色标签。email、status、任何 token 信息
- *      在 `PublicProfile` 类型里**根本不存在**，模板里也没有它们的插值位置。
- *   2. **本人** → 不请求公开档案，直接读 `stores/auth.ts` 的档案（那是本人的权威
- *      显示数据，还带着 email 与验证状态）；提供昵称编辑，写 `PATCH /api/me`。
- *   3. **不存在的 id / 被隐藏的账号** → 「用户不存在」空态（见下）。
+ * 决议 #47 定的双路由：`/user/:id` 是公开橱窗，`/me` 是本人的管理台。
+ * 所以**本人访问自己的 id 时也是公开视角**（不再按 `isSelf` 切管理视图），
+ * 只在底部多一条提示 + 去管理台的链接。旧实现里那套「同一地址、登录前后两个页面」
+ * 的分支已拆除：它的症状是分享出去一个档案链接，对方看到的东西和你看到的不一样。
  *
- * 三条关键判断：
+ * 本人视角仍然**不读公开档案**（`GET /api/users/:id`）：mock 的人员目录里不一定有
+ * 当前真实账号的 id，读它会显示「用户不存在」；本人的权威显示数据在 auth store 里。
+ *
+ * ## 三条关键判断
  *
  *  - **404 与 403 是两个故事**（#33 定稿）：`GET /api/users/:id` 对「不存在」与
  *    「被封禁」都回 **404**（区分它们等于开一条存在性探测通道），所以本页只能说
- *    「不存在或不可见」；而本人改自己被封禁的账号，`PATCH /api/me` 回 **403**
- *    （对他隐瞒"你被封了"没有意义），这里单独说明并指向管理员。
- *  - **本人视角不读公开档案**：读它只会拿到少几个字段的同一份数据，而且 mock 态的
- *    人员目录里不一定有当前真实账号的 id —— 那会让"打开自己的主页"显示「用户不存在」。
- *    本人的权威数据在 auth store 里，页面直接渲染它。
- *  - **成功提示写在所有刷新之后**（#28 的教训）：昵称保存后先落 store、再改 draft、
- *    最后写提示；`watch` 只盯 id 的**字符串**，避免"store 一更新就重跑 loader 把提示擦掉"。
+ *    「不存在或不可见」。管理动作的 403（被封禁的账号不能改昵称）发生在 `/me`。
+ *  - **关系栏的准入与档案不同**：`GET /api/follows/:userId` 需要登录，
+ *    而公开档案不需要 —— 两者分开读，关系读失败不拖垮整页。
+ *  - **`watch` 只盯 id 的字符串**：数组每次求值都是新引用，store 被一次写操作
+ *    替换时会白白重跑 loader，把刚写好的提示擦掉（症状是"点了没反应"）。
  */
 import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
@@ -68,13 +68,6 @@ const capabilityMissing = ref(false)
 /** 用户不存在或不可见（服务端 404 `NOT_FOUND`）。 */
 const notFound = ref(false)
 const loadError = ref('')
-
-// ---------- 本人：昵称编辑 ----------
-const draft = ref('')
-const saving = ref(false)
-const saveNotice = ref('')
-const saveError = ref('')
-const saveFieldError = ref('')
 
 /** 失败文案：网络不可达用本地兜底，其余原样（服务端文案就是给用户看的最终表述）。 */
 function messageOf(err: HttpError): string {
@@ -163,22 +156,6 @@ const followActionLabel = computed(() => {
 /** 「已关注」的次级动作：取消关注（取关是**幂等**的，重复点不报错）。 */
 const canUnfollow = computed(() => followAction.value === 'following')
 
-const selfEmail = computed(() => auth.profile?.email || '未绑定邮箱')
-
-const selfEmailState = computed(() => {
-  const p = auth.profile
-  if (!p) return '未登录'
-  if (!p.email) return '未绑定邮箱'
-  // 三态：已验证 / 未验证 / 服务端未返回。把 undefined 当成"未验证"是在编造结论。
-  if (p.emailVerified === true) return '已验证'
-  if (p.emailVerified === false) return '未验证'
-  return '服务端未返回验证状态'
-})
-
-function roleLabel(role: string): string {
-  return role === 'admin' ? '管理员' : '普通用户'
-}
-
 /** 清掉"换了一个 id / 换了登录态"之后不该留着的界面状态。 */
 function resetView(): void {
   publicProfile.value = null
@@ -186,11 +163,6 @@ function resetView(): void {
   capabilityMissing.value = false
   notFound.value = false
   loadError.value = ''
-  saveNotice.value = ''
-  saveError.value = ''
-  saveFieldError.value = ''
-  saving.value = false
-  draft.value = auth.profile?.displayName ?? ''
   relation.value = null
   followBusy.value = false
   followError.value = ''
@@ -330,68 +302,6 @@ watch(
   { immediate: true },
 )
 
-/**
- * store 里的昵称被**别处**改掉时（启动引导的 `/me` 回填、另一个标签页保存），
- * 输入框要跟着走 —— 否则会出现"标题是新名字、输入框还是旧名字"的错觉。
- *
- * 只在"用户没动过输入框"时同步（draft 仍等于 store 的旧值）；否则会覆盖正在输入的内容。
- */
-watch(
-  () => auth.profile?.displayName ?? '',
-  (next, prev) => {
-    if (!isSelf.value) return
-    if (draft.value === (prev ?? '')) draft.value = next
-  },
-)
-
-/** 保存昵称：服务端清洗后的权威档案直接落地 store（不再补一发 `/me`）。 */
-async function saveDisplayName(): Promise<void> {
-  if (saving.value) return
-  saveNotice.value = ''
-  saveError.value = ''
-  saveFieldError.value = ''
-  saving.value = true
-  try {
-    const updated = await usersApi.updateDisplayName(draft.value)
-    auth.applyProfileUpdate(updated)
-    draft.value = updated.displayName
-    // 提示放在最后写（见文件头第 3 条）。
-    saveNotice.value = `昵称已保存为「${updated.displayName}」`
-  } catch (err) {
-    if (isCapabilityUnavailable(err)) {
-      capabilityMissing.value = true
-      return
-    }
-    const e = toHttpError(err)
-    if (e.status === 401) {
-      // authedFetch 已经把人送去登录页（带 redirect）；这里只留一句可见说明。
-      saveError.value = '登录状态已失效，请重新登录后再试'
-      return
-    }
-    if (e.status === 403) {
-      // 与「用户不存在」分开（#33 定稿）：这是**本人**的写操作被拒 —— 账号被封禁。
-      saveError.value = `${e.message}（被封禁的账号不能改昵称；如有疑问请联系管理员）`
-      return
-    }
-    if (e.status === 400) {
-      // 400 只可能是昵称不合规：把错误定位到输入框，而不是整页一条报错。
-      saveFieldError.value = e.message
-      return
-    }
-    saveError.value = messageOf(e)
-  } finally {
-    saving.value = false
-  }
-}
-
-async function doLogout(): Promise<void> {
-  saving.value = true
-  try {
-    await auth.logout()
-  } finally {
-    saving.value = false
-  }
-}
 </script>
 
 <template>
@@ -413,7 +323,7 @@ async function doLogout(): Promise<void> {
         v-else-if="capabilityMissing"
         domain="users"
         title="用户档案后端尚未上线"
-        hint="上线后这里是任何人的公开档案（用户名 / 昵称 / 加入时间 / 角色标签），以及你自己的昵称编辑。"
+        hint="上线后这里是任何人的公开档案（用户名 / 昵称 / 加入时间 / 角色标签）与 TA 的帖子、放映室。"
         retryable
         @retry="refresh"
       />
@@ -518,15 +428,6 @@ async function doLogout(): Promise<void> {
             <span v-if="joinedAt.missing">服务端未返回</span>
             <RelativeTime v-else :value="joinedAt.raw" />
           </dd>
-          <template v-if="isSelf">
-            <!-- 以下三项只出现在**本人**视角：它们是账号自己的信息，不是公开档案的一部分。 -->
-            <dt>邮箱</dt>
-            <dd>{{ selfEmail }}</dd>
-            <dt>邮箱状态</dt>
-            <dd>{{ selfEmailState }}</dd>
-            <dt>角色</dt>
-            <dd>{{ roleLabel(view.role) }}</dd>
-          </template>
         </dl>
 
         <!--
@@ -554,42 +455,13 @@ async function doLogout(): Promise<void> {
 
         <!--
           本人访问自己的 /user/:id：这里是**纯公开视角**（决议 #47）。
-          管理台 `/me` 在票 #69 落地，届时这条提示会带一个真的跳转；
-          现在只说明"你看到的不是管理界面"，避免误以为功能丢了。
+          所有管理动作（改昵称、我的帖子/放映室、关系名单、账号设置）在 `/me`，
+          所以这里给一个真的跳转 —— 而不是只留一句"功能搬走了"。
         -->
         <p v-if="isSelf" class="guest-note" role="status">
-          这是别人看到的你的公开页。资料编辑与内容管理会搬到「我的管理台」（票 #69 落地）。
+          这是别人看到的你的公开页。改昵称、管帖子与放映室、看关系名单，去
+          <RouterLink :to="{ name: 'me' }">我的管理台</RouterLink>。
         </p>
-
-        <!-- 本人：昵称编辑 -->
-        <section v-if="isSelf" class="edit" aria-labelledby="edit-head">
-          <h2 id="edit-head" class="sect-head">修改昵称</h2>
-          <p class="dim small">
-            最多 32 个字符；零宽与方向控制字符会被服务端剔除；清空会回落成用户名。
-          </p>
-          <form class="edit-form" @submit.prevent="saveDisplayName">
-            <label class="sr-only" for="display-name">昵称</label>
-            <input
-              id="display-name"
-              v-model="draft"
-              type="text"
-              autocomplete="nickname"
-              maxlength="128"
-              :disabled="saving"
-            />
-            <button class="primary" type="submit" :disabled="saving || draft === view.displayName">
-              {{ saving ? '保存中…' : '保存' }}
-            </button>
-          </form>
-          <p v-if="saveFieldError" class="alert" role="alert">{{ saveFieldError }}</p>
-          <p v-if="saveError" class="alert" role="alert">{{ saveError }}</p>
-          <p v-if="saveNotice" class="ok" role="status">{{ saveNotice }}</p>
-
-          <div class="edit-foot">
-            <span class="dim small">改完昵称后，作品署名与好友列表里显示的就是新名字。</span>
-            <button class="ghost" type="button" :disabled="saving" @click="doLogout">退出登录</button>
-          </div>
-        </section>
       </template>
     </main>
   </div>

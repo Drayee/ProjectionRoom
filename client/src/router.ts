@@ -181,6 +181,27 @@ export const router = createRouter({
       props: true,
       meta: { header: 'page', title: '用户档案', depth: 2 },
     },
+    /**
+     * 我的管理台（票 #69）。
+     *
+     * 与 `/user/:id` **分成两条路由**（决议 #47）：`/user/:id` 对本人也变成
+     * 纯公开视角，所有管理动作（改昵称、删帖、我的房、关系名单、设置入口）
+     * 收在这里。旧实现在同一条路由里按 `isSelf` 切两套视图 —— 那套分支已拆除：
+     * 它的症状是"同一个地址，登录前后是两个页面"，分享与后退都说不清。
+     *
+     * `?tab=` 是跨票契约，键名唯一源在 `utils/meRoute.ts`（与 `dmRoute` /
+     * `friendsRoute` / `postsRoute` 同族）。`?tab=settings` 的内容由票 #71 填，
+     * 本票只把槽位与键名钉下来。
+     *
+     * `depth: 1`：它是**分区级**页面（与 `/friends`、`/posts` 同级），
+     * 从任何详情页进来都是"退一层"的方向，换页位移不会反。
+     */
+    {
+      path: '/me',
+      name: 'me',
+      component: PAGE_MODULES.me,
+      meta: { header: 'page', title: '我的管理台', depth: 1 },
+    },
 
     // 好友（票 #28）：列表 / 待处理请求 / 按用户名找人 / 黑名单，全部走 api/friends.ts 门面。
     // 「发消息」按 utils/dmRoute.ts 的约定跳到 /messages?peer=<id>（票 #30 解析）。

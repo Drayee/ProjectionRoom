@@ -110,11 +110,18 @@ export function navSectionOf(path: string, selfUserId?: number | null): NavSecti
 /**
  * 是否"点亮本人头像位"。
  *
- * 只有 `/user/<自己的 id>` 这一种情况 —— 他人档案归"不属于任何分区"，
- * 头像位与分区图标都保持熄灭（票 #77 判据："本人路由点亮头像位、落地页全灭"）。
+ * 两种路径算"我"（票 #69 之后）：
+ *
+ *   `/me`                 管理台 —— 顶栏头像的落点，也是唯一的管理入口；
+ *   `/user/<自己的 id>`   本人公开档案 —— 决议 #47 定的"纯公开视角"，仍是"我"的页面。
+ *
+ * 为什么两处都点亮：头像位表达的是"你在看自己"，而不是"你在看哪个页面"。
+ * 从 `/me` 点「查看我的公开主页」跳到 `/user/<我>` 时头像位若灭掉，
+ * 用户会以为自己跳出了账号上下文。他人档案则两处都灭（票 #77 判据）。
  */
 export function isSelfProfile(path: string, selfUserId?: number | null): boolean {
   if (typeof selfUserId !== 'number') return false
   const segs = segments(path)
+  if (segs.length === 1 && segs[0] === 'me') return true
   return segs.length === 2 && segs[0] === 'user' && segs[1] === String(selfUserId)
 }

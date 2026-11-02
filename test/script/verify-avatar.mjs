@@ -240,7 +240,9 @@ async function main() {
       "(() => { const a = document.querySelector('header a.avatar'); return a ? a.getAttribute('href') : '' })()",
     )
     evidence.headerAvatarHref = headerHref
-    record('A2c 顶栏头像（本人）落点是本人公开档案 /user/1', headerHref === '/user/1', headerHref)
+    // 票 #69 起：本人头像落点是**管理台** `/me`，不再是自己的公开档案。
+    // 公开档案仍可通过 /me 顶部的「查看我的公开主页」到达（verify-me 的 M9 钉住）。
+    record('A2c 顶栏头像（本人）落点是管理台 /me', headerHref === '/me', headerHref)
 
     // ---------- A3 键盘可达 + 无障碍名 ----------
     const a11y = await cdp.evaluate(
