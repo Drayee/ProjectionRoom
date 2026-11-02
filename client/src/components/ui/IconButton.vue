@@ -31,6 +31,13 @@ const props = withDefaults(
     disabled?: boolean
     /** 图标尺寸（px）。 */
     iconSize?: number
+    /**
+     * 尺寸档位（票 #62 收尾补）：默认 `md` = 视觉 36px。
+     *
+     * `sm` = 视觉 28px，专给**嵌在行里**的图标按钮（会话行、消息行）：36px 会把行高撑破，
+     * 而命中区仍按票 #43 §6 用 ::after 撑回 ≥40px。不传 = 维持原样（顶栏那类独立图标位）。
+     */
+    size?: 'md' | 'sm'
   }>(),
   {
     variant: 'ghost',
@@ -38,6 +45,7 @@ const props = withDefaults(
     loading: false,
     disabled: false,
     iconSize: 17,
+    size: 'md',
   },
 )
 
@@ -85,7 +93,7 @@ const lockedStyle = computed(() =>
   <button
     ref="root"
     class="ui-icon-btn"
-    :class="['ui-icon-btn--' + props.variant, { 'is-loading': props.loading }]"
+    :class="['ui-icon-btn--' + props.variant, 'ui-icon-btn--' + props.size, { 'is-loading': props.loading }]"
     :type="props.type"
     :disabled="props.disabled"
     :aria-label="props.label"
@@ -133,12 +141,23 @@ const lockedStyle = computed(() =>
     transform var(--dur-micro) var(--ease);
 }
 
-/* 命中区：视觉 36px → 命中 44×44（WCAG 2.5.5）。伪元素不吃事件。 */
+/* 尺寸档：sm 只缩视觉尺寸，命中区由 ::after 撑回去。 */
+.ui-icon-btn--sm {
+  width: 28px;
+  height: 28px;
+}
+
+/* 命中区：视觉 36px → 命中 44×44（WCAG 2.5.5）。伪元素不吃事件。
+   sm（视觉 28px）时向外撑到 40×40：行内不越界，也仍达票 #43 §6 的命中下限。 */
 .ui-icon-btn::after {
   content: '';
   position: absolute;
   inset: -4px;
   pointer-events: none;
+}
+
+.ui-icon-btn--sm::after {
+  inset: -6px;
 }
 
 /* ---- 变体 ---- */

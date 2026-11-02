@@ -29,7 +29,14 @@ import { computed, ref, watch } from 'vue'
 import BrandIcon from './BrandIcon.vue'
 
 export type ButtonVariant = 'primary' | 'ghost' | 'danger'
-export type ButtonSize = 'sm' | 'md' | 'lg'
+/**
+ * 尺寸档位。
+ *
+ * `xs` 是首批替换时补的（票 #62 收尾）：帖子详情里的"删除"、评论里的"赞"这类
+ * **行内小动作**只有 11px 字、2px 上下内边距，用 sm 会把整行撑高。
+ * 它只缩字号与内边距，**命中区仍按票 #43 §6 留 32px 高**（视觉小、热区不小）。
+ */
+export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg'
 
 const props = withDefaults(
   defineProps<{
@@ -43,6 +50,15 @@ const props = withDefaults(
     loading?: boolean
     /** 禁用：降饱和 + 不可聚焦 + 不可点。 */
     disabled?: boolean
+    /**
+     * 无障碍名（可选）。
+     *
+     * 首批替换里有"退出登录"这类**只有图标、没有文字**的按钮：用 `IconButton` 会把外圈
+     * 改成圆形，而顶栏那几个 nav-btn 是全站统一的长方形；改用本组件就必须能给出可访问名。
+     * 其余 aria-*（`aria-current`/`aria-selected` …）走 `$attrs` 自动落到根 <button> 上
+     * （根节点是单元素、模板里没有 inheritAttrs:false）。
+     */
+    name?: string
   }>(),
   {
     variant: 'ghost',
@@ -50,6 +66,7 @@ const props = withDefaults(
     type: 'button',
     loading: false,
     disabled: false,
+    name: '',
   },
 )
 
@@ -110,6 +127,7 @@ const lockedStyle = computed(() =>
     :class="['ui-btn--' + props.variant, 'ui-btn--' + props.size, { 'is-loading': props.loading }]"
     :type="props.type"
     :disabled="props.disabled"
+    :aria-label="props.name || undefined"
     :aria-busy="props.loading || undefined"
     :style="lockedStyle"
     @click="onClick"
@@ -182,6 +200,14 @@ const lockedStyle = computed(() =>
 }
 
 /* ---- 尺寸 ---- */
+
+/* 行内小动作：字号与内边距缩到最小，高度仍是 32px（命中区不缩）。 */
+.ui-btn--xs {
+  min-height: 32px;
+  padding: 0;
+  font-size: 11px;
+  gap: 6px;
+}
 
 .ui-btn--sm {
   min-height: 32px;

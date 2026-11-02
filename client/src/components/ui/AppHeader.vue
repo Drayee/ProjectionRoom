@@ -19,6 +19,7 @@ import { computed, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from './BrandIcon.vue'
 import UserAvatar from './UserAvatar.vue'
+import IconButton from './IconButton.vue'
 import { useAuthStore } from '../../stores/auth'
 
 const props = withDefaults(defineProps<{ variant?: 'app' | 'page' | 'bare' }>(), {
@@ -153,16 +154,17 @@ const unreadLabel = computed(() => {
                本人 → /me（票 #69 落地后自动生效），他人 → /user/:id。
                组件内部自问路由表"有 me 吗"，所以这里不用传额外开关。 -->
           <UserAvatar :user="avatarUser" :self="true" size="md" />
-          <button
-            class="nav-btn"
-            type="button"
-            :disabled="busy"
-            aria-label="退出登录"
+          <!-- 票 #62：顶栏的裸 button 换成 ui/IconButton。
+               它的五态（提亮 / 按压缩放 / 键盘外环 / 禁用降饱和）与按钮令牌是全站唯一出口，
+               loading 等价于"退出中"：锁宽不跳版，且不挡重复点击之外的任何东西。 -->
+          <IconButton
+            class="nav-btn nav-btn--ui"
+            icon="logout"
+            label="退出登录"
+            :loading="busy"
             v-tip="'退出登录'"
             @click="doLogout"
-          >
-            <BrandIcon name="logout" decorative :size="17" />
-          </button>
+          />
         </template>
         <template v-else>
           <RouterLink class="nav-btn" :to="{ name: 'login', query: redirectQuery }" aria-label="登录" v-tip="'登录'">
@@ -247,6 +249,13 @@ const unreadLabel = computed(() => {
 }
 
 .nav-btn {
+  /* 状态色与图标位统一到这里（票 #62）：链接形态与 ui/IconButton 形态读同一组变量，
+     于是 hover 提亮 / 按下 用的是 tokens.css 里那两个绝对色，而不是各写一份 rgba。 */
+  --ui-btn-bg-hover: var(--state-hover);
+  --ui-btn-bg-active: var(--state-active);
+  --ui-btn-fg-hover: var(--text);
+  --ui-btn-fg-active: var(--text);
+
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -283,20 +292,23 @@ const unreadLabel = computed(() => {
   pointer-events: none;
 }
 
+/* 链接形态的导航位：hover 提亮前景 + 描边（不再手写 rgba 底色 ——
+   把 .nav-btn 整体接到按钮令牌上，链接与按钮两种形态才能看到同一个 hover）。 */
 .nav-btn:hover {
-  color: var(--text);
+  color: var(--ui-btn-fg-hover);
+  background: var(--ui-btn-bg-hover);
   border-color: var(--line);
-  background: rgba(180, 108, 255, 0.08);
   text-decoration: none;
 }
 
 .nav-btn:active {
-  transform: scale(0.92);
+  background: var(--ui-btn-bg-active);
 }
 
-.nav-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+/* 按钮形态的导航位（票 #62）：ui/IconButton 自带尺寸与状态样式，
+   这里只把它接回顶栏那套 36px 图标位的描边 hover。状态色不在这里重写。 */
+.nav-btn--ui:not(:disabled):hover {
+  border-color: var(--line);
 }
 
 /* 图标悬停抖动：故障语言（位置不稳），阶梯而非平滑 */

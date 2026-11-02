@@ -20,6 +20,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
+import Button from '../components/ui/Button.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import UserAvatar from '../components/ui/UserAvatar.vue'
 import * as friendsApi from '../api/friends'
@@ -348,14 +349,50 @@ watch(section, (next) => {
       </section>
 
       <template v-else>
+        <!-- 分区标签页：外壳是 ui/Button（票 #62 的首批替换），下划线选中态由页面覆盖
+             组件暴露的 --ui-btn-* 变量接上去 —— 组件里不出现页面的选择器。 -->
         <nav class="tabs" role="tablist" aria-label="好友分区">
-          <button role="tab" :aria-selected="section === 'friends'" :class="{ on: section === 'friends' }" @click="section = 'friends'">好友</button>
-          <button role="tab" :aria-selected="section === 'requests'" :class="{ on: section === 'requests' }" @click="section = 'requests'">
+          <Button
+            variant="ghost"
+            class="tab"
+            role="tab"
+            :aria-selected="section === 'friends'"
+            :class="{ on: section === 'friends' }"
+            @click="section = 'friends'"
+          >
+            好友
+          </Button>
+          <Button
+            variant="ghost"
+            class="tab"
+            role="tab"
+            :aria-selected="section === 'requests'"
+            :class="{ on: section === 'requests' }"
+            @click="section = 'requests'"
+          >
             待处理
             <span v-if="incomingCount > 0" class="badge">{{ incomingCount }}</span>
-          </button>
-          <button role="tab" :aria-selected="section === 'find'" :class="{ on: section === 'find' }" @click="section = 'find'">找朋友</button>
-          <button role="tab" :aria-selected="section === 'blocked'" :class="{ on: section === 'blocked' }" @click="section = 'blocked'">黑名单</button>
+          </Button>
+          <Button
+            variant="ghost"
+            class="tab"
+            role="tab"
+            :aria-selected="section === 'find'"
+            :class="{ on: section === 'find' }"
+            @click="section = 'find'"
+          >
+            找朋友
+          </Button>
+          <Button
+            variant="ghost"
+            class="tab"
+            role="tab"
+            :aria-selected="section === 'blocked'"
+            :class="{ on: section === 'blocked' }"
+            @click="section = 'blocked'"
+          >
+            黑名单
+          </Button>
         </nav>
 
         <p v-if="notice" class="ok" role="status">{{ notice }}</p>
@@ -366,8 +403,8 @@ watch(section, (next) => {
           <h2 id="confirm-head" class="confirm-head">{{ confirmTitle }}</h2>
           <p class="confirm-text">{{ confirmConsequence }}</p>
           <div class="confirm-acts">
-            <button type="button" class="primary" :disabled="actionBusy" @click="confirmPending">确认</button>
-            <button type="button" class="btn" :disabled="actionBusy" @click="pending = null">取消</button>
+            <Button variant="primary" :loading="actionBusy" @click="confirmPending">确认</Button>
+            <Button variant="ghost" :disabled="actionBusy" @click="pending = null">取消</Button>
           </div>
         </section>
 
@@ -396,8 +433,8 @@ watch(section, (next) => {
                 <div class="acts">
                   <!-- 跨票契约：utils/dmRoute.ts（票 #30 解析 peer 参数） -->
                   <RouterLink class="btn" :to="conversationPath(f.user.id)">发消息</RouterLink>
-                  <button type="button" class="btn" :disabled="actionBusy" @click="askBlock(f.user.id, f.user.displayName)">拉黑</button>
-                  <button type="button" class="btn danger" :disabled="actionBusy" @click="askRemove(f)">删除好友</button>
+                  <Button variant="ghost" :disabled="actionBusy" @click="askBlock(f.user.id, f.user.displayName)">拉黑</Button>
+                  <Button variant="danger" :disabled="actionBusy" @click="askRemove(f)">删除好友</Button>
                 </div>
               </li>
             </ul>
@@ -418,8 +455,8 @@ watch(section, (next) => {
                   <span class="small dim">请求加你为好友</span>
                 </div>
                 <div class="acts">
-                  <button type="button" class="primary sm" :disabled="actionBusy" @click="accept(r)">接受</button>
-                  <button type="button" class="btn" :disabled="actionBusy" @click="reject(r)">拒绝</button>
+                  <Button variant="primary" size="sm" :loading="actionBusy" @click="accept(r)">接受</Button>
+                  <Button variant="ghost" :disabled="actionBusy" @click="reject(r)">拒绝</Button>
                 </div>
               </li>
             </ul>
@@ -446,7 +483,7 @@ watch(section, (next) => {
           <section v-show="section === 'find'" class="sect">
             <form class="find" @submit.prevent="doSearch">
               <input v-model="query" type="search" placeholder="按用户名或昵称搜索，如 miao / 喵喵" aria-label="按用户名搜索" />
-              <button type="submit" class="primary" :disabled="query.trim() === ''">搜索</button>
+              <Button type="submit" variant="primary" :disabled="query.trim() === ''">搜索</Button>
             </form>
 
             <p v-if="searchUnavailable" class="inline-note" role="status">
@@ -464,22 +501,21 @@ watch(section, (next) => {
                     <span class="small dim">{{ relationLabel(h.relation) }}</span>
                   </div>
                   <div class="acts">
-                    <button
-                      type="button"
-                      class="primary sm"
+                    <Button
+                      variant="primary"
+                      size="sm"
                       :disabled="actionBusy || h.relation !== 'none'"
                       @click="sendRequest(h)"
                     >
                       {{ h.relation === 'none' ? '加好友' : '已处理' }}
-                    </button>
-                    <button
-                      type="button"
-                      class="btn"
+                    </Button>
+                    <Button
+                      variant="ghost"
                       :disabled="actionBusy || h.relation === 'blocked'"
                       @click="askBlock(h.id, h.displayName)"
                     >
                       拉黑
-                    </button>
+                    </Button>
                   </div>
                 </li>
               </ul>
@@ -517,7 +553,7 @@ watch(section, (next) => {
                     <span class="small dim">已被你拉黑</span>
                   </div>
                   <div class="acts">
-                    <button type="button" class="btn" :disabled="actionBusy" @click="unblock(b)">解除拉黑</button>
+                    <Button variant="ghost" :disabled="actionBusy" @click="unblock(b)">解除拉黑</Button>
                   </div>
                 </li>
               </ul>
@@ -539,9 +575,22 @@ watch(section, (next) => {
 .gate { border: 1px solid var(--line); background: var(--surface); padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .gate-head { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 6px; }
 
+/* 分区标签页：芯片外观套在 ui/Button 上。选中态用组件暴露的变量接上，
+   不在页面里重写 border/background（状态色只有按钮令牌一个出口）。 */
 .tabs { display: flex; gap: 2px; flex-wrap: wrap; }
-.tabs button { padding: 6px 16px; color: var(--dim); border-bottom: 2px solid transparent; display: inline-flex; align-items: center; gap: 6px; }
-.tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.tab {
+  --ui-btn-border-color: transparent;
+  gap: 6px;
+  padding: 6px 16px;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+
+.tab.on {
+  --ui-btn-fg: var(--text);
+  --ui-btn-fg-hover: var(--text);
+  border-bottom-color: var(--accent);
+}
 .badge { min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700; }
 
 .sect { display: flex; flex-direction: column; gap: 12px; }
@@ -562,14 +611,12 @@ watch(section, (next) => {
 .who strong { font-size: 14px; overflow-wrap: anywhere; }
 .acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
-.btn { padding: 6px 14px; border: 1px solid var(--line); color: var(--dim); font-size: 13px; }
-.btn:hover { color: var(--text); border-color: var(--accent); text-decoration: none; }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn.danger:hover { color: var(--danger); border-color: var(--danger); }
-.primary { display: inline-flex; align-items: center; justify-content: center; padding: 8px 18px; background: var(--accent); color: var(--accent-ink); font-weight: 700; font-size: 13px; }
-.primary:hover { text-decoration: none; filter: brightness(1.08); }
-.primary:disabled { opacity: 0.5; cursor: not-allowed; }
-.primary.sm { padding: 6px 14px; }
+/* .btn / .primary 只剩**跳转型**按钮在用（「发消息」与「去登录」两处是 RouterLink）：
+   与 ui/Button 的外观对齐，但保留链接语义。按钮型的行内动作一律走 <Button>（票 #62）。 */
+.btn { display: inline-flex; align-items: center; justify-content: center; padding: 6px 14px; border: 1px solid var(--line); color: var(--dim); font-size: 13px; text-decoration: none; }
+.btn:hover { color: var(--text); background: var(--state-hover); border-color: var(--accent); text-decoration: none; }
+.primary { display: inline-flex; align-items: center; justify-content: center; padding: 8px 18px; background: var(--accent); color: var(--accent-ink); font-weight: 700; font-size: 13px; text-decoration: none; }
+.primary:hover { background: var(--accent-hover); text-decoration: none; }
 
 .find { display: flex; gap: 8px; }
 .find input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font-size: 13px; }

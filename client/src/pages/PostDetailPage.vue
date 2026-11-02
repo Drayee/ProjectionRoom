@@ -6,6 +6,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
+import Button from '../components/ui/Button.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
@@ -123,12 +124,20 @@ onMounted(load)
         <h1 class="title">{{ post.title }}</h1>
         <p class="meta dim">{{ post.author.displayName }} · {{ post.createdAt }}</p>
         <MarkdownView class="content" :source="post.content" label="帖子正文" />
+        <!-- 票 #62 首批替换：裸 button → ui/Button。
+             点赞的"取消中"用组件的 loading（内联 spinner + 锁宽，且**不等于 disabled**：
+             按钮仍可聚焦、仍被读屏读到），不再手写 spinner 分支。 -->
         <div class="acts">
-          <button :class="{ liked: post.liked }" type="button" :disabled="likingBusy" @click="toggleLike">
-            <BrandIcon v-if="likingBusy" name="load-spinner" decorative :size="14" />
-            <span>{{ post.liked ? '已赞' : '赞' }} {{ post.likeCount }}</span>
-          </button>
-          <button type="button" @click="router.back()">返回</button>
+          <Button
+            variant="ghost"
+            class="like"
+            :class="{ liked: post.liked }"
+            :loading="likingBusy"
+            @click="toggleLike"
+          >
+            {{ post.liked ? '已赞' : '赞' }} {{ post.likeCount }}
+          </Button>
+          <Button variant="ghost" @click="router.back()">返回</Button>
         </div>
         <section class="comments">
           <h2>评论（{{ comments.length }}）</h2>
@@ -137,11 +146,11 @@ onMounted(load)
             <p>{{ c.content }}</p>
             <!-- 删除按钮只给自己的评论；但**真正能不能删由服务端判**（403），
                  这里的显隐只是少一次注定失败的往返。 -->
-            <button v-if="isMine(c)" class="del" type="button" @click="removeComment(c)">删除</button>
+            <Button v-if="isMine(c)" variant="danger" size="xs" class="del" @click="removeComment(c)">删除</Button>
           </div>
           <form class="add" @submit.prevent="addComment">
             <input v-model="draft" placeholder="说点什么…" />
-            <button type="submit" :disabled="!draft.trim()">发送</button>
+            <Button type="submit" variant="primary" :disabled="!draft.trim()">发送</Button>
           </form>
         </section>
       </template>
@@ -156,21 +165,19 @@ onMounted(load)
 .title { margin: 0; font-family: var(--font-glitch); font-size: clamp(26px, 5vw, 38px); }
 .meta { margin: 0; font-size: 12px; }
 .content { margin: 0; }
+/* 动作行：外观交给 ui/Button，这里只保留"已赞"这一**选中态**的强调色。
+   注意 hover 由组件负责（提亮 + 令牌底色），页面不再重写。 */
 .acts { display: flex; gap: 10px; }
-.acts button { padding: 8px 18px; border: 1px solid var(--line); color: var(--dim); }
-.acts button.liked { color: var(--glitch-p); border-color: var(--glitch-p); }
-.acts button:hover { color: var(--text); border-color: var(--accent); }
-.acts button:disabled { opacity: 0.6; cursor: progress; }
+.acts .like.liked { color: var(--glitch-p); border-color: var(--glitch-p); }
 .comments { border-top: 1px solid var(--line); padding-top: 16px; }
 .comments h2 { margin: 0 0 10px; font-size: 15px; }
 .cmt { padding: 8px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
 .cmt p { margin: 4px 0 0; white-space: pre-wrap; }
-/* 删除自己的评论：低调但可点（红色 hover 才显形，避免一排红字抢焦点）。 */
-.cmt .del { margin-top: 4px; padding: 2px 8px; border: 1px solid transparent; color: var(--dim); font-size: 11px; }
-.cmt .del:hover { color: var(--danger); border-color: var(--danger); }
+/* 删除自己的评论：低调但可点（红色 hover 才显形，避免一排红字抢焦点）。
+   用 xs 档：视觉小（11px 字），命中区仍是 32px 高（票 #43 §6）。 */
+.cmt .del { margin-top: 4px; border-color: transparent; }
 .add { display: flex; gap: 8px; margin-top: 12px; }
-.add button { flex: none; padding: 8px 18px; background: var(--accent); color: var(--accent-ink); font-weight: 700; }
-.add button:disabled { opacity: 0.5; }
+.add button { flex: none; }
 .alert { color: var(--danger); }
 .alert[role='alert'] { margin: 0; padding: 8px 10px; border: 1px solid var(--danger); background: rgba(255, 92, 92, 0.12); font-size: 12px; color: #ffdada; }
 </style>

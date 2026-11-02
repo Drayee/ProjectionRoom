@@ -7,6 +7,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
+import Button from '../components/ui/Button.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
@@ -158,9 +159,28 @@ function discard() {
 
         <div class="bar">
           <label for="post-content">正文</label>
+          <!-- 编辑/预览分段：外壳是 ui/Button（票 #62 首批替换），选中态由页面覆盖变量接上。 -->
           <div class="seg" role="tablist" aria-label="编辑模式">
-            <button type="button" role="tab" :aria-selected="mode === 'edit'" :class="{ on: mode === 'edit' }" @click="mode = 'edit'">编辑</button>
-            <button type="button" role="tab" :aria-selected="mode === 'preview'" :class="{ on: mode === 'preview' }" @click="mode = 'preview'">预览</button>
+            <Button
+              variant="ghost"
+              class="seg-btn"
+              role="tab"
+              :aria-selected="mode === 'edit'"
+              :class="{ on: mode === 'edit' }"
+              @click="mode = 'edit'"
+            >
+              编辑
+            </Button>
+            <Button
+              variant="ghost"
+              class="seg-btn"
+              role="tab"
+              :aria-selected="mode === 'preview'"
+              :class="{ on: mode === 'preview' }"
+              @click="mode = 'preview'"
+            >
+              预览
+            </Button>
           </div>
         </div>
         <textarea
@@ -175,8 +195,8 @@ function discard() {
         <p v-if="error" class="alert" role="alert">{{ error }}</p>
         <p v-else-if="failureText" class="alert" role="alert">{{ failureText }}</p>
         <div class="row">
-          <button class="primary" type="submit" :disabled="busy">发布</button>
-          <button class="ghost" type="button" @click="discard">丢弃草稿</button>
+          <Button type="submit" variant="primary" size="lg" :loading="busy">发布</Button>
+          <Button variant="ghost" size="lg" @click="discard">丢弃草稿</Button>
         </div>
         <p class="dim small">离开页面会自动存草稿。</p>
       </form>
@@ -194,14 +214,12 @@ textarea { resize: vertical; }
 .bar { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
 .bar label { margin: 0; }
 .seg { display: inline-flex; border: 1px solid var(--line); }
-.seg button { padding: 5px 14px; font-size: 13px; color: var(--dim); }
-.seg button.on { color: var(--text); background: rgba(180, 108, 255, 0.14); }
+.seg-btn { --ui-btn-border-color: transparent; padding: 5px 14px; border-radius: 0; }
+.seg-btn.on { --ui-btn-fg: var(--text); --ui-btn-fg-hover: var(--text); background: var(--state-active); }
 .preview { border: 1px solid var(--line); padding: 12px 14px; min-height: 180px; background: rgba(0, 0, 0, 0.3); }
 .alert { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--danger); background: rgba(255, 92, 92, 0.12); font-size: 12px; color: #ffdada; }
+/* 主行动占满剩余宽度；外观（含 hover/active/禁用）全部由 ui/Button 负责。 */
 .row { display: flex; gap: 10px; margin-top: 14px; }
-.primary { flex: 1; padding: 11px; background: var(--accent); color: var(--accent-ink); font-weight: 700; }
-.primary:disabled { opacity: 0.5; }
-.ghost { padding: 11px 18px; border: 1px solid var(--line); color: var(--dim); }
-.ghost:hover { color: var(--text); border-color: var(--accent); }
+.row > :first-child { flex: 1; }
 .small { font-size: 12px; }
 </style>

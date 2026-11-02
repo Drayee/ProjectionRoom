@@ -7,6 +7,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { RouterLink } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
+import Button from '../components/ui/Button.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import * as postsApi from '../api/posts'
 import { useApiFailure } from '../components/features/common/useApiFailure'
@@ -122,9 +123,29 @@ onBeforeUnmount(() => {
           发帖
         </RouterLink>
       </div>
+      <!-- 排序标签页：外壳是 ui/Button（票 #62 首批替换），选中态用组件暴露的变量接上，
+           页面不重写状态色。 -->
       <div class="tabs" role="tablist">
-        <button role="tab" :aria-selected="sort === 'latest'" :class="{ on: sort === 'latest' }" @click="switchSort('latest')">最新</button>
-        <button role="tab" :aria-selected="sort === 'hot'" :class="{ on: sort === 'hot' }" @click="switchSort('hot')">热门</button>
+        <Button
+          variant="ghost"
+          class="tab"
+          role="tab"
+          :aria-selected="sort === 'latest'"
+          :class="{ on: sort === 'latest' }"
+          @click="switchSort('latest')"
+        >
+          最新
+        </Button>
+        <Button
+          variant="ghost"
+          class="tab"
+          role="tab"
+          :aria-selected="sort === 'hot'"
+          :class="{ on: sort === 'hot' }"
+          @click="switchSort('hot')"
+        >
+          热门
+        </Button>
       </div>
       <p v-if="busy" class="dim">加载中…</p>
       <CapabilityNotice
@@ -159,8 +180,8 @@ onBeforeUnmount(() => {
 .new { display: inline-flex; align-items: center; gap: 5px; padding: 8px 14px; border: 1px solid var(--accent); color: var(--accent); font-size: 13px; }
 .new:hover { background: rgba(180, 108, 255, 0.1); text-decoration: none; }
 .tabs { display: flex; gap: 2px; }
-.tabs button { padding: 6px 16px; color: var(--dim); border-bottom: 2px solid transparent; }
-.tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.tab { --ui-btn-border-color: transparent; padding: 6px 16px; border-bottom: 2px solid transparent; border-radius: 0; }
+.tab.on { --ui-btn-fg: var(--text); --ui-btn-fg-hover: var(--text); border-bottom-color: var(--accent); }
 
 /* 瀑布流：CSS 多列，卡片 break-inside 避免被拆列 */
 .masonry { columns: 2 320px; column-gap: 14px; }

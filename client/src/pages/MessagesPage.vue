@@ -29,6 +29,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
+import Button from '../components/ui/Button.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import UserAvatar from '../components/ui/UserAvatar.vue'
 import * as messagesApi from '../api/messages'
@@ -366,8 +367,11 @@ watch(
               </p>
               <ul v-else class="rows">
                 <li v-for="c in conversations" :key="c.peer.id">
-                  <button
-                    type="button"
+                  <!-- 会话行：整行是一个 ui/Button（票 #62 首批替换）。
+                       它的五态（提亮 / 按下 / 键盘外环 / 禁用）都来自按钮令牌；
+                       aria-current 由 $attrs 透传到根 <button> 上（根是单元素）。 -->
+                  <Button
+                    variant="ghost"
                     class="conv"
                     :class="{ on: c.peer.id === activePeer }"
                     :aria-current="c.peer.id === activePeer ? 'true' : undefined"
@@ -386,7 +390,7 @@ watch(
                     <span v-if="c.unreadCount > 0" class="badge" :aria-label="`${c.unreadCount} 条未读`">
                       {{ c.unreadCount }}
                     </span>
-                  </button>
+                  </Button>
                 </li>
               </ul>
             </aside>
@@ -426,9 +430,14 @@ watch(
 
                 <div v-else ref="scroller" class="scroller">
                   <div class="more">
-                    <button v-if="hasMore" type="button" class="btn" :disabled="loadingMore" @click="loadThread(false)">
-                      {{ loadingMore ? '加载中…' : '往上翻更早的消息' }}
-                    </button>
+                    <Button
+                      v-if="hasMore"
+                      variant="ghost"
+                      :loading="loadingMore"
+                      @click="loadThread(false)"
+                    >
+                      往上翻更早的消息
+                    </Button>
                     <p v-else-if="thread.length > 0" class="small dim">已经到最早一条了。</p>
                   </div>
 
@@ -467,7 +476,7 @@ watch(
                     <span class="small" :class="draftTooLong ? 'over' : 'dim'">
                       {{ draftLength }} / {{ MAX_MESSAGE_BODY }}
                     </span>
-                    <button type="submit" class="primary" :disabled="!canSend">发送</button>
+                    <Button type="submit" variant="primary" :disabled="!canSend">发送</Button>
                   </div>
                 </form>
                 <p v-if="draftTooLong" class="alert" role="alert">
