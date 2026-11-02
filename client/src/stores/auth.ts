@@ -354,6 +354,55 @@ export const useAuthStore = defineStore('auth', () => {
     clearSession()
   }
 
+  /**
+   * 改密码（票 #71，「记得密码」那条门）。
+   *
+   * 服务端会撤销该账号**全部**会话（含当前这台）并让 `token_version+1`，
+   * 同时给当前设备补发一枚新会话 —— 所以这里必须把响应里的会话落地，
+   * 否则改完密码下一个请求就 401（症状是"改完密码立刻被踢出去"）。
+   *
+   * 幂等键由调用方递进来（`useSettingsForm` 用它管生命周期）：改密不可逆，
+   * 重发必须复用同一个键，否则第二次会因"当前密码已不是那个"而 400。
+   */
+  async function changePassword(input: {
+    currentPassword: string
+    newPassword: string
+    idempotencyKey?: string
+  }): Promise<void> {
+    notice.value = ''
+    const session = await api.changePassword({
+      currentPassword: input.currentPassword,
+      newPassword: input.newPassword,
+      token: accessToken.value,
+      idempotencyKey: input.idempotencyKey,
+    })
+    applySession(session)
+  }
+
+  /**
+   * 退出所有设备（票 #71）。
+   *
+   * 服务端 `logout-all` 会 `token_version+1` 并撤销全部会话 —— 包括当前这台。
+   * 所以成功后必须 `clearSession()`：留着一个已经作废的 token 只会让后续请求
+   * 连续 401，用户看到的是"点了按钮但还在登录态"。
+   *
+   * 与服务端调用失败时**仍然**清本地：与 `logout()` 同一条理由（本机残留可用凭据
+   * 比服务端会话多活一会儿严重得多），并且把失败原因写进 `notice` 再抛给调用方，
+   * 由页面决定要不要跳登录页。
+   */
+  async function logoutAll(): Promise<void> {
+    notice.value = ''
+    try {
+      await api.logoutAll(accessToken.value)
+    } catch (err) {
+      const e = toAuthError(err)
+      notice.value = `已清除本地登录状态，但「退出所有设备」请求未送达服务端（${e.message}）：其他设备可能仍在登录。`
+      clearSession()
+      throw e
+    }
+    clearSession()
+  }
+
   /** 跳登录页，带上**当前路径**作为回跳目标（判据②）。 */
   function redirectToLogin(): Promise<void> {
     const current = router.currentRoute.value
@@ -503,6 +552,8 @@ export const useAuthStore = defineStore('auth', () => {
     register,
     adoptSession,
     logout,
+    logoutAll,
+    changePassword,
     clearSession,
     authedFetch,
     ensureLoggedIn,

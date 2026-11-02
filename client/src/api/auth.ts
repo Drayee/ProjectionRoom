@@ -93,6 +93,19 @@ export interface LoginInput {
   password: string
 }
 
+/**
+ * PUT /api/me/password 的请求体（票 #71）。
+ *
+ * `token` 与 `idempotencyKey` 不是请求体的字段，而是这个模块需要调用方
+ * 递进来的两样东西 —— 见 `changePassword` 的说明。
+ */
+export interface ChangePasswordInput {
+  currentPassword: string
+  newPassword: string
+  token: string
+  idempotencyKey?: string
+}
+
 export interface WsTicket {
   ticket: string
   expiresIn: number
@@ -234,6 +247,18 @@ interface RequestOptions {
 }
 
 async function request(path: string, options: RequestOptions = {}): Promise<unknown> {
+  return requestURL(`${AUTH_BASE}/${path}`, options)
+}
+
+/**
+ * 与 `request` 同一条网络原语，但收**完整路径**。
+ *
+ * 为什么需要它：票 #71 的 `PUT /api/me/password` 挂在 `/api/me` 下，不在
+ * `/api/auth` 前缀里 —— 它与 `PATCH /api/me`（改昵称）是同一族"改我自己"，
+ * 而 `/api/auth/*` 那一族是"进去 / 出来"。硬把它塞进 AUTH_BASE 拼串
+ * 只会让"哪个端点在前缀下"变成靠记忆的知识。
+ */
+async function requestURL(url: string, options: RequestOptions = {}): Promise<unknown> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   const init: RequestInit = { method: options.method ?? 'GET', credentials: 'same-origin', headers }
   if (options.body !== undefined) {
@@ -249,7 +274,7 @@ async function request(path: string, options: RequestOptions = {}): Promise<unkn
 
   let resp: Response
   try {
-    resp = await fetch(`${AUTH_BASE}/${path}`, init)
+    resp = await fetch(url, init)
   } catch {
     // fetch 只在"请求没发出去/没有响应"时抛异常：这正是"网络不可达"，与 4xx/5xx 完全不同。
     throw offlineError()
@@ -310,11 +335,41 @@ export async function logout(): Promise<void> {
 /**
  * POST /api/auth/logout-all（204）—— 撤销该用户全部会话（服务端 `token_version+1`）。
  *
- * 本期没有界面入口（"退出所有设备"属设置页）；先按冻结契约把它封在这里，
- * 免得将来各处自己拼 URL、各自处理一次错误体。
+ * ⚠ **必须带 access token**：这条端点在服务端挂着 `RequireAuth`，与 `logout`
+ * （靠 HttpOnly Cookie 认人）不是一回事。票 #71 之前它没有界面入口、也没被任何
+ * 代码调用过，所以"忘了传 token"这个缺陷一直没暴露 —— 真机验收 S9 才抓到：
+ * 不带 Bearer 时服务端回 401，前端 catch 里照样 `clearSession()`，
+ * 于是**页面看起来退出了、服务端的会话一个都没撤销**（其他设备还在登录）。
  */
-export async function logoutAll(): Promise<void> {
-  await request('logout-all', { method: 'POST' })
+export async function logoutAll(token: string): Promise<void> {
+  await request('logout-all', { method: 'POST', token })
+}
+
+/**
+ * PUT /api/me/password —— 凭**当前密码**换新密码（票 #71）。
+ *
+ * 两条改密门的分工（决议 #51）：
+ *   - 记得密码 → 这里，只要当前密码；
+ *   - 忘了密码 → 登录页的邮箱验证码（`passwordOTP` + `passwordOTPReset`）。
+ * 已接受的取舍：拿到有效会话的人就能改密码；但那需要先有会话，而会话来自登录，
+ * 登录要密码 —— 第二道防线仍在。
+ *
+ * **返回值是新会话**（不是 204）：服务端改密会撤销该账号全部会话并让
+ * `token_version+1`，同时给当前设备补发一枚新的 —— 否则"改完密码自己也被蹬掉"。
+ * 调用方必须拿它去 `stores/auth.ts` 的 `adoptSession()` 落地，否则下一个请求就 401。
+ *
+ * 幂等：`Idempotency-Key` 必须由调用方生成并在重试期间保持不变 —— 改密是不可逆的，
+ * 真的跑第二遍会因为"当前密码已不是那个"而 400，用户看到的是"我明明改成功了"。
+ */
+export async function changePassword(input: ChangePasswordInput): Promise<AuthSession> {
+  return normalizeSession(
+    await requestURL('/api/me/password', {
+      method: 'PUT',
+      body: input,
+      token: input.token,
+      idempotencyKey: input.idempotencyKey,
+    }),
+  )
 }
 
 /** GET /api/auth/me —— 校验 access token 并取回最新用户信息。 */

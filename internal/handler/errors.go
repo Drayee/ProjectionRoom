@@ -84,6 +84,13 @@ const (
 	// 与 /api/auth/password/otp 的"恒定 200"形成对照 —— 那个入口免登录且不限"写"，
 	// 因此它必须逐字相同。改这里的文案/码之前请先读 service.Register 的那一段。
 	CodeEmailTaken = "EMAIL_TAKEN"
+
+	// CodePasswordMismatch 表示「当前密码」填错了（票 #71 的 PUT /api/me/password）。
+	//
+	// 与 CodeLoginFailed 分开是刻意的：登录页那句"用户名或密码错误"是安全要求的
+	// 统一文案（不泄露账号是否存在），而这里请求方已经登录、账号早已确定，
+	// 模糊文案只会让人不知道是哪一栏错了。前端据此把错误挂在"当前密码"输入框上。
+	CodePasswordMismatch = "PASSWORD_MISMATCH"
 )
 
 // accountErrorResponse 把账号层的领域错误映射为 HTTP 状态码、错误码与用户可读消息。
@@ -165,6 +172,23 @@ func accountErrorResponse(err error) (status int, code string, message string) {
 		errors.Is(err, auth.ErrPasswordNoLetter),
 		errors.Is(err, auth.ErrPasswordNoDigit):
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+
+	// 「当前密码不对」（票 #71 的 PUT /api/me/password）。
+	//
+	// 400 而不是 401：401 会让前端的"会话过期自动刷新"逻辑把一次填错的密码
+	// 当成 token 失效去重试，用户看到的是登录页而不是"当前密码不正确"。
+	// 也不与 LOGIN_FAILED 共用码：那条的语义是"别试了，凭据不对"（登录页），
+	// 而这里是"这一栏填错了，改一下再来"（设置页），文案必须具体。
+	case errors.Is(err, service.ErrPasswordMismatch):
+		return http.StatusBadRequest, CodePasswordMismatch, err.Error()
+
+	// 设置区的两个入参哨兵（account_settings.go）。它们不出现在任何别的域，
+	// 但必须在这里登记 —— 漏了就会落到 default 分支变成 500，
+	// 症状是"少填一栏"被显示成"服务端内部错误"。
+	case errors.Is(err, errPasswordFieldsRequired):
+		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+	case errors.Is(err, errSettingsSessionInvalid):
+		return http.StatusUnauthorized, CodeSessionInvalid, err.Error()
 
 	case errors.Is(err, service.ErrBadRole):
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()

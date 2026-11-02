@@ -32,8 +32,8 @@
  *      行里给的是「解除拉黑」而不是关注类动作。
  *  M5  **点名单 tab 写回 URL**（验收 ①）：点「粉丝」后 `location.search` 同时含
  *      `tab=relations` 与 `list=followers`。
- *  M6  **`?tab=settings` 槽位存在**（验收 ③）：设置分区选中，正文里出现
- *      `/me?tab=settings` 这个已钉住的地址。
+ *  M6  **`?tab=settings` 有内容**（验收 ③）：设置分区选中，正文里出现改密码
+ *      表单与「退出所有设备」（票 #71 填进去的那三块）。
  *  M7  **未知 tab 回落默认**（验收 ①）：`?tab=bogus` 停在概览，不空白、不报错。
  *  M8  **顶栏头像落点切到 `/me`**（验收 ①）：`header a.avatar` 的 href 是 `/me`。
  *  M9  **「查看我的公开主页」互链**（验收 ①）：href 是 `/user/1`。
@@ -341,11 +341,34 @@ async function main() {
     const settings = await cdp.evaluate(`(() => {
       const sel = [...document.querySelectorAll('nav.tabs [role=tab]')].find((b) => b.getAttribute('aria-selected') === 'true')
       const body = (document.querySelector('.sect')?.textContent || '').trim()
-      return { selected: sel ? (sel.textContent || '').trim() : '', mentionsPath: body.includes('/me?tab=settings') }
+      return {
+        selected: sel ? (sel.textContent || '').trim() : '',
+        heads: [...document.querySelectorAll('.sect h2')].map((h) => (h.textContent || '').trim()),
+        hasCurrent: Boolean(document.querySelector('[data-testid=current-password]')),
+        hasNew: Boolean(document.querySelector('[data-testid=new-password]')),
+        hasKick: Boolean(document.querySelector('[data-testid=kickall-start]')),
+        hasReadonly: Boolean(document.querySelector('[data-testid=account-readonly]')),
+        body,
+      }
     })()`)
     evidence.settings = settings
     record('M6a ?tab=settings 选中「设置」', settings.selected === '设置', settings.selected)
-    record('M6b 设置区说明里钉住 /me?tab=settings 地址', settings.mentionsPath, String(settings.mentionsPath))
+    // 票 #71 把槽位换成了真内容：改密码（当前/新/确认三栏）、退出所有设备、只读信息。
+    record(
+      'M6b 设置区含改密码表单 + 退出所有设备 + 只读信息（票 #71）',
+      settings.hasCurrent && settings.hasNew && settings.hasKick && settings.hasReadonly,
+      JSON.stringify({
+        hasCurrent: settings.hasCurrent,
+        hasNew: settings.hasNew,
+        hasKick: settings.hasKick,
+        hasReadonly: settings.hasReadonly,
+      }),
+    )
+    record(
+      'M6c 设置区三块标题是「改密码 / 退出所有设备 / 账号信息」',
+      ['改密码', '退出所有设备', '账号信息'].every((h) => settings.heads.includes(h)),
+      settings.heads.join(' / '),
+    )
 
     // ---------- M10 本人 /user/:id 变回纯橱窗 ----------
     await cdp.navigate(site.url + '/user/1')

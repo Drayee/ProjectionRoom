@@ -13,7 +13,7 @@
  *   overview   概览：资料编辑（昵称）+ 我的帖子 + 我的放映室
  *   relations  关系管理：好友（互关）/ 关注 / 粉丝 + 黑名单入口
  *   favorites  我的收藏（票 #65）：帖子 / 番剧 / 放映室三份私人书签
- *   settings   账号设置 —— **票 #71 填内容**，本票只放槽位说明
+ *   settings   账号设置（票 #71）：凭当前密码改密 / 退出所有设备 / 账号只读信息
  *
  * 收藏单独一个分区而不是塞进概览：它是**跨对象**的（三种类型各一套主键），
  * 而概览里那两块都是"我发布的东西"。混在一列会让"我收藏的"与"我发布的"
@@ -34,8 +34,9 @@
  *   - 删帖入口与「我的放映室含未公开/已关闭」已由 #70 接（`DELETE /api/posts/:id`、
  *     `GET /api/rooms/mine`）；帖子块复用他人档案页那一份，只是 `self` 为真时
  *     多出删除按钮 —— 他人页上不该有那个入口，连灰的都不该有；
- *   - 设置区五块由 #71 接。
- * 所以这里两块各自说明"还差什么"，而不是画一个假的完成态。
+ *   - 设置区的改密 / 退出所有设备 / 只读信息由 #71 接（`MeSettingsBlock`）；
+ *     换绑邮箱（#72）与注销（#73）仍是独立票，那块里明说了"不在这一票"。
+ * 所以这里每一块都说明"还差什么"，而不是画一个假的完成态。
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
@@ -48,6 +49,7 @@ import AuthorPostsBlock from '../components/features/profile/AuthorPostsBlock.vu
 import MeRelationsBlock from '../components/features/profile/MeRelationsBlock.vue'
 import MeFavoritesBlock from '../components/features/profile/MeFavoritesBlock.vue'
 import MeRoomsBlock from '../components/features/profile/MeRoomsBlock.vue'
+import MeSettingsBlock from '../components/features/profile/MeSettingsBlock.vue'
 import * as usersApi from '../api/users'
 import { NETWORK_MESSAGE, toHttpError } from '../api/http'
 import { isCapabilityUnavailable } from '../api/mode'
@@ -316,20 +318,10 @@ watch(tab, async () => {
           <MeFavoritesBlock />
         </section>
 
-        <!-- ---------- 设置（票 #71 填内容） ---------- -->
+        <!-- ---------- 设置（票 #71） ---------- -->
         <section v-else class="sect" aria-labelledby="me-settings-head">
-          <div class="card">
-            <h2 id="me-settings-head" class="sect-title">账号设置</h2>
-            <p class="dim small">
-              改密码（凭当前密码）、退出所有设备、换绑邮箱、账号只读信息与注销，
-              都在票 #71 落地。这个分区的地址（<code class="mono">/me?tab=settings</code>）
-              已经钉住，届时只往里填内容，不改地址形态。
-            </p>
-            <ul class="dim small">
-              <li>记得密码 → 这里凭当前密码改；</li>
-              <li>忘了密码 → 登录页的「找回密码」走邮箱验证码（两条路并存，互不替代）。</li>
-            </ul>
-          </div>
+          <h2 id="me-settings-head" class="sect-title">账号设置</h2>
+          <MeSettingsBlock />
         </section>
       </template>
     </main>

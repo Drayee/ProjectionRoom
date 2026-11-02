@@ -64,6 +64,14 @@ type AccountService interface {
 	SendAccountOTP(ctx context.Context, email, ip, ua string) (string, error)
 	ResetPasswordWithOTP(ctx context.Context, email, code, password string) error
 
+	// ChangeMyPassword 是「记得密码」那条改密路径（票 #71 / 决议 #51）：
+	// 只凭**当前密码**，成功后撤销其余全部会话并给当前设备换发新会话。
+	//
+	// 与 ResetPasswordWithOTP 的关系：那条是「忘了密码」的门（邮箱验证码），
+	// 两条并存、互不替代。返回 *service.Session 而不是 error 是判据的一部分 ——
+	// 改密会把 token_version 加一，不补发新会话就等于把当前设备也蹬下线。
+	ChangeMyPassword(ctx context.Context, userID int64, currentPassword, newPassword, ip, ua string) (*service.Session, error)
+
 	// —— 幂等键（写操作的重放保护）。
 	ReserveIdempotency(ctx context.Context, scope, key, requestHash string, ttl time.Duration) (*store.IdempotencyRecord, error)
 	CompleteIdempotency(ctx context.Context, scope, key string, status int, response []byte) error

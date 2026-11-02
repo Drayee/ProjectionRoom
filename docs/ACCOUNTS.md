@@ -323,10 +323,44 @@ GET    /api/favorites?type=post|room|anime&before=&limit=
 - `/me` —— **本人的管理台**。四个分区，`?tab=overview|relations|favorites|settings` 进 URL
   （键名唯一源 `client/src/utils/meRoute.ts`，与 `dmRoute`/`friendsRoute`/`postsRoute` 同族）：
   概览（资料编辑 + 我的帖子 + 我的放映室）、关系（四份名单 + 黑名单入口）、
-  收藏（票 #65，见下）、设置（票 #71 填内容，地址已钉住）。顶栏头像的落点是 `/me`（票 #69 起），
+  收藏（票 #65，见下）、设置（票 #71，见下）。顶栏头像的落点是 `/me`（票 #69 起），
   头像位的"点亮"语义随之扩到 `/me`（`utils/navSection.ts` 的 `isSelfProfile`）——
   从 `/me` 点「查看我的公开主页」跳到 `/user/<我>` 时头像位若灭掉，
   用户会以为跳出了账号上下文。
+
+**`/me?tab=settings` 账号设置（票 #71；决议 #51）**：
+
+- **两条改密门并存，互不替代**。记得密码 → 这里，`PUT /api/me/password`
+  收 `{currentPassword, newPassword}`，**仅当前密码**这一道门（`service.ChangeMyPassword`）；
+  忘了密码 → 登录页的邮箱验证码（`/api/auth/password/otp` + `/password/otp/reset`），**一字未动**。
+  已知取舍：劫持到有效会话即可改密，但找回密码那条路仍需要邮箱码，构成第二道防线 ——
+  这是决议 #51 明确接受的风险，不是疏漏。
+- **成功后的三步是判据本身**：`replacePassword`（`SetPasswordHash` → `RevokeAllSessions`
+  → `BumpTokenVersion`）把其余会话全蹬掉，然后**重新 `UserByID` 读回用户再 `issueSession`**。
+  不重读就会拿旧 `token_version` 签发一枚一出生就失效的 token，症状是
+  「改密成功但当前标签页立刻掉线」。端点回 **200 + 完整新会话**（不是 204），
+  并把新 refresh 写进 Cookie —— 当前设备因此保持在登录态。
+- **错误映射**：错当前密码 → 400 `PASSWORD_MISMATCH`（**不是 401**：前端把 401 当会话过期
+  会直接踢去登录页，而这里用户明明在线、只是打错了一栏；也不与 `LOGIN_FAILED` 共用码 ——
+  登录语境要模糊、设置页语境要具体）；少填一栏 → 400；弱口令 → 400 + 策略原因；
+  未登录 → 401；封禁账号 → 403。
+- **走幂等键族**（scope `me.password`，与 `password.otp.reset` 分开 —— 否则同一把键
+  在两条门之间互相命中）。注意幂等重放必须用**新口令重新登录拿到的** token：
+  改密把 `token_version` 加一，第一枚 token 在第二次请求时已被 `RequireAuth` 判失效，
+  那是正确的安全行为、与幂等无关。
+- **退出所有设备**复用 `POST /api/auth/logout-all`（`token_version+1` + 撤销全部会话）。
+  ⚠ 该端点挂 `RequireAuth`，**必须带 Bearer**；前端 `api/auth.ts` 的 `logoutAll()`
+  曾漏传 token（调用方 catch 里照样 `clearSession()`，症状是「页面看起来退出了、
+  服务端会话一个都没撤销」），它长期没暴露是因为那个函数从写下来起**没有调用方**，
+  本轮接界面时才被真机判据 S9 抓到。
+- **账号只读信息**六行：用户名 / 昵称 / 加入时间 / 角色 / 邮箱 / 邮箱验证态。
+  加入时间用 `ui/RelativeTime.vue` 的 **`absolute` prop**（可见文案也是 `YYYY-MM-DD HH:mm`）——
+  这个字段要的是"哪一天注册的"，对一个刚注册的账号显示「刚刚」恰恰最没信息量；
+  之所以加开关而不是让页面自己格式化，是因为全站时间格式化只有
+  `utils/relativeTime.ts` 一份实现，页面自己拼日期就等于开第二个出口。
+- 退出所有设备用**页内确认条**（`role="alertdialog"`）而不是 `window.confirm`：
+  真机脚本里后者既不可读也不可点，而"退出所有设备"是不可撤销的破坏性动作，
+  必须有人能验收它。
 
 **作者内容的两个只读端点**（票 #68，均**免登录**）：
 
@@ -434,8 +468,11 @@ GET /api/users/:id/rooms?limit&offset   → { items: { roomId, title, createdAt,
   POST   /api/auth/ws-ticket
 用户
   PATCH  /api/me                   GET  /api/users/:id
+  PUT    /api/me/password          凭当前密码改密（票 #71；成功 200 + 新会话，其余会话全撤销）
   GET    /api/users/:id/posts?limit&offset    GET /api/users/:id/rooms?limit&offset
   （票 #68：作者内容子资源，**免登录**；刻意没有 ?authorId= 变体，规格 #55 允许二选一不双开）
+  GET    /api/rooms/mine?limit&offset        房主全部房，含未公开与已关闭（票 #70）
+  DELETE /api/posts/:postId                  仅作者；403/404 分开；硬删 + CASCADE（票 #70）
 好友 / 关注（票 #59 之后）
   POST   /api/follows                       DELETE /api/follows/:userId
   GET    /api/follows/:userId               GET    /api/follows?tab=mutual|following|followers

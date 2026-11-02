@@ -340,6 +340,16 @@ func (f *fakeAccountService) ResetPasswordWithOTP(_ context.Context, _, _, _ str
 	return nil
 }
 
+// ChangeMyPassword 是「记得密码」那条改密门（票 #71）。
+//
+// 这个假实现返回 ErrSessionInvalid 而不是"假装成功"：本文件的用例都不该走到它
+// （它们跑的是 `/api/auth/*`，改密端点在 `/api/me/password`，由
+// account_settings_test.go 用**真** AccountService 覆盖）。回一个明确的错误能让
+// "某条用例意外打到了改密端点"立刻暴露，而不是静默通过。
+func (f *fakeAccountService) ChangeMyPassword(_ context.Context, _ int64, _, _, _, _ string) (*service.Session, error) {
+	return nil, service.ErrSessionInvalid
+}
+
 func (f *fakeAccountService) ReserveIdempotency(_ context.Context, _, _, _ string, _ time.Duration) (*store.IdempotencyRecord, error) {
 	return nil, nil
 }

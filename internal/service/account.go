@@ -86,6 +86,17 @@ var (
 	// 能拿到这个错误的前提是已经通过了口令校验，也就是对方本来就知道账号存在。
 	ErrUserBanned = errors.New("account: 账号已被封禁")
 
+	// ErrPasswordMismatch 表示「当前密码」不对（票 #71 的 PUT /api/me/password）。
+	//
+	// 为什么与 ErrInvalidCredentials 分开：那个是**登录**语境，文案必须模糊
+	//（不区分"用户不存在"与"口令错"）；而这里是已登录用户在自己改自己的密码，
+	// 账号早已确定存在，模糊文案只会让人不知道刚才填错了哪一栏。
+	//
+	// 它**仍然是一个口令猜测面**（拿着会话就能试当前密码），因此 handler 把它挂在
+	// 登录限速桶上，且 400 而非 401 —— 401 会让前端的"会话失效自动刷新"逻辑
+	// 误以为是 token 过期。
+	ErrPasswordMismatch = errors.New("account: 当前密码不正确")
+
 	// ErrUserNotFound 表示"这个用户不可见"（wayfinder #33）。
 	//
 	// ⚠ 它把**两种**情形合成一个值，这是刻意的（与 ErrInvalidCredentials 同一条理由）：
@@ -785,6 +796,82 @@ func (s *AccountService) LogoutAll(ctx context.Context, userID int64) error {
 		return err
 	}
 	return nil
+}
+
+// ChangeMyPassword 是「记得密码」这条改密路径（票 #71 / 决议 #51）。
+//
+// 两条门分工（决议 #51）：
+//   - 记得密码 → 这里，**只凭当前密码**；
+//   - 忘了密码 → 登录页的邮箱验证码（ResetPasswordWithOTP），那条路不动。
+//
+// ⚠ 已接受的取舍：**只劫持到有效会话即可改密码**（不再要邮箱验证码）。
+// 这条风险的边界值得写清：拿到会话的人本来就能以你的身份做任何事，改密码
+// 只是让它更持久；而"改成自己的密码"之后旧主人还能走邮箱验证码找回来
+// （邮箱验证码门是**并存的第二道防线**，不因为改密成功而失效）。
+// 想彻底挡住这一步就得再加一道邮箱码，代价是每次改密码都要等一封信 ——
+// 而它挡住的攻击者（已持有有效会话）在改密码之外已经能删你的帖子、读你的私聊。
+//
+// 返回值是**当前设备的新会话**：replacePassword 会撤销该账号的全部会话并
+// token_version+1，如果不给当前设备补发一枚，用户改完密码就被自己蹬下线了。
+// 验收明确要求「当前会话保持、其余全蹬」，所以补发不是顺手，是判据的一部分。
+func (s *AccountService) ChangeMyPassword(ctx context.Context, userID int64, currentPassword, newPassword, ip, ua string) (*Session, error) {
+	if userID <= 0 {
+		return nil, ErrSessionInvalid
+	}
+
+	u, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrSessionInvalid
+		}
+		return nil, err
+	}
+	if u.Status != store.StatusActive {
+		return nil, ErrUserForbidden
+	}
+
+	ok, busyErr := s.verifyPassword(u.PasswordHash, currentPassword)
+	if busyErr != nil {
+		return nil, busyErr
+	}
+	// 旧项目（yachiyo）的 MD5 行：bcrypt 那条路必然不通。这里与 Login 保持一致地
+	// 兼容一次 —— 否则那些账号永远改不了密码（它们能登录，却卡在"当前密码不对"）。
+	// 与 Login 不同的是**不需要**补齐等价 CPU：这里已经通过会话认证过身份，
+	// 不存在"靠响应耗时枚举账号"的面。
+	if !ok && auth.IsLegacyMD5Hash(u.PasswordHash) {
+		ok = auth.VerifyLegacyMD5(u.PasswordHash, currentPassword)
+	}
+	if !ok {
+		return nil, ErrPasswordMismatch
+	}
+
+	// 口令策略在哈希之前：弱口令不该烧掉一次 bcrypt（同 ResetPasswordWithOTP 的理由）。
+	if err := auth.ValidatePasswordPolicy(newPassword); err != nil {
+		return nil, err
+	}
+
+	hash, err := s.acquireAndHash(newPassword)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.replacePassword(ctx, userID, hash); err != nil {
+		return nil, err
+	}
+
+	// 重新读一次用户：replacePassword 刚刚把 token_version 加了 1，
+	// 而 issueSession 用的是**传进来的那个 u.TokenVersion**。拿旧值签发的
+	// access token 一出生就是失效的（VerifyAccessToken 会比对版本号）。
+	u, err = s.store.UserByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	sess, err := s.issueSession(ctx, u, ip, ua)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[INFO] 口令已通过当前密码修改：user=%d（该账号其余会话已撤销，当前设备已换发新会话）", userID)
+	return sess, nil
 }
 
 // Me 返回当前账号的对外档案（不含 PasswordHash，见 Profile 的说明）。

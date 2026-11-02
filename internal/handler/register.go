@@ -111,7 +111,30 @@ func hashRequestBody(raw []byte) string {
 //
 // `run` 返回 (status, body) 或 error。**只有成功才落键**：失败往往正是值得重试的
 // 那一类（网络抖、邮件服务暂时不可用），落键会让同一个键永远拿到那个失败。
+// withIdempotency 是幂等键的**唯一**执行壳（authHandler 的薄包装）。
+//
+// 真正的实现是 runWithIdempotency：票 #71 的 `PUT /api/me/password` 挂在
+// `accountSettingsHandler` 上（它只持有 AccountService，没有整个 AuthDeps），
+// 而"幂等怎么执行"这件事只能有一处实现 —— 两份拷贝迟早会在
+// "失败要不要落键""重放返回什么"这类细节上漂移。
 func (h *authHandler) withIdempotency(c *gin.Context, scope string, run func() (int, any, error)) {
+	runWithIdempotency(c, h.deps.Service, scope, run)
+}
+
+// runWithIdempotency 是幂等键的**唯一**执行壳。
+//
+// 流程：
+//
+//	① 没有键 → 直接执行；
+//	② 有键 → Reserve：
+//	     已完成 → 原样返回首次的响应（连状态码一起）；
+//	     进行中 → 409（让客户端稍后重试，而不是以为失败）；
+//	     键冲突 → 409（同键不同体是客户端 bug，必须拒绝）；
+//	     占位成功 → 执行 → 成功则 Complete 落响应，失败则 Release 让客户端能重试。
+//
+// `run` 返回 (status, body) 或 error。**只有成功才落键**：失败往往正是值得重试的
+// 那一类（网络抖、邮件服务暂时不可用），落键会让同一个键永远拿到那个失败。
+func runWithIdempotency(c *gin.Context, svc AccountService, scope string, run func() (int, any, error)) {
 	key := idempotencyKeyFrom(c)
 	raw, _ := io.ReadAll(c.Request.Body)
 	c.Request.Body = io.NopCloser(strings.NewReader(string(raw)))
@@ -131,7 +154,7 @@ func (h *authHandler) withIdempotency(c *gin.Context, scope string, run func() (
 	}
 
 	ctx := c.Request.Context()
-	rec, err := h.deps.Service.ReserveIdempotency(c.Request.Context(), scope, key, hashRequestBody(raw), idempotencyTTL)
+	rec, err := svc.ReserveIdempotency(c.Request.Context(), scope, key, hashRequestBody(raw), idempotencyTTL)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrIdempotencyKeyConflict):
@@ -160,7 +183,7 @@ func (h *authHandler) withIdempotency(c *gin.Context, scope string, run func() (
 	status, body, err := run()
 	if err != nil {
 		// 失败不落键：释放占位，让同一个键可以重试。
-		_ = h.deps.Service.ReleaseIdempotency(ctx, scope, key)
+		_ = svc.ReleaseIdempotency(ctx, scope, key)
 		writeAccountError(c, err)
 		return
 	}
@@ -173,7 +196,7 @@ func (h *authHandler) withIdempotency(c *gin.Context, scope string, run func() (
 			payload = b
 		}
 	}
-	_ = h.deps.Service.CompleteIdempotency(ctx, scope, key, status, payload)
+	_ = svc.CompleteIdempotency(ctx, scope, key, status, payload)
 
 	if body == nil {
 		c.Status(status)

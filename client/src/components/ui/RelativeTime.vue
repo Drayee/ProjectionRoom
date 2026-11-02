@@ -32,8 +32,20 @@ const props = withDefaults(
      * 默认 true。关闭它只影响**辅助信息**，文案与 datetime 不变。
      */
     showAbsolute?: boolean
+    /**
+     * 把**可见文案**也换成精确绝对时间（票 #71 加的）。
+     *
+     * 默认 false = 六档相对文案（"3 分钟前"）。
+     * true  = `YYYY-MM-DD HH:mm`（本地时区）。
+     *
+     * 为什么需要这个开关而不是让页面自己格式化：全站时间格式化只有这一份实现
+     * （`utils/relativeTime.ts` 的 `timeView`）。设置页的"加入时间"要的是
+     * "哪一天注册的" —— "刚刚"对一个刚注册的账号毫无信息量，而它恰恰是这个字段
+     * 最需要说清的时刻。让页面自己拼日期就等于开第二个格式化出口。
+     */
+    absolute?: boolean
   }>(),
-  { placeholder: '—', showAbsolute: true },
+  { placeholder: '—', showAbsolute: true, absolute: false },
 )
 
 /** 全站单一刻度：页面开着数字自己走（30s 一跳，后台暂停）。 */
@@ -41,10 +53,11 @@ const now = useNowTick()
 
 const view = computed(() => timeView(props.value, now.value))
 
-/** 空值 → 占位符；非法值 → 原样。 */
+/** 空值 → 占位符；非法值 → 原样；`absolute` 时给精确绝对时间。 */
 const text = computed(() => {
   if (props.value === '' || props.value === null || props.value === undefined) return props.placeholder
-  return view.value.relative
+  if (view.value.invalid) return view.value.relative
+  return props.absolute ? view.value.full : view.value.relative
 })
 
 /** 非法时间不给绝对信息（title 与 aria-label 都省掉）。 */
