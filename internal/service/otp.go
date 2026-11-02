@@ -105,15 +105,28 @@ const (
 	otpMailPassword = "password"
 )
 
+// otpAction 把邮件种类翻成"用户正在做的动作"，正文与主题共用这一份。
+//
+// 抽出来是因为正文（「你正在进行『X』操作」）与主题（「X验证码」）必须说同一件事：
+// 分开各写一份的话，新增一种邮件时最容易只改一处 —— 症状是主题写着"注册"、
+// 正文写着"换绑"，用户会以为自己的账号出了问题。
+func otpAction(kind string) string {
+	switch kind {
+	case otpMailPassword:
+		return "找回密码"
+	case otpMailEmailChange:
+		return "换绑邮箱"
+	default:
+		return "完成注册"
+	}
+}
+
 // otpEmailBody 组装验证码邮件正文。
 //
 // 与链接邮件同样只放"用户要做的那一件事"：验证码、有效期、不是你本人就忽略。
 // **不**放用户名/昵称 —— 收件箱被转发时，正文越少越好。
 func otpEmailBody(kind, code string, ttl time.Duration) string {
-	action := "完成注册"
-	if kind == otpMailPassword {
-		action = "找回密码"
-	}
+	action := otpAction(kind)
 	return fmt.Sprintf(`%s · 验证码
 
 你正在进行「%s」操作，验证码是：
@@ -128,10 +141,7 @@ func otpEmailBody(kind, code string, ttl time.Duration) string {
 
 // otpEmailSubject 返回主题（常量，不含用户输入 —— 邮件头是 CRLF 注入的经典位置）。
 func otpEmailSubject(kind string) string {
-	if kind == otpMailPassword {
-		return emailBrandName + "：找回密码验证码"
-	}
-	return emailBrandName + "：注册验证码"
+	return emailBrandName + "：" + otpAction(kind) + "验证码"
 }
 
 // SendAccountOTP 给**已存在的账号**发一条「找回密码」验证码。

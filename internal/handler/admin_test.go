@@ -400,6 +400,24 @@ func (s *fakeAdminStore) InsertEmailOTP(ctx context.Context, t *store.PasswordRe
 }
 
 func (s *fakeAdminStore) ConsumeEmailOTP(_ context.Context, userID int64, otpHash string, maxAttempts int) (bool, error) {
+	return s.consumeEmailOTP("", userID, otpHash, maxAttempts)
+}
+
+// ConsumeEmailOTPFor 只认发给指定地址的码（票 #72 的换绑邮箱）。
+//
+// 与真 store 同构：地址过滤发生在"挑选哪一条"这一步。写成"先挑最新一条再比地址"
+// 会让"地址不匹配"走错分支（去给那条不相关的码 +1 attempts），
+// 于是用例测的不是真实现的行为。
+func (s *fakeAdminStore) ConsumeEmailOTPFor(_ context.Context, userID int64, email, otpHash string, maxAttempts int) (bool, error) {
+	if strings.TrimSpace(email) == "" {
+		// fail closed：空地址不能退化成"不按地址过滤"。
+		return false, store.ErrOTPNotFound
+	}
+	return s.consumeEmailOTP(strings.ToLower(strings.TrimSpace(email)), userID, otpHash, maxAttempts)
+}
+
+// consumeEmailOTP 是两条门共用的实现（email 为空 = 不按地址过滤）。
+func (s *fakeAdminStore) consumeEmailOTP(email string, userID int64, otpHash string, maxAttempts int) (bool, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = 5
 	}
@@ -414,6 +432,11 @@ func (s *fakeAdminStore) ConsumeEmailOTP(_ context.Context, userID int64, otpHas
 		}
 		if r.UsedAt != nil || !time.Now().Before(r.ExpiresAt) {
 			continue
+		}
+		if email != "" {
+			if r.Email == nil || strings.ToLower(strings.TrimSpace(*r.Email)) != email {
+				continue
+			}
 		}
 		if cur == nil || r.CreatedAt.After(cur.CreatedAt) {
 			cur = r

@@ -389,6 +389,47 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /**
+   * 把换绑验证码发到**新地址**（票 #72）。
+   *
+   * 为什么不在这里做任何本地状态变更：发码只证明"信寄出去了"，
+   * 邮箱与 `emailVerified` 都要等确认那一步才变。提前把界面改成新地址，
+   * 用户会以为换绑已完成（然后去旧邮箱等一封信，或者干脆不再确认）。
+   */
+  async function sendEmailChangeOTP(input: {
+    email: string
+    idempotencyKey?: string
+  }): Promise<{ devCode: string }> {
+    notice.value = ''
+    return api.sendEmailChangeOTP({
+      email: input.email,
+      token: accessToken.value,
+      idempotencyKey: input.idempotencyKey,
+    })
+  }
+
+  /**
+   * 凭验证码确认换绑（票 #72）。
+   *
+   * 成功后用 `applyProfileUpdate` 落地服务端回的**新用户**：邮箱换成新地址、
+   * `emailVerified` 变 true。不用 `applySession` —— 换绑不撤销会话、不换 token
+   * （`token_version` 不动），所以 access token 仍是原来那枚，只是资料变了。
+   */
+  async function confirmEmailChange(input: {
+    email: string
+    code: string
+    idempotencyKey?: string
+  }): Promise<void> {
+    notice.value = ''
+    const user = await api.confirmEmailChange({
+      email: input.email,
+      code: input.code,
+      token: accessToken.value,
+      idempotencyKey: input.idempotencyKey,
+    })
+    applyProfileUpdate(user)
+  }
+
+  /**
    * 退出所有设备（票 #71）。
    *
    * 服务端 `logout-all` 会 `token_version+1` 并撤销全部会话 —— 包括当前这台。
@@ -571,6 +612,8 @@ export const useAuthStore = defineStore('auth', () => {
     logout,
     logoutAll,
     changePassword,
+    sendEmailChangeOTP,
+    confirmEmailChange,
     clearSession,
     authedFetch,
     ensureLoggedIn,

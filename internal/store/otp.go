@@ -79,11 +79,40 @@ func (s *Store) InsertEmailOTP(ctx context.Context, t *PasswordReset) error {
 //
 // 把 ② 与 ③ 分成两步（先查后改）会让两个并发的正确请求都通过校验，
 // 于是同一条码被消费两次。
+//
+// ⚠ 它**不按收件地址过滤**（取该账号最新一条）。这对手上有会话的账号是安全的
+// ——码本来就是发给他的；但"把码的收件地址当成判据"的用例必须用
+// ConsumeEmailOTPFor，见那里的说明。
 func (s *Store) ConsumeEmailOTP(ctx context.Context, userID int64, otpHash string, maxAttempts int) (ok bool, err error) {
 	if userID <= 0 {
 		return false, errors.New("store: 校验账号验证码缺少 user_id")
 	}
 	return s.consumeOTPIn(ctx, otpTarget{userID: userID}, otpHash, maxAttempts)
+}
+
+// ConsumeEmailOTPFor 校验**发给指定地址**的账号验证码（票 #72 的换绑邮箱）。
+//
+// 为什么必须按地址过滤，而不是沿用 ConsumeEmailOTP 的"最新一条"：
+//
+//	换绑邮箱的语义是"**新地址**的持有者点了确认"。如果只按 user_id 取最新一条，
+//	那么一条发给**旧**地址的码（比如刚发的找回密码码）也能确认新地址 ——
+//	于是"证明你拥有新邮箱"这件事根本没被证明，攻击者只要让受害者收到任意
+//	一条码就能把账号绑到他自己的邮箱上，之后走找回密码直接接管账号。
+//
+// 地址比对发生在 SQL 的 WHERE 里（而不是查回来再比）：这样"地址不匹配"与
+// "没有码"对外是同一个结论（ErrOTPNotFound），不会给出一条"你地址填错了"
+// 的探测通道。
+func (s *Store) ConsumeEmailOTPFor(ctx context.Context, userID int64, email, otpHash string, maxAttempts int) (ok bool, err error) {
+	if userID <= 0 {
+		return false, errors.New("store: 校验账号验证码缺少 user_id")
+	}
+	addr := canonicalEmail(email)
+	if addr == "" {
+		// 空地址不该走到这里（handler 已校验格式）。fail closed：
+		// 宁可按"没有码"处理，也不能退化成"不按地址过滤"。
+		return false, ErrOTPNotFound
+	}
+	return s.consumeOTPIn(ctx, otpTarget{userID: userID, email: addr}, otpHash, maxAttempts)
 }
 
 // ConsumeDraftOTP 校验**注册草稿**上的验证码；正确则清掉草稿上的码并返回草稿。
@@ -180,6 +209,16 @@ func (s *Store) ConsumeDraftOTP(ctx context.Context, ticketHash, otpHash string,
 // 因为它的表与列名都不同，硬套会让 SQL 里出现两个分支）。
 type otpTarget struct {
 	userID int64
+	// email 非空时，只认**发给这个地址**的那条码。
+	//
+	// 为什么需要这个维度（票 #72 的换绑邮箱）：一条 OTP 行的归属是
+	// "某个账号的某个邮箱"，而不是"某个账号"。找回密码发到**当前**邮箱、
+	// 换绑发到**新**邮箱，两者可以是同一个账号的两条并存的行 ——
+	// 只按 user_id 取"最新一条"会让用户拿新邮箱收到的码去改密码，
+	// 或者拿旧邮箱的码去换绑，而两者都不该通过。
+	//
+	// 空串 = 不按地址过滤（只有测试会这样用；生产路径两条都带地址）。
+	email string
 }
 
 // consumeOTPIn 是**账号** OTP 的比对与消费实现。
@@ -204,13 +243,23 @@ func (s *Store) consumeOTPIn(ctx context.Context, target otpTarget, otpHash stri
 		var cur PasswordReset
 		// FOR UPDATE 锁住这一行：并发的两次校验必须串行，否则两边都读到 attempts=0，
 		// 各自 +1 之后实际只加了一次（丢失更新），上限就被放大了。
-		res := tx.Raw(
-			`SELECT * FROM password_resets
-			  WHERE purpose = ? AND user_id = ? AND used_at IS NULL AND expires_at > now()
+		//
+		// 收件地址是可选的过滤维度（见 otpTarget.email）：带地址时只认发给那个
+		// 地址的码，不带时退化成"该账号最新一条"（找回密码那条门用它）。
+		// 注意 lower(email) = ? —— 库里存的是 canonicalEmail 归一后的全小写，
+		// 而这里传进来的也已归一（ConsumeEmailOTPFor 里做的）。
+		sql := `SELECT * FROM password_resets
+			  WHERE purpose = ? AND user_id = ? AND used_at IS NULL AND expires_at > now()`
+		args := []any{PurposeEmailOTP, target.userID}
+		if target.email != "" {
+			sql += ` AND lower(email) = ?`
+			args = append(args, target.email)
+		}
+		sql += `
 			  ORDER BY created_at DESC
 			  LIMIT 1
-			  FOR UPDATE`,
-			PurposeEmailOTP, target.userID).Scan(&cur)
+			  FOR UPDATE`
+		res := tx.Raw(sql, args...).Scan(&cur)
 		if res.Error != nil {
 			return fmt.Errorf("store: 查询验证码失败: %w", res.Error)
 		}

@@ -72,6 +72,19 @@ type AccountService interface {
 	// 改密会把 token_version 加一，不补发新会话就等于把当前设备也蹬下线。
 	ChangeMyPassword(ctx context.Context, userID int64, currentPassword, newPassword, ip, ua string) (*service.Session, error)
 
+	// —— 自助换绑邮箱（票 #72）。
+	//
+	// 与管理员代办 `BindUserEmail`（`PATCH /api/admin/users/:id {email}`）**并存**：
+	// 两条路的差别不在"谁更可信"，而在**这次变更由谁发起**。自助那条必须把码
+	// 发到**新地址**（证明"我能读到这个新邮箱"），管理员那条不需要码
+	// （管理员本来就有提权手段，加一道码只是形式主义）。
+	//
+	// SendEmailChangeOTP 与 SendAccountOTP 的**关键差别**：那个必须对外恒定 200
+	// （防账号枚举），这里调用方已登录，可以如实报错（"地址被占了""与当前相同"），
+	// 而那正是用户需要的。
+	SendEmailChangeOTP(ctx context.Context, userID int64, newEmail, ip, ua string) (string, error)
+	ConfirmEmailChange(ctx context.Context, userID int64, newEmail, code string) error
+
 	// —— 幂等键（写操作的重放保护）。
 	ReserveIdempotency(ctx context.Context, scope, key, requestHash string, ttl time.Duration) (*store.IdempotencyRecord, error)
 	CompleteIdempotency(ctx context.Context, scope, key string, status int, response []byte) error

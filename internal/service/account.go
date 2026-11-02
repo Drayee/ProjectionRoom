@@ -275,6 +275,12 @@ type AccountStore interface {
 	// 计数落库（见 store/otp.go）：放内存的话重启就清零，6 位数字就变成可爆破的。
 	InsertEmailOTP(ctx context.Context, t *store.PasswordReset) error
 	ConsumeEmailOTP(ctx context.Context, userID int64, otpHash string, maxAttempts int) (bool, error)
+	// ConsumeEmailOTPFor 只认**发给指定地址**的那条码（票 #72 的换绑邮箱）。
+	//
+	// 与上面那条的差别是安全性质而不是便利性：换绑的语义是"新地址的持有者点了
+	// 确认"，若只按 user_id 取最新一条，一条发给旧地址的码也能确认新地址，
+	// 于是"证明你拥有新邮箱"根本没被证明。详见 store.ConsumeEmailOTPFor。
+	ConsumeEmailOTPFor(ctx context.Context, userID int64, email, otpHash string, maxAttempts int) (bool, error)
 	CountRecentEmailOTP(ctx context.Context, userID int64, since time.Time) (int64, error)
 	LastEmailOTPSentAt(ctx context.Context, userID int64) (time.Time, error)
 

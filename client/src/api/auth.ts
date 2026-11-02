@@ -365,11 +365,62 @@ export async function changePassword(input: ChangePasswordInput): Promise<AuthSe
   return normalizeSession(
     await requestURL('/api/me/password', {
       method: 'PUT',
-      body: input,
+      body: { currentPassword: input.currentPassword, newPassword: input.newPassword },
       token: input.token,
       idempotencyKey: input.idempotencyKey,
     }),
   )
+}
+
+/**
+ * POST /api/me/email/otp —— 把换绑验证码发到**新地址**（票 #72）。
+ *
+ * 为什么码发到新地址而不是当前邮箱：要证明的是"我能读到这个**新**邮箱"。
+ * 发到当前邮箱只证明了"我是主人"（那由会话已经证明了），而攻击者若只拿到会话，
+ * 让受害者收到一封他自己不会细看的信就足以把账号绑到攻击者邮箱上，
+ * 随后走找回密码接管。详见 `service.SendEmailChangeOTP` 的注释。
+ *
+ * 返回 `devCode` 只在服务端开了 `PR_OTP_DEV_ECHO=1`（本机开发）时非空 ——
+ * 生产上永远是空串，前端不该依赖它。
+ */
+export interface SendEmailChangeOTPInput {
+  email: string
+  token: string
+  idempotencyKey?: string
+}
+
+export async function sendEmailChangeOTP(input: SendEmailChangeOTPInput): Promise<{ devCode: string }> {
+  const body = (await requestURL('/api/me/email/otp', {
+    method: 'POST',
+    body: { email: input.email },
+    token: input.token,
+    idempotencyKey: input.idempotencyKey,
+  })) as { status?: string; devCode?: unknown } | null
+  return { devCode: typeof body?.devCode === 'string' ? body.devCode : '' }
+}
+
+/**
+ * PUT /api/me/email —— 凭发到新地址的验证码确认换绑（票 #72）。
+ *
+ * 成功回**更新后的用户**（不是 204）：前端要立刻把"邮箱未验证"的提示撤掉、
+ * 把显示改成新地址。让它再打一次 `/me` 意味着中间那一帧界面上还是旧地址，
+ * 用户会以为没成功而再点一次 —— 而码是单次使用的，第二次必然失败。
+ */
+export interface ConfirmEmailChangeInput {
+  email: string
+  code: string
+  token: string
+  idempotencyKey?: string
+}
+
+export async function confirmEmailChange(input: ConfirmEmailChangeInput): Promise<AuthUser> {
+  const body = (await requestURL('/api/me/email', {
+    method: 'PUT',
+    body: { email: input.email, code: input.code },
+    token: input.token,
+    idempotencyKey: input.idempotencyKey,
+  })) as unknown
+  return normalizeUser(body)
 }
 
 /** GET /api/auth/me —— 校验 access token 并取回最新用户信息。 */

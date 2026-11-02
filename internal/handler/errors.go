@@ -127,6 +127,15 @@ func accountErrorResponse(err error) (status int, code string, message string) {
 		return http.StatusConflict, CodeUsernameTaken, "该用户名已被占用"
 	case errors.Is(err, service.ErrEmailTaken):
 		return http.StatusConflict, CodeEmailTaken, "该邮箱已被其他账号绑定"
+	// 换绑时填了与当前相同的地址（票 #72）。400 而不是静默成功：
+	// 静默成功会让用户去旧邮箱等一封永远不会来的信。
+	case errors.Is(err, service.ErrEmailUnchanged):
+		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+	// 换绑请求少了字段（account_settings.go 的入参哨兵）。与
+	// errPasswordFieldsRequired 同族 —— 漏登记会落到 default 变成 500，
+	// 症状是"少填一栏"被显示成"服务端内部错误"。
+	case errors.Is(err, errEmailChangeFieldsRequired):
+		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
 	case errors.Is(err, service.ErrBadUsername), errors.Is(err, service.ErrBadDisplayName):
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
 	// 邮箱格式不合法：与"邮箱已被占用"分开，因为用户要采取的动作完全不同

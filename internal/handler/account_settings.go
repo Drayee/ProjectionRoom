@@ -66,6 +66,40 @@ var (
 // 再去走找回密码，直接拿到了上一次的成功响应"。
 const scopeChangePassword = "me.password"
 
+// 换绑邮箱的两个 scope（票 #72）。
+//
+// 发码与确认**必须是两个 scope**：它们请求体不同（{email} vs {email,code}），
+// 而幂等壳对"同键不同体"回 409 —— 共用 scope 会让前端复用一把键时
+// 在"发完码去确认"这一步撞上 409，看起来像"服务端拒绝了我的确认"。
+const (
+	scopeEmailChangeOTP     = "me.email.otp"
+	scopeEmailChangeConfirm = "me.email.confirm"
+)
+
+// sendEmailChangeOTPRequest 是 POST /api/me/email/otp 的请求体。
+//
+// 只有 `email`：调用方身份来自 token，**不**从请求体取 userID —— 能从请求体
+// 指定"给谁换绑"的接口，第一步就要回答"能不能传别人的 id"。
+type sendEmailChangeOTPRequest struct {
+	Email string `json:"email"`
+}
+
+// confirmEmailChangeRequest 是 PUT /api/me/email 的请求体。
+//
+// `code` 是发到**新地址**的那 6 位数字。地址必须再传一次（而不是从服务端
+// 会话里取"最近一次发码的地址"）：那会引入一份额外状态，且它一旦与用户
+// 真正想绑的地址不一致，用户就永远确认不了自己填的地址。
+type confirmEmailChangeRequest struct {
+	Email string `json:"email"`
+	Code  string `json:"code"`
+}
+
+// errEmailChangeFieldsRequired 是"少填了一栏"的入参哨兵。
+//
+// 与 errPasswordFieldsRequired 同族：这一层能判定，且它的文案与 service 的
+// 策略/占用类错误是两件事 —— 前者是"你漏填了"，后者是"你填的不对"。
+var errEmailChangeFieldsRequired = errors.New("请填写新邮箱与验证码")
+
 // registerAccountSettingsRoutes 注册账号设置区的端点。
 //
 // 与其它二期路由同一套约定：账号能力关闭（`PR_DB_DSN` 为空）时整个域不注册；
@@ -92,6 +126,8 @@ func registerAccountSettingsRoutes(api *gin.RouterGroup, cfg *config.Config, aut
 			})
 		}
 		api.PUT("/me/password", unavailable)
+		api.POST("/me/email/otp", unavailable)
+		api.PUT("/me/email", unavailable)
 		return
 	}
 
@@ -107,6 +143,18 @@ func registerAccountSettingsRoutes(api *gin.RouterGroup, cfg *config.Config, aut
 	// 所以必须有闸门，且档位要与登录一致。
 	passwordLimiter := newKeyedLimiter(cfg.IPC.LoginPerMinute, cfg.IPC.LoginBurst, "修改密码")
 	api.PUT("/me/password", RequireAuth(auth), passwordLimiter, h.changePassword)
+
+	// 换绑邮箱两个端点（票 #72）挂**登录桶**：发码会真的花掉邮件配额，
+	// 而确认是一个**验证码猜测面**（6 位数字，5 次即作废）。两者都按登录
+	// 档位限制，理由与改密相同。
+	//
+	// 额外的每邮箱闸门（mailPerEmailLimiter）不在这里挂：它按**收件地址**
+	// 计数，而这里的收件地址来自请求体、每个用户各填各的 —— 逐地址限流
+	// 放在 service 的冷却期（60s）+ attempts（5 次）里已经足够，
+	// 再叠一层按地址的桶只会让"我打错了地址想改一下"被拦。
+	emailLimiter := newKeyedLimiter(cfg.IPC.LoginPerMinute, cfg.IPC.LoginBurst, "换绑邮箱")
+	api.POST("/me/email/otp", RequireAuth(auth), emailLimiter, h.sendEmailChangeOTP)
+	api.PUT("/me/email", RequireAuth(auth), emailLimiter, h.confirmEmailChange)
 }
 
 // accountSettingsHandler 持有依赖。
@@ -162,6 +210,104 @@ func (h *accountSettingsHandler) changePassword(c *gin.Context) {
 		// 留着它会让下一次刷新命中重放检测（那是"撤销全部会话"的处置）。
 		setRefreshCookie(c, sess.RefreshToken, sess.RefreshExpiresAt)
 		return http.StatusOK, newSessionResponse(sess, h.accessTTL), nil
+	})
+}
+
+// sendEmailChangeOTP 是 `POST /api/me/email/otp`（票 #72）。
+//
+// 状态码与判据：
+//
+//	401 SESSION_INVALID     没有/无效的 access token
+//	400 BAD_REQUEST         邮箱格式不对（文案带原因）或请求体不是 JSON
+//	409 EMAIL_TAKEN         新地址已被**别的**账号占用
+//	400 EMAIL_UNCHANGED     新地址与当前邮箱相同
+//	400 OTP_TOO_SOON        60 秒冷却期内重复发码
+//	503 AUTH_UNAVAILABLE    实例没配邮件且没开 dev echo
+//	429 RATE_LIMITED        撞上登录桶
+//	200 {"status":"sent"}   已发码
+//
+// 为什么响应体与找回密码那条门**同形**（`{"status":"sent"}`）：
+// 前端两条路可以共用同一段"已发送"提示与同一个倒计时组件。但**语义不同**：
+// 找回密码对外恒定 200（防枚举），这里可以如实报错（已登录、目标地址就是
+// 用户自己填的，报错不泄露任何他人的信息）。
+//
+// 为什么不回显验证码（除了 dev echo）：回显等于把"证明你拥有新邮箱"这件事
+// 降级成"你能调这个接口"，换绑的全部意义就没了。dev echo 只在
+// `PR_OTP_DEV_ECHO=1`（本机开发）时打开，且由 service 统一决定。
+func (h *accountSettingsHandler) sendEmailChangeOTP(c *gin.Context) {
+	runWithIdempotency(c, h.auth, scopeEmailChangeOTP, func() (int, any, error) {
+		actor, ok := CurrentUser(c)
+		if !ok {
+			return 0, nil, errSettingsSessionInvalid
+		}
+
+		var req sendEmailChangeOTPRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			return 0, nil, errBadJSON
+		}
+		if strings.TrimSpace(req.Email) == "" {
+			return 0, nil, errEmailChangeFieldsRequired
+		}
+
+		devCode, err := h.auth.SendEmailChangeOTP(c.Request.Context(),
+			actor.ID, req.Email, c.ClientIP(), c.Request.UserAgent())
+		if err != nil {
+			return 0, nil, err
+		}
+		if devCode != "" {
+			// 仅 PR_OTP_DEV_ECHO=1 时可达。字段名与注册/找回那条门一致，
+			// 前端与真机脚本读的是同一个键。
+			return http.StatusOK, gin.H{"status": "sent", "devCode": devCode}, nil
+		}
+		return http.StatusOK, gin.H{"status": "sent"}, nil
+	})
+}
+
+// confirmEmailChange 是 `PUT /api/me/email`（票 #72）。
+//
+// 状态码与判据：
+//
+//	401 SESSION_INVALID        没有/无效的 access token
+//	400 BAD_REQUEST            少填一栏、地址格式不对、验证码不对（OTP_INVALID）
+//	409 EMAIL_TAKEN            发码与确认之间这个地址被别人抢走了
+//	403 FORBIDDEN              账号被封禁
+//	429 RATE_LIMITED           撞上登录桶（也是一个验证码猜测面）
+//	200 + 更新后的 Profile     换绑成功，email 已是新地址、emailVerified 为 true
+//
+// 为什么回完整 Profile 而不是 204：前端要立刻把"未验证邮箱"的提示撤掉、
+// 把邮箱显示改成新地址。让它再发一次 `GET /api/auth/me` 意味着中间那一帧
+// 界面上还挂着旧地址（用户会以为没成功而再点一次确认，那第二次必然失败
+// —— 码是单次使用的）。
+func (h *accountSettingsHandler) confirmEmailChange(c *gin.Context) {
+	runWithIdempotency(c, h.auth, scopeEmailChangeConfirm, func() (int, any, error) {
+		actor, ok := CurrentUser(c)
+		if !ok {
+			return 0, nil, errSettingsSessionInvalid
+		}
+
+		var req confirmEmailChangeRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			return 0, nil, errBadJSON
+		}
+		if strings.TrimSpace(req.Email) == "" || strings.TrimSpace(req.Code) == "" {
+			return 0, nil, errEmailChangeFieldsRequired
+		}
+
+		if err := h.auth.ConfirmEmailChange(c.Request.Context(), actor.ID, req.Email, req.Code); err != nil {
+			return 0, nil, err
+		}
+
+		// 回读一次拿最新 Profile（换绑只改 users 一行，代价是一次主键查询）。
+		//
+		// 这里**不**复用 actor：那是中间件在请求开始时读到的快照，邮箱还是旧的。
+		prof, err := h.auth.Me(c.Request.Context(), actor.ID)
+		if err != nil {
+			// 换绑已经落库了，回读失败不该让用户看到"失败"（他会再点一次，
+			// 而码已经用掉了）。回 200 + 空 profile 更糟（前端会显示空邮箱），
+			// 所以这里如实报错但把日志写清楚：用户刷新一次就能看到正确状态。
+			return 0, nil, err
+		}
+		return http.StatusOK, prof, nil
 	})
 }
 

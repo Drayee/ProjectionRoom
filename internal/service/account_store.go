@@ -106,6 +106,11 @@ func (a *AccountStoreAdapter) ConsumeEmailOTP(ctx context.Context, userID int64,
 	return a.store.ConsumeEmailOTP(ctx, userID, otpHash, maxAttempts)
 }
 
+// ConsumeEmailOTPFor 只认发给指定地址的码（票 #72 的换绑邮箱）。
+func (a *AccountStoreAdapter) ConsumeEmailOTPFor(ctx context.Context, userID int64, email, otpHash string, maxAttempts int) (bool, error) {
+	return a.store.ConsumeEmailOTPFor(ctx, userID, email, otpHash, maxAttempts)
+}
+
 func (a *AccountStoreAdapter) CountRecentEmailOTP(ctx context.Context, userID int64, since time.Time) (int64, error) {
 	return a.store.CountRecentEmailOTP(ctx, userID, since)
 }

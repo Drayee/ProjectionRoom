@@ -350,6 +350,19 @@ func (f *fakeAccountService) ChangeMyPassword(_ context.Context, _ int64, _, _, 
 	return nil, service.ErrSessionInvalid
 }
 
+// SendEmailChangeOTP / ConfirmEmailChange 是「自助换绑邮箱」那两个端点（票 #72）。
+//
+// 与上面的 ChangeMyPassword 同一条理由：本文件的用例跑的都是 `/api/auth/*`，
+// 换绑端点在 `/api/me/email*`，由 account_settings_test.go 用**真**服务覆盖。
+// 这里回明确错误，是为了让"某条用例意外打到了换绑端点"立刻暴露。
+func (f *fakeAccountService) SendEmailChangeOTP(_ context.Context, _ int64, _, _, _ string) (string, error) {
+	return "", service.ErrSessionInvalid
+}
+
+func (f *fakeAccountService) ConfirmEmailChange(_ context.Context, _ int64, _, _ string) error {
+	return service.ErrSessionInvalid
+}
+
 func (f *fakeAccountService) ReserveIdempotency(_ context.Context, _, _, _ string, _ time.Duration) (*store.IdempotencyRecord, error) {
 	return nil, nil
 }

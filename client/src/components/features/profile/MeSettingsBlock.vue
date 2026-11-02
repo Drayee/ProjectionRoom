@@ -127,6 +127,127 @@ async function submit(): Promise<void> {
   }
 }
 
+// ---------- 换绑邮箱（票 #72） ----------
+
+/**
+ * 两段式：先把码发到**新地址**，再凭码确认。
+ *
+ * 为什么不能一步完成（把码发到当前邮箱）：那样证明的只是"我是主人"（会话已经
+ * 证明了），而"我能读到这个新邮箱"根本没被验证。拿到会话的攻击者只要让受害者
+ * 收到一封信（那封信受害者不会细看）就能把账号绑到自己邮箱上，随后走找回密码接管。
+ *
+ * 阶段用 `emailStep` 表示而不是两个独立表单：用户在同一次操作里先发码后确认，
+ * 中间那个"码已寄出"的状态必须可见（否则他会以为按钮没生效而连点）。
+ */
+const emailForm = reactive({ next: '', code: '' })
+const emailStep = ref<'idle' | 'sent'>('idle')
+const emailBusy = ref(false)
+const emailNotice = ref('')
+const emailError = ref('')
+/** 逐栏错误：地址那一栏与验证码那一栏。 */
+const emailFieldError = reactive({ next: '', code: '' })
+const emailSlot = createIdempotencySlot()
+
+/** dev echo 回显的验证码（仅本机 `PR_OTP_DEV_ECHO=1`）。生产恒为空串。 */
+const devCodeHint = ref('')
+
+function resetEmailErrors(): void {
+  emailFieldError.next = ''
+  emailFieldError.code = ''
+}
+
+/** 发码：把 6 位数字寄到用户填的新地址。 */
+async function sendEmailCode(): Promise<void> {
+  if (emailBusy.value) return
+  emailNotice.value = ''
+  emailError.value = ''
+  resetEmailErrors()
+  devCodeHint.value = ''
+
+  const target = emailForm.next.trim()
+  if (target === '') {
+    emailFieldError.next = '请填写新邮箱'
+    return
+  }
+
+  emailBusy.value = true
+  try {
+    const result = await auth.sendEmailChangeOTP({
+      email: target,
+      idempotencyKey: emailSlot.for({ e: target }),
+    })
+    emailStep.value = 'sent'
+    emailForm.code = ''
+    emailNotice.value = `验证码已发到 ${target}，请查收后填入下方。`
+    // dev echo 时顺手把它显示出来 —— 本机开发没有真邮箱，看不到码就走不完流程。
+    if (result.devCode !== '') devCodeHint.value = result.devCode
+  } catch (err) {
+    const e = toHttpError(err)
+    if (e.offline) {
+      emailError.value = NETWORK_MESSAGE
+    } else if (e.code === 'EMAIL_TAKEN') {
+      // 服务端只说"这个地址已被别的账号绑定"，不透露是谁 —— 前端也不该猜。
+      emailFieldError.next = '这个邮箱已被其他账号绑定，换一个吧。'
+    } else if (e.status === 401) {
+      emailError.value = '登录状态已失效，请重新登录后再换绑。'
+    } else if (e.status === 400 || e.status === 429) {
+      // 400：格式不对 / 与当前相同；429：60 秒冷却。
+      emailFieldError.next = e.message
+    } else {
+      emailError.value = e.message
+    }
+  } finally {
+    emailBusy.value = false
+  }
+}
+
+/** 确认换绑：凭码把邮箱换成新地址，成功后服务端回的 Profile 由 store 落地。 */
+async function confirmEmailCode(): Promise<void> {
+  if (emailBusy.value) return
+  emailNotice.value = ''
+  emailError.value = ''
+  resetEmailErrors()
+
+  const target = emailForm.next.trim()
+  const code = emailForm.code.trim()
+  if (code === '') {
+    emailFieldError.code = '请填写验证码'
+    return
+  }
+
+  emailBusy.value = true
+  try {
+    await auth.confirmEmailChange({
+      email: target,
+      code,
+      idempotencyKey: emailSlot.for({ e: target, c: code }),
+    })
+    emailStep.value = 'idle'
+    emailForm.next = ''
+    emailForm.code = ''
+    devCodeHint.value = ''
+    // 清空 = 新意图，旧幂等键作废（否则下次换绑会回放这次的成功响应）。
+    emailSlot.reset()
+    emailNotice.value = '邮箱已更新，之后的找回密码会发到新地址。'
+  } catch (err) {
+    const e = toHttpError(err)
+    if (e.offline) {
+      emailError.value = NETWORK_MESSAGE
+    } else if (e.status === 401) {
+      emailError.value = '登录状态已失效，请重新登录后再换绑。'
+    } else if (e.status === 409) {
+      // 发码与确认之间这个地址被别人抢走了 —— 用户要换一个。
+      emailFieldError.next = '这个邮箱刚被其他账号绑定了，换一个吧。'
+    } else if (e.status === 400) {
+      emailFieldError.code = e.message
+    } else {
+      emailError.value = e.message
+    }
+  } finally {
+    emailBusy.value = false
+  }
+}
+
 // ---------- 退出所有设备 ----------
 
 const kickingAll = ref(false)
@@ -288,10 +409,82 @@ watch(
       <p v-if="kickError" class="alert" role="alert" data-testid="kickall-error">{{ kickError }}</p>
     </section>
 
+    <!-- ---------- 换绑邮箱（票 #72） ---------- -->
+    <section class="card" aria-labelledby="me-email-head">
+      <h2 id="me-email-head" class="sect-title">换绑邮箱</h2>
+      <p class="dim small">
+        验证码会发到**新**邮箱 —— 那是在证明你能读到它。换绑成功后旧邮箱立刻失效，
+        之后的「找回密码」会发到新地址。
+      </p>
+
+      <form class="form" @submit.prevent="emailStep === 'idle' ? sendEmailCode() : confirmEmailCode()">
+        <div class="field">
+          <label for="me-email-next">新邮箱</label>
+          <input
+            id="me-email-next"
+            v-model="emailForm.next"
+            type="email"
+            autocomplete="email"
+            inputmode="email"
+            data-testid="email-next"
+            :disabled="emailBusy"
+            :aria-invalid="emailFieldError.next !== ''"
+          />
+          <p v-if="emailFieldError.next" class="alert" role="alert" data-testid="email-next-error">
+            {{ emailFieldError.next }}
+          </p>
+        </div>
+
+        <div v-if="emailStep === 'sent'" class="field">
+          <label for="me-email-code">验证码</label>
+          <input
+            id="me-email-code"
+            v-model="emailForm.code"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            maxlength="6"
+            data-testid="email-code"
+            :disabled="emailBusy"
+            :aria-invalid="emailFieldError.code !== ''"
+          />
+          <p v-if="emailFieldError.code" class="alert" role="alert" data-testid="email-code-error">
+            {{ emailFieldError.code }}
+          </p>
+          <p v-if="devCodeHint" class="dim small" data-testid="email-dev-code">
+            本机开发回显：{{ devCodeHint }}
+          </p>
+        </div>
+
+        <p v-if="emailNotice" class="ok" role="status" data-testid="email-notice">{{ emailNotice }}</p>
+        <p v-if="emailError" class="alert" role="alert" data-testid="email-error">{{ emailError }}</p>
+
+        <div class="actions">
+          <Button
+            type="submit"
+            variant="primary"
+            data-testid="email-submit"
+            :loading="emailBusy"
+          >
+            {{ emailStep === 'idle' ? '发送验证码' : '确认换绑' }}
+          </Button>
+          <Button
+            v-if="emailStep === 'sent'"
+            variant="ghost"
+            data-testid="email-resend"
+            :disabled="emailBusy"
+            @click="sendEmailCode"
+          >
+            重新发送
+          </Button>
+        </div>
+      </form>
+    </section>
+
     <!-- ---------- 只读信息 ---------- -->
     <section class="card" aria-labelledby="me-readonly-head">
       <h2 id="me-readonly-head" class="sect-title">账号信息</h2>
-      <p class="dim small">这些字段目前不能在这里改：用户名固定，邮箱换绑与注销是单独的票。</p>
+      <p class="dim small">这些字段不能在这里改：用户名固定（改用户名不在计划里），邮箱请用上面的「换绑邮箱」，注销账号是单独的票。</p>
       <dl class="kv" data-testid="account-readonly">
         <dt>用户名</dt>
         <dd class="mono">{{ me?.username || '—' }}</dd>

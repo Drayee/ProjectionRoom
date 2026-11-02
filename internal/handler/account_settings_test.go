@@ -113,6 +113,17 @@ func (s *settingsStore) ReleaseIdempotencyKey(_ context.Context, scope, key stri
 
 func newSettingsEnv(t *testing.T) *settingsEnv {
 	t.Helper()
+	return newSettingsEnvWith(t, false)
+}
+
+// newSettingsEnvWith 造引擎，`devEcho` 决定验证码是否明文回显。
+//
+// 为什么需要这个开关：换绑邮箱的用例必须拿到那 6 位数字才能走完确认那一步，
+// 而库里只存 sha256。生产上码只走邮件，测试里唯一既能拿到原文、又不破坏
+// "响应体里没有验证码"这条契约的办法，就是复用 `PR_OTP_DEV_ECHO=1` 那条
+// 本来就存在的开发通道 —— 绝不为了测试方便给接口加一个回显字段。
+func newSettingsEnvWith(t *testing.T, devEcho bool) *settingsEnv {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 
 	cfg := config.Default()
@@ -140,6 +151,7 @@ func newSettingsEnv(t *testing.T) *settingsEnv {
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
 		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
+		OTPDevEcho:     devEcho,
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败：%v", err)
