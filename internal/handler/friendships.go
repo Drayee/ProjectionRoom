@@ -203,6 +203,24 @@ type searchHitView struct {
 	// Relation 是我与这个人的关系：none|friend|pending-out|pending-in|blocked。
 	// 前端据此决定按钮显示什么、能不能点。
 	Relation string `json:"relation"`
+	// 下面四个是**关注域**的事实（票 #58）。
+	//
+	// 为什么在 `relation` 之外再加一组：`relation` 说的是 friendships 表里的
+	// 请求流水线（#59 之后那条流水线会退役），而好友页的按钮真正要看的是
+	// 单向关注边的方向 —— "关注 / 已关注 / 回关 / 发消息"四种文案全部由
+	// 这四个布尔决定。让前端拿 relation 去猜方向，等于在客户端重建一份
+	// 关注模型（与铁律 I3 同一类错误）。
+	Following  bool `json:"following"`
+	FollowedBy bool `json:"followedBy"`
+	Mutual     bool `json:"mutual"`
+	CanDM      bool `json:"canDm"`
+	// Blocked 是"我们之间存在拉黑"（**不区分方向**）。
+	//
+	// 与 `relation=blocked` 的区别：relation 只在 friendships 表里那行是 blocked
+	// 时才出现，而拉黑关系从任意一侧都能成立；这里的布尔由关注域的
+	// `FollowStatesFor` 统一算出，是"能不能关注 / 能不能发消息"的判据。
+	// 不告诉用户是**谁**拉黑了谁（那泄露对方视角）。
+	Blocked bool `json:"blocked"`
 }
 
 // blockedEntryView 是黑名单的一行（#39）。
@@ -474,6 +492,17 @@ func (h *friendshipHandler) searchUsers(c *gin.Context) {
 		return
 	}
 
+	// 关注域事实：同样一次批量算（票 #58）。
+	//
+	// 与上面的 relationStatesFor 是**两条独立查询**，因为它们读两张不同的表：
+	// relation 读 friendships（请求流水线），关注域读 follows + blocked。
+	// 合并成一条 SQL 会把两张表的语义缠在一起，而 #59 正要退役前者。
+	followStates, err := h.store.FollowStatesFor(c.Request.Context(), actor.ID, idsOfHits(hits))
+	if err != nil {
+		friendInternal(c, "查询关注状态失败", err)
+		return
+	}
+
 	items := make([]searchHitView, 0, len(hits))
 	for i := range hits {
 		relation := relations[hits[i].ID]
@@ -483,14 +512,29 @@ func (h *friendshipHandler) searchUsers(c *gin.Context) {
 			// 正常路径上 map 里一定有值（RelationStateOf 对 nil 行也返回 none）。
 			relation = store.RelationNone
 		}
+		fs := followStates[hits[i].ID]
 		items = append(items, searchHitView{
 			UserID:      hits[i].ID,
 			Username:    hits[i].Username,
 			DisplayName: hits[i].DisplayName,
 			Relation:    relation,
+			Following:   fs.Following,
+			FollowedBy:  fs.FollowedBy,
+			Mutual:      fs.Mutual(),
+			CanDM:       fs.CanDM(),
+			Blocked:     fs.Blocked,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+// idsOfHits 把搜索结果压成 id 切片（供批量查询用）。
+func idsOfHits(hits []store.UserSearchHit) []int64 {
+	ids := make([]int64, 0, len(hits))
+	for _, h := range hits {
+		ids = append(ids, h.ID)
+	}
+	return ids
 }
 
 // relationStatesFor 批量算出"我与这批人各自是什么关系"。

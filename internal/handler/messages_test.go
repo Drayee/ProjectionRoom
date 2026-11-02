@@ -238,16 +238,19 @@ func newMsgEnv(t *testing.T) *msgEnv {
 		t.Fatalf("签发 bob token 失败：%v", err)
 	}
 
-	// §7.2 之后私聊限定在**好友之间**（store.SendDM 会返回 ErrMessageNotFriends）。
-	// 夹具默认让 alice 与 bob 成为好友：本文件的绝大多数用例验的是"发送/历史/已读/会话"
-	// 这些**在好友前提下**的行为，而不是关系门槛本身。
-	// 关系门槛单独由 TestMessagesSendRejectsNonFriend 覆盖（它用第三个用户）。
-	req, err := st.CreateFriendshipRequest(ctx, alice.ID, bob.ID)
-	if err != nil {
-		t.Fatalf("建好友请求失败：%v", err)
+	// 私聊门闩在票 #57 从 `areFriends(accepted)` 换成了 **can_dm ≡ 互关 ∧ ¬拉黑**。
+	// 于是夹具不能再靠"建一条 accepted 好友请求"来满足门槛 —— 那行 friendships
+	// 在新口径下**不再是好友的真源**，SendDM 只认 follows 表的双向边。
+	// 这里直接建两条方向相反的关注边（互关 = 好友），与 store/messages_test.go 的
+	// fixtureFollowPair 同一做法。
+	//
+	// 历史教训：这段在 #57 之后没跟着迁移，而本文件只在设了 PR_TEST_DB_DSN 时才跑，
+	// 于是"没人跑的用例"静默红了很久 —— 修它比绕过它更重要。
+	if _, _, err := st.CreateFollow(ctx, alice.ID, bob.ID); err != nil {
+		t.Fatalf("建 alice→bob 关注边失败：%v", err)
 	}
-	if _, err := st.AcceptFriendshipRequest(ctx, req.ID, bob.ID); err != nil {
-		t.Fatalf("接受好友请求失败：%v", err)
+	if _, _, err := st.CreateFollow(ctx, bob.ID, alice.ID); err != nil {
+		t.Fatalf("建 bob→alice 关注边失败：%v", err)
 	}
 
 	return &msgEnv{
@@ -452,12 +455,14 @@ func TestMessagesSendRejectsNonFriend(t *testing.T) {
 	}
 
 	// 对照：成为好友之后同一条消息可以发出去（证明拒绝的是"关系"，不是别的原因）。
-	req, err := env.st.CreateFriendshipRequest(ctx, stranger.ID, env.alice.ID)
-	if err != nil {
-		t.Fatalf("建好友请求失败：%v", err)
+	//
+	// 票 #57 之后"成为好友"= **互关**（can_dm ≡ mutual_follow ∧ ¬blocked），
+	// 不再是一条 accepted 的 friendships 行 —— 所以这里必须补两条关注边。
+	if _, _, err := env.st.CreateFollow(ctx, stranger.ID, env.alice.ID); err != nil {
+		t.Fatalf("建 stranger→alice 关注边失败：%v", err)
 	}
-	if _, err := env.st.AcceptFriendshipRequest(ctx, req.ID, env.alice.ID); err != nil {
-		t.Fatalf("接受好友请求失败：%v", err)
+	if _, _, err := env.st.CreateFollow(ctx, env.alice.ID, stranger.ID); err != nil {
+		t.Fatalf("建 alice→stranger 关注边失败：%v", err)
 	}
 	w = env.do(t, http.MethodPost, "/api/messages", strangerTok, gin.H{
 		"recipientId": env.alice.ID, "body": "现在是好友了",

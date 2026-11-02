@@ -24,7 +24,7 @@ import { HttpError, requestJSON } from '../http'
 import { CapabilityUnavailable } from '../mode'
 import { useAuthStore } from '../../stores/auth'
 import type { AuthedFetch } from '../http'
-import type { FollowRelation } from '../../types/follows'
+import type { FollowListEntry, FollowListTab, FollowRelation } from '../../types/follows'
 
 /** 取认证 fetch（延迟到调用时：模块加载期 Pinia 可能还没装配）。 */
 function fetcher(): AuthedFetch {
@@ -120,6 +120,51 @@ export async function follow(userId: number): Promise<FollowRelation> {
 export async function unfollow(userId: number): Promise<void> {
   try {
     await requestJSON<null>(fetcher(), '/api/follows/' + userId, { method: 'DELETE' })
+  } catch (err) {
+    throw toFollowsError(err)
+  }
+}
+
+/** 服务端名单的一行（票 #58 的 `followListEntryView`）。 */
+interface ServerFollowListEntry {
+  userId: number
+  username: string
+  displayName: string
+  following: boolean
+  followedBy: boolean
+  mutual: boolean
+  canDm: boolean
+}
+
+/** 名单方向 → 服务端的 `?tab=` 值（只有三个，黑名单不在这里）。 */
+function toListEntry(raw: ServerFollowListEntry): FollowListEntry {
+  return {
+    userId: raw.userId,
+    username: raw.username ?? '',
+    displayName: raw.displayName || '未知用户',
+    following: raw.following === true,
+    followedBy: raw.followedBy === true,
+    mutual: raw.mutual === true,
+    canDm: raw.canDm === true,
+  }
+}
+
+/**
+ * 名单（票 #58）：好友（互关）/ 关注 / 粉丝。
+ *
+ * 一次请求取全量：服务端没有分页（名单规模由真实社交图决定，
+ * 而分页会让"刚关注的人不在第一页"变成一个新的解释成本）。
+ *
+ * 与 `getRelation` 同一套错误分诊：路由未注册的 404 → `CapabilityUnavailable`，
+ * 其余（含 401）原样上抛。
+ */
+export async function listFollowList(tab: FollowListTab): Promise<FollowListEntry[]> {
+  try {
+    const body = await requestJSON<{ items: ServerFollowListEntry[] }>(
+      fetcher(),
+      '/api/follows?tab=' + encodeURIComponent(tab),
+    )
+    return (body?.items ?? []).map(toListEntry)
   } catch (err) {
     throw toFollowsError(err)
   }

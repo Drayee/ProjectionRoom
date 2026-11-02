@@ -71,6 +71,28 @@ export type RelationState = 'none' | 'friend' | 'pending-out' | 'pending-in' | '
 
 export interface SearchHit extends PersonRef {
   relation: RelationState
+  /**
+   * 关注域的四个事实（票 #58）。
+   *
+   * 为什么搜索结果要带这一组：好友页的结果行按**关注方向**给按钮
+   * （关注 / 已关注 / 回关 / 发消息），而这四个布尔是服务端算好的权威值。
+   * 让前端拿 `relation` 去推方向，等于在客户端重建一份关注模型（违反 I3）。
+   *
+   * 旧实现（`api/mock/friends.ts`）没有这四个字段，所以类型上做成可选：
+   * 缺省时页面按 `relation` 回退（兼容路径），有值时优先用它们。
+   */
+  following?: boolean
+  followedBy?: boolean
+  mutual?: boolean
+  canDm?: boolean
+  /**
+   * 我们之间存在拉黑（**不区分方向**）。
+   *
+   * 拉黑存续期整个不给关注按钮（GLOSSARY：拉黑存续期禁止新关注）。
+   * 与 `relation === 'blocked'` 的区别：后者只反映 friendships 表里那行的状态，
+   * 而拉黑从任意一侧成立都算 —— 这个布尔由关注域统一算出。
+   */
+  blocked?: boolean
 }
 
 /** 黑名单里的一行。解除拉黑按 `userId`（`DELETE /api/blocks/:userId`，#39）。 */

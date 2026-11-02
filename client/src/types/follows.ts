@@ -58,3 +58,31 @@ export interface FollowRelation {
  * 而**能不能关注**的最终判据始终在服务端（403）。
  */
 export type FollowAction = 'none' | 'following' | 'follow-back' | 'mutual' | 'blocked' | 'self'
+
+/**
+ * 名单方向（票 #58）。
+ *
+ * 三个值与服务端的 `?tab=` 逐字一致，且**只有三个**：黑名单不是关注名单的一种，
+ * 它走 `/api/blocks`（拉黑是另一张表的另一件事）。界面上四个 tab 里那个
+ * `blocked` 由 `FriendsTab` 表达，两者的差别见 `utils/friendsRoute.ts`。
+ */
+export type FollowListTab = 'mutual' | 'following' | 'followers'
+
+/**
+ * 名单里的一行（服务端 `followListEntryView`）。
+ *
+ * 与 `FollowRelation` 的区别：没有计数（名单页不显示计数），但**带 username**
+ * —— 两个同昵称的人在同一列里只能靠账号名区分。
+ *
+ * 拉黑方向**不在**这里：名单本身已经被服务端滤掉了被拉黑的人，
+ * 所以"是否拉黑"在这个形状里没有消费者。
+ */
+export interface FollowListEntry {
+  userId: number
+  username: string
+  displayName: string
+  following: boolean
+  followedBy: boolean
+  mutual: boolean
+  canDm: boolean
+}

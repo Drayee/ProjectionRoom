@@ -17,7 +17,7 @@
  * （1 月夜猫 … 8 小满），否则 mock 态里「点进某人的主页」会看到另一个名字。
  */
 import { HttpError } from '../http'
-import type { FollowRelation } from '../../types/follows'
+import type { FollowListEntry, FollowListTab, FollowRelation } from '../../types/follows'
 
 /** 当前登录用户 id：与 api/mock/friends.ts、api/mock/posts.ts 的「我」一致。 */
 const CURRENT_USER_ID = 1
@@ -40,9 +40,30 @@ const BLOCKED_BY_ME = new Set<number>([6])
 /** 谁拉黑了我（拉黑存续期同样禁止关注，且方向不区分）。 */
 const BLOCKED_ME = new Set<number>([7])
 
-/** 关注边集合：键是 follower + '->' + followee。 */
-const edges = new Set<string>()
+/**
+ * 关注边集合：键是 follower + '->' + followee。
+ *
+ * 种子与 `api/mock/friends.ts` 的关系种子对齐（那边是旧模型：accepted/pending，
+ * 本票之后「好友」只剩互关一种表达，见 #42 决议）：
+ *
+ *   - 1 ⇄ 2  互关（好友：放映员）
+ *   - 1 ⇄ 3  互关（好友：阿梓）
+ *   - 4 → 1  夜猫子关注了我，我没回关（粉丝 tab 里应显示「回关」）
+ *   - 1 → 5  我关注了喵喵，TA 没回关（关注 tab 里应显示「已关注」）
+ *
+ * 种子里**必须**有互关的人：好友页默认落在「好友」tab，全空的话
+ * `verify-avatar` 那类"好友行里有头像"的判据会没有行可查（假红）。
+ */
+const edges = new Set<string>([
+  edgeKey(1, 2),
+  edgeKey(2, 1),
+  edgeKey(1, 3),
+  edgeKey(3, 1),
+  edgeKey(4, 1),
+  edgeKey(1, 5),
+])
 
+/** 边键（函数声明会提升，所以上面的初始化里可以直接用）。 */
 function edgeKey(follower: number, followee: number): string {
   return follower + '->' + followee
 }
@@ -119,8 +140,94 @@ export async function follow(userId: number): Promise<FollowRelation> {
   return relationOf(userId)
 }
 
+/**
+ * 关注域的「快照」（给别的 mock 域复用）。
+ *
+ * 存在的理由：好友页的搜索结果行要显示「关注 / 已关注 / 回关 / 发消息」，
+ * 而那份事实的真源在**本文件**（关注边集合）。`api/mock/friends.ts` 的
+ * `searchUsers` 需要同一组布尔 —— 让它在自己那边再算一遍，就等于给
+ * 同一个派生造了第二个 owner（mock 态里两份会漂移，而 mock 漂移的症状
+ * 是"验收过了、翻真翻车"）。
+ */
+export function mockFollowSnapshot(userId: number): {
+  following: boolean
+  followedBy: boolean
+  mutual: boolean
+  canDm: boolean
+  blocked: boolean
+} {
+  const rel = relationOf(userId)
+  return {
+    following: rel.following,
+    followedBy: rel.followedBy,
+    mutual: rel.mutual,
+    canDm: rel.canDm,
+    blocked: isBlockedEither(CURRENT_USER_ID, userId),
+  }
+}
+
 /** 取关（幂等：重复取关不报错）。 */
 export async function unfollow(userId: number): Promise<void> {
   if (!Number.isInteger(userId) || userId <= 0) throw http(400, 'BAD_REQUEST', '用户 id 不合法')
   edges.delete(edgeKey(CURRENT_USER_ID, userId))
+}
+
+/**
+ * 名单（票 #58）：好友（互关）/ 关注 / 粉丝。
+ *
+ * 与真实实现对齐的语义：
+ *
+ *  1. **被拉黑的人双向隐藏**（我拉黑的 + 拉黑我的都滤掉）；
+ *  2. **按关注时间倒序** —— mock 没有时间，退化成按 id 倒序，
+ *     但顺序**必须稳定**（同一份名单两次渲染顺序不同会让界面闪）；
+ *  3. 未知 tab 抛错（不猜）。
+ */
+export async function listFollowList(tab: FollowListTab): Promise<FollowListEntry[]> {
+  const want = (id: number): boolean => {
+    const following = edges.has(edgeKey(CURRENT_USER_ID, id))
+    const followedBy = edges.has(edgeKey(id, CURRENT_USER_ID))
+    if (tab === 'mutual') return following && followedBy
+    if (tab === 'following') return following
+    if (tab === 'followers') return followedBy
+    throw http(400, 'BAD_REQUEST', 'tab 必须是 mutual / following / followers')
+  }
+
+  return PEOPLE.filter((p) => p.id !== CURRENT_USER_ID)
+    .filter((p) => !isBlockedEither(CURRENT_USER_ID, p.id))
+    .filter((p) => want(p.id))
+    .sort((a, b) => b.id - a.id)
+    .map((p) => {
+      const rel = relationOf(p.id)
+      return {
+        userId: p.id,
+        username: usernameOf(p.id),
+        displayName: p.displayName,
+        following: rel.following,
+        followedBy: rel.followedBy,
+        mutual: rel.mutual,
+        canDm: rel.canDm,
+      }
+    })
+}
+
+/**
+ * 账号名。
+ *
+ * mock 目录里只有 displayName，而名单行**必须**带 username（两个同昵称的人
+ * 靠它区分）。这里按与 `api/mock/friends.ts` 一致的 8 个账号名给一份映射 ——
+ * 两边不一致的症状是"名单里显示 @mooncat、好友页显示 @miao"。
+ */
+const USERNAMES: Record<number, string> = {
+  1: 'mooncat',
+  2: 'projectionist',
+  3: 'azi',
+  4: 'nightowl',
+  5: 'miao',
+  6: 'stray_cat',
+  7: 'unit07',
+  8: 'xiaoman',
+}
+
+function usernameOf(id: number): string {
+  return USERNAMES[id] ?? 'user' + id
 }

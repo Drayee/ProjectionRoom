@@ -80,6 +80,31 @@ type followView struct {
 	FollowingCount int64 `json:"followingCount"`
 }
 
+// followListEntryView 是名单里的一行（票 #58）。
+//
+// 与 followView 的区别：followView 说的是"我与某一个**已知**的人是什么关系"，
+// 这里说的是"这批人分别与我是什么关系" —— 没有计数（名单页不显示计数，
+// 那是档案页的事），但必须带 username：搜索结果与名单行都要能回显账号名，
+// 否则两个同昵称的人在一列里无法区分。
+//
+// **刻意不含拉黑方向**：名单只列"可见的人"，被拉黑的人根本不出现在这里
+// （store 层的可见性过滤已经滤掉），所以"是否拉黑"这个字段在名单里没有消费者。
+// 多带一个字段就等于多一个能被子系统读错的信号（#39 的搜索结果才有 blocked，
+// 因为搜索是解除拉黑的唯一入口）。
+type followListEntryView struct {
+	UserID      int64  `json:"userId"`
+	Username    string `json:"username"`
+	DisplayName string `json:"displayName"`
+	// Following 是"我关注了 TA"。
+	Following bool `json:"following"`
+	// FollowedBy 是"TA 关注了我"。
+	FollowedBy bool `json:"followedBy"`
+	// Mutual 是互关（= 好友）。
+	Mutual bool `json:"mutual"`
+	// CanDM 是"我能给 TA 发私聊"。
+	CanDM bool `json:"canDm"`
+}
+
 // followTargetRequest 是 POST /api/follows 的请求体。
 //
 // 只收 userId：**不接受**方向参数（"我要关注 TA"的方向由登录身份决定，
@@ -108,6 +133,7 @@ func registerFollowRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Con
 		}
 		api.POST("/follows", unavailable)
 		api.DELETE("/follows/:userId", unavailable)
+		api.GET("/follows", unavailable)
 		api.GET("/follows/:userId", unavailable)
 		return
 	}
@@ -125,6 +151,12 @@ func registerFollowRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Con
 	authed := api.Group("", RequireAuth(auth))
 	authed.POST("/follows", writeLimiter, h.create)
 	authed.DELETE("/follows/:userId", writeLimiter, h.remove)
+	// 名单（票 #58）注册在 `/follows` 上，与 `/follows/:userId` 并存。
+	//
+	// gin 1.12 的路由树对"静态段 + 参数段"同层并存是允许的（静态优先匹配），
+	// 所以 `/api/follows?tab=mutual` 与 `/api/follows/42` 不会互相吞掉。
+	// 它同样走只读桶：名单是幂等纯读，与关系查询同一档位。
+	authed.GET("/follows", readLimiter, h.list)
 	authed.GET("/follows/:userId", readLimiter, h.state)
 }
 
@@ -267,6 +299,54 @@ func (h *followHandler) state(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, view)
+}
+
+// list 是 `GET /api/follows?tab=mutual|following|followers`（票 #58）。
+//
+// 好友页的三张名单（好友=互关 / 关注 / 粉丝）都从这里取数。
+//
+// 三条设计：
+//
+//  1. **tab 必填且大小写敏感**：缺失 / 空 / 未知值一律 400，不做"默认返回互关"。
+//     默认值属于**界面**（`utils/friendsRoute.ts` 的 `FRIENDS_DEFAULT_TAB`），
+//     接口猜一个的后果是"界面显示了另一份名单"这种最难复现的错。
+//  2. **匿名 401**：名单是私有事实（与 `GET /follows/:userId` 同一条理由）。
+//  3. **空名单回 `[]` 不回 `null`**：`items` 是切片且用 `make(...,0,n)` 造，
+//     所以"新用户没有任何关注"这条最常见的首次路径不会让前端 `v-for` 炸掉。
+//
+// 可见性（被拉黑的双向隐藏、被封禁的隐藏）**全部在 store 层**（`ListFollowList`）：
+// 这里再写一份过滤就是给同一个规则造第二个 owner。
+func (h *followHandler) list(c *gin.Context) {
+	actor, ok := CurrentUser(c)
+	if !ok {
+		abortUnauthorized(c, CodeSessionInvalid, "登录状态无效，请重新登录")
+		return
+	}
+
+	tab := store.FollowListTab(strings.TrimSpace(c.Query("tab")))
+	entries, err := h.store.ListFollowList(c.Request.Context(), actor.ID, tab)
+	if err != nil {
+		if errors.Is(err, store.ErrFollowListBadTab) {
+			adminBadRequest(c, "tab 必须是 mutual / following / followers")
+			return
+		}
+		friendInternal(c, "查询关注名单失败", err)
+		return
+	}
+
+	items := make([]followListEntryView, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, followListEntryView{
+			UserID:      e.UserID,
+			Username:    e.Username,
+			DisplayName: e.DisplayName,
+			Following:   e.Following,
+			FollowedBy:  e.FollowedBy,
+			Mutual:      e.Mutual(),
+			CanDM:       e.CanDM(),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 // viewOf 组装响应视图（关系 + 互关 + 可私聊 + 对方的两个计数）。

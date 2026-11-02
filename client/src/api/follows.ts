@@ -33,6 +33,7 @@ type FollowsApi = {
   getRelation(userId: number): Promise<import('../types/follows').FollowRelation>
   follow(userId: number): Promise<import('../types/follows').FollowRelation>
   unfollow(userId: number): Promise<void>
+  listFollowList(tab: import('../types/follows').FollowListTab): Promise<import('../types/follows').FollowListEntry[]>
 }
 
 const impl: FollowsApi = isMock('follows') ? mock : real
@@ -40,6 +41,7 @@ const impl: FollowsApi = isMock('follows') ? mock : real
 export const getRelation = impl.getRelation
 export const follow = impl.follow
 export const unfollow = impl.unfollow
+export const listFollowList = impl.listFollowList
 
 /** 类型再导出：页面从门面拿类型，不必知道 `types/follows.ts` 的位置。 */
-export type { FollowAction, FollowRelation } from '../types/follows'
+export type { FollowAction, FollowListEntry, FollowListTab, FollowRelation } from '../types/follows'

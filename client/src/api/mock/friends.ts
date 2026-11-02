@@ -20,6 +20,7 @@
  */
 import { HttpError } from '../http'
 import { avatarOf } from '../../utils/avatar'
+import { mockFollowSnapshot } from './follows'
 import type {
   BlockedEntry,
   FriendEntry,
@@ -157,7 +158,13 @@ export async function searchUsers(query: string): Promise<SearchHit[]> {
   if (q === '') return []
   return PEOPLE.filter((p) => p.id !== CURRENT_USER_ID)
     .filter((p) => p.username.toLowerCase().includes(q) || p.displayName.toLowerCase().includes(q))
-    .map((p) => ({ ...refOf(p), relation: relationStateOf(p.id) }))
+    .map((p) => ({
+      ...refOf(p),
+      relation: relationStateOf(p.id),
+      // 关注域事实由 api/mock/follows.ts 统一算（票 #58）：两份 mock 各算一遍
+      // 会漂移，而 mock 漂移的症状是"验收过了、翻真翻车"。
+      ...mockFollowSnapshot(p.id),
+    }))
 }
 
 /** 发起好友请求。裁决顺序与服务端 `CreateFriendshipRequest` 一致（先看已有关系再落行）。 */

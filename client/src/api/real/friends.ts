@@ -71,6 +71,13 @@ interface ServerSearchHit {
   displayName: string
   /** none|friend|pending-out|pending-in|blocked（服务端一次算好）。 */
   relation: string
+  /** 关注域事实（票 #58）：按钮按这四个布尔决定文案。 */
+  following?: boolean
+  followedBy?: boolean
+  mutual?: boolean
+  canDm?: boolean
+  /** 存在拉黑（不区分方向）：存续期不给关注按钮。 */
+  blocked?: boolean
 }
 
 /** 服务端黑名单的一行（`GET /api/blocks`，#39）。 */
@@ -175,6 +182,11 @@ export async function searchUsers(keyword: string): Promise<SearchHit[]> {
       displayName: raw.displayName || '未知用户',
       ...avatarOf(raw.userId, raw.displayName),
       relation: toRelation(raw.relation),
+      following: raw.following === true,
+      followedBy: raw.followedBy === true,
+      mutual: raw.mutual === true,
+      canDm: raw.canDm === true,
+      blocked: raw.blocked === true,
     }))
   } catch (err) {
     throw toCapabilityUnavailable('friends', err)

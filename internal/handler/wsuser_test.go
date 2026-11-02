@@ -74,15 +74,27 @@ func newUserWSEnv(t *testing.T) *userWSEnv {
 	if err := st.CreateUser(ctx, bob); err != nil {
 		t.Fatalf("建 bob 失败：%v", err)
 	}
-	// alice 与 bob 默认是好友：§7.2 之后私聊限定在好友之间，
-	// 而本文件的投递用例验的是"推没推到"，不是关系门槛本身。
-	// （TestPresenceOnlyToFriends 会另建 carol 作为"非好友"的对照。）
+	// alice 与 bob 默认是好友。
+	//
+	// 这里要同时建**两套**关系，原因是两处判据的真源还没统一（票 #59 收口）：
+	//   · 私聊门槛（store.SendDM）在 #57 之后读 **follows 的互关**（can_dm）；
+	//   · presence 的好友范围（service.RealtimePusher.FriendIDs）仍读
+	//     friendships 的 accepted 行。
+	// 只建其中一套会让另一半用例静默红（本文件此前只在设了 PR_TEST_DB_DSN 时才跑，
+	// 所以 #57 换门槛后这里没人发现）。#59 把 FriendIDs 也切到 follows 之后，
+	// 上面那条 accepted 请求可以删掉。
 	reqAB, err := st.CreateFriendshipRequest(ctx, alice.ID, bob.ID)
 	if err != nil {
 		t.Fatalf("建好友请求失败：%v", err)
 	}
 	if _, err := st.AcceptFriendshipRequest(ctx, reqAB.ID, bob.ID); err != nil {
 		t.Fatalf("接受好友请求失败：%v", err)
+	}
+	if _, _, err := st.CreateFollow(ctx, alice.ID, bob.ID); err != nil {
+		t.Fatalf("建 alice→bob 关注边失败：%v", err)
+	}
+	if _, _, err := st.CreateFollow(ctx, bob.ID, alice.ID); err != nil {
+		t.Fatalf("建 bob→alice 关注边失败：%v", err)
 	}
 
 	signer, err := auth.NewSigner(handlerTestSecret, 15*time.Minute)
