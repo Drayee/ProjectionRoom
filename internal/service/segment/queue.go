@@ -593,10 +593,18 @@ func (q *Queue) buildResult(artifacts *Artifacts) (*Result, [][]ArtifactFile, er
 }
 
 // failJob 标记失败并清掉整个作业目录（失败的作业没有任何可用产物）。
+//
+// ⚠ **清理必须在 markFailed 之前**：`StateFailed` 是外部可观察的状态，
+// 观测者（轮询的 HTTP 客户端、验收用例）一看到它就认为"这个作业结束了"。
+// 反过来写会出现一个短暂的窗口：状态已是 failed、目录却还在，
+// 于是"失败作业不留残留目录"这条判据会随机红（实测 `go test ./...` 里
+// `TestProcessorFailureMarksJobFailedAndCleansUp` 偶发失败，报
+// `不应残留作业目录: [job-XXXX]`）。让状态成为**最后**发生的事，
+// 就把这个窗口关掉了。
 func (q *Queue) failJob(job *Job, err error) {
-	job.markFailed(err, q.now())
 	q.removeSource(job)
 	_ = os.RemoveAll(job.dir)
+	job.markFailed(err, q.now())
 }
 
 // removeSource 删除源文件 —— 无论成功还是失败，源文件都不该留在磁盘上。
