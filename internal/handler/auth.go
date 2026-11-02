@@ -128,7 +128,11 @@ type AuthDeps struct {
 	UserHub       *service.UserHub
 	MessagePusher MessagePusher
 	FriendPusher  FriendPusher
-	Presence      PresenceBroadcaster
+	// FollowPusher 是关注事件（票 #67）的出口，与 FriendPusher 分开：
+	// 两者服务不同端点（关注 vs 拉黑），合并会让"建一条关注边"的路径
+	// 也拿到"推拉黑"的能力。生产装配里两者指向同一个 *service.RealtimePusher。
+	FollowPusher FollowPusher
+	Presence     PresenceBroadcaster
 
 	// UserProfile 是用户公开档案与本人资料编辑的出口（wayfinder #33）。
 	//

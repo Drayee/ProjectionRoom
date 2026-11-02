@@ -2,9 +2,11 @@
  * 关注域门面（唯一被页面 import 的出口）。wayfinder #56。
  *
  * 形状：
- *   getRelation(userId)   → FollowRelation（我与 TA 的关系 + TA 的两个计数）
- *   follow(userId)        → FollowRelation（关注后的事实）
- *   unfollow(userId)      → void（取关）
+ *   getRelation(userId)        → FollowRelation（我与 TA 的关系 + TA 的两个计数）
+ *   follow(userId)             → FollowRelation（关注后的事实）
+ *   unfollow(userId)           → void（取关）
+ *   listFollowList(tab)        → FollowListResult（名单 + 粉丝红点数）
+ *   markFollowersSeen()        → void（把粉丝水位线推到"现在"）
  *
  * 三条设计决定：
  *
@@ -33,7 +35,8 @@ type FollowsApi = {
   getRelation(userId: number): Promise<import('../types/follows').FollowRelation>
   follow(userId: number): Promise<import('../types/follows').FollowRelation>
   unfollow(userId: number): Promise<void>
-  listFollowList(tab: import('../types/follows').FollowListTab): Promise<import('../types/follows').FollowListEntry[]>
+  listFollowList(tab: import('../types/follows').FollowListTab): Promise<import('../types/follows').FollowListResult>
+  markFollowersSeen(): Promise<void>
 }
 
 const impl: FollowsApi = isMock('follows') ? mock : real
@@ -42,6 +45,13 @@ export const getRelation = impl.getRelation
 export const follow = impl.follow
 export const unfollow = impl.unfollow
 export const listFollowList = impl.listFollowList
+export const markFollowersSeen = impl.markFollowersSeen
 
 /** 类型再导出：页面从门面拿类型，不必知道 `types/follows.ts` 的位置。 */
-export type { FollowAction, FollowListEntry, FollowListTab, FollowRelation } from '../types/follows'
+export type {
+  FollowAction,
+  FollowListEntry,
+  FollowListResult,
+  FollowListTab,
+  FollowRelation,
+} from '../types/follows'

@@ -115,6 +115,16 @@ const (
 	TypeFriendRequest = "friend-request"
 	// TypeFriendAccepted 对方接受了你的请求（服务端 → 请求方）。
 	TypeFriendAccepted = "friend-accepted"
+	// TypeFollowCreated 有人关注了你（服务端 → 被关注方）。票 #67 / 决议 #53 §5。
+	//
+	// 与下面两个一起**复用 `FriendEvent` 帧**（proto 里 friend 字段）而不是新增
+	// 一个 envelope 分支：事件的形状完全一样（谁 + 什么状态），
+	// 而改 proto 要重生成两端的代码，成本远大于收益。
+	// 客户端按 `type` 分派，不看字段名。
+	TypeFollowCreated = "follow-created"
+	// TypeMutualFollow 你们互关了（= 成为好友，决议 #42 的文案「互关成为好友」）。
+	TypeMutualFollow = "mutual-follow"
+
 	// TypeFriendRemoved 对方删除了好友关系（服务端 → 另一方）。
 	TypeFriendRemoved = "friend-removed"
 	// TypeBlocked 对方拉黑了你（服务端 → 被拉黑方）。

@@ -39,6 +39,7 @@ import Button from '../components/ui/Button.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import UserAvatar from '../components/ui/UserAvatar.vue'
 import * as followsApi from '../api/follows'
+import { useFollowsStore } from '../stores/follows'
 import * as friendsApi from '../api/friends'
 import { isFeatureUnavailable } from '../api/mode'
 import { useApiFailure } from '../components/features/common/useApiFailure'
@@ -62,6 +63,7 @@ import type { BlockedEntry, SearchHit } from '../api/friends'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const followsStore = useFollowsStore()
 const { failure, run } = useApiFailure(() => route.fullPath)
 
 /** 四个 tab 的展示表（顺序即界面顺序）。 */
@@ -93,6 +95,19 @@ const searching = computed(() => applied.value !== '')
 const entries = ref<FollowListEntry[]>([])
 const blocked = ref<BlockedEntry[]>([])
 const hits = ref<SearchHit[]>([])
+
+/**
+ * 粉丝红点（票 #67；决议 #53）。
+ *
+ * 这个数字**只**在粉丝 tab 的响应里（服务端只在那一个分支回 `newCount`），
+ * 而且它**绝不进 `auth.unread`** —— 消息未读只管私信，两者是两条数、
+ * 两个来源、两个清除点（决议 §3）。混进 unread 的症状是"读了私信、粉丝红点也灭了"。
+ *
+ * 界面上它显示在「粉丝」tab 上（就地），顶栏「好友」角标读的是另一个来源
+ * （`stores/follows.ts`），两者同一个数字但各自持有 —— 顶栏不知道当前在哪个 tab，
+ * 而这一页只在粉丝 tab 才有这个值。
+ */
+const newFollowers = ref(0)
 
 const busy = ref(false)
 const actionBusy = ref(false)
@@ -263,6 +278,24 @@ watch(draft, (next) => {
 
 // ---------- 取数 ----------
 
+/**
+ * 拉名单，并在粉丝 tab 上**接着**清红点（票 #67）。
+ *
+ * # 为什么必须是"先拉完再清"，而不是两个 `void` 并行
+ *
+ * 真机验收抓到的竞态：`onMounted` 里 `void loadList()` 与 `void clearRedDot()`
+ * 同时起飞时，清除先把本地归零，而**晚一步返回的名单响应**又把它写成
+ * 服务端的旧值（那个值当然还是 1，因为水位线此刻才刚开始写）。
+ * 症状是"进了粉丝 tab，红点闪一下就回来了"，而且只在网络稍慢时出现。
+ *
+ * 顺序执行把这件事变成确定的：名单的真值先落地，然后归零、然后推水位线。
+ * 代价是"红点消失"晚一个往返 —— 但那个往返本来就在发生（同一页的列表请求）。
+ */
+async function syncList(): Promise<void> {
+  await loadList()
+  if (tab.value === 'followers') await clearRedDot()
+}
+
 /** 拉当前 tab 的名单。 */
 async function loadList(): Promise<void> {
   if (!auth.isLoggedIn) return
@@ -272,7 +305,14 @@ async function loadList(): Promise<void> {
   }
   busy.value = true
   const loaded = await run(async () => {
-    entries.value = await followsApi.listFollowList(tab.value as FollowListTab)
+    const result = await followsApi.listFollowList(tab.value as FollowListTab)
+    entries.value = result.items
+    // 粉丝 tab 才有 `newCount`（其余 tab 是 null）。同时同步给全局 store，
+    // 让顶栏「好友」角标与这里的 tab 角标永远是同一个数字。
+    if (result.newCount !== null) {
+      newFollowers.value = result.newCount
+      followsStore.setNewFollowers(result.newCount)
+    }
     return true
   })
   busy.value = false
@@ -284,6 +324,28 @@ async function loadList(): Promise<void> {
     return
   }
   capabilityMissing.value = false
+}
+
+/**
+ * 把粉丝红点清掉（票 #67；决议 #53 §4）。
+ *
+ * 三件事，顺序有讲究：
+ *   1. 先**本地**归零 —— 红点的意义是"还有没看过的"，而用户此刻正看着这一页；
+ *      等往返回来才灭会让数字在眼前停一秒（正是"点了没反应"的那种感觉）。
+ *   2. 再打 `PUT /api/me/followers-seen`（幂等；服务端走异步单写通道守 I4）。
+ *   3. 失败**不回滚**本地归零：下一次拉名单会带回服务端的真值，
+ *      而把一个已经"看过"的数字再点亮一次更让人困惑。
+ *      失败只记 console —— 这不是用户需要处理的错误。
+ */
+async function clearRedDot(): Promise<void> {
+  newFollowers.value = 0
+  followsStore.clearNewFollowers()
+  if (!auth.isLoggedIn) return
+  try {
+    await followsApi.markFollowersSeen()
+  } catch (err) {
+    console.error('[followers] 水位线更新失败', err)
+  }
 }
 
 /** 黑名单（单独拉：它可能在真实实现里没有接口，不该拖垮整页）。 */
@@ -368,7 +430,9 @@ async function doUnfollow(row: Row): Promise<void> {
 async function refreshAfterWrite(): Promise<void> {
   openMenu.value = null
   if (searching.value) await runSearch()
-  else await loadList()
+  // 走 syncList 而不是 loadList：写完之后名单可能刚好把红点的真值带回来，
+  // 而"我刚在粉丝 tab 里做了个动作"仍然算"我在看这一页"。
+  else await syncList()
 }
 
 function askBlock(row: Row): void {
@@ -406,7 +470,7 @@ onMounted(() => {
   notice.value = ''
   // 深链带 q：进页即自动执行一次搜索（验收第 1 条）。
   draft.value = applied.value
-  if (auth.isLoggedIn) void loadList()
+  if (auth.isLoggedIn) void syncList()
   if (applied.value !== '') void runSearch()
   // 深链带 focus=search：进页把焦点送进搜索框（票 #66 的空态引导落点）。
   //
@@ -429,18 +493,22 @@ watch(
   () => auth.isLoggedIn,
   (loggedIn) => {
     if (!loggedIn) return
-    if (entries.value.length === 0) void loadList()
+    // 会话恢复完成时人可能正停在粉丝 tab（`onMounted` 那一刻 `isLoggedIn`
+    // 还是 false，那次加载与清除都被跳过了），所以这里走同一条 syncList。
+    if (entries.value.length === 0) void syncList()
     if (applied.value !== '') void runSearch()
   },
 )
 
 /** tab 变了就重取（URL 是唯一真源，所以这里盯 URL 而不是点击）。 */
-watch(tab, () => {
+watch(tab, (next, prev) => {
   notice.value = ''
   actionError.value = ''
   pending.value = null
   openMenu.value = null
-  if (auth.isLoggedIn) void loadList()
+  void syncList()
+  void next
+  void prev
 })
 
 /** 搜索词变了就重跑。 */
@@ -533,6 +601,15 @@ function relationHint(row: Row): string {
             @click="selectTab(t.key)"
           >
             {{ t.label }}
+            <!-- 粉丝红点（票 #67）：只在粉丝 tab 且真有新粉丝时出现。
+                 就地显示而不是只靠顶栏角标 —— 用户已经在好友页了，
+                 让他在这一页就能看见"该点哪一个"。 -->
+            <span
+              v-if="t.key === 'followers' && newFollowers > 0"
+              class="tab-dot"
+              aria-hidden="true"
+              data-testid="followers-red-dot"
+            >{{ newFollowers > 99 ? '99+' : newFollowers }}</span>
           </Button>
         </nav>
 
@@ -755,6 +832,20 @@ function relationHint(row: Row): string {
   --ui-btn-fg: var(--text);
   --ui-btn-fg-hover: var(--text);
   border-bottom-color: var(--accent);
+}
+
+/* 粉丝红点（票 #67）：与顶栏角标同一套视觉（accent 底 + 深色字）。
+   字号比正文小一档、靠 line-height 撑出胶囊形，避免为它加高度把 tab 撑高。 */
+.tab-dot {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
 }
 
 .sect { display: flex; flex-direction: column; gap: 12px; }

@@ -39,7 +39,20 @@ type followEnv struct {
 }
 
 // newFollowEnv 起一台"关注域可用"的引擎（真 store + 真实 Signer）。
+//
+// 不接推送（pusher 传 nil）：本文件的用例判的是 HTTP 面的事实。
+// 需要判"关注会不会推事件"的用例走 newFollowEnvWithPusher（票 #67）。
 func newFollowEnv(t *testing.T) *followEnv {
+	t.Helper()
+	return newFollowEnvWithPusher(t, nil)
+}
+
+// newFollowEnvWithPusher 与 newFollowEnv 同形，只是把 FollowPusher 换成给定实现。
+//
+// 为什么要参数化而不是在 followEnv 上留一个可变字段：pusher 是在
+// NewRouter 装配时注入的，之后再改那个字段不会影响已经注册的路由 ——
+// 那会造出"看起来注入了、其实没生效"的假绿。
+func newFollowEnvWithPusher(t *testing.T, pusher FollowPusher) *followEnv {
 	t.Helper()
 
 	st := requireFriendTestDB(t)
@@ -96,6 +109,9 @@ func newFollowEnv(t *testing.T) *followEnv {
 				WSTicketTTL: cfg.Auth.WSTicketTTL,
 			},
 			Store: st,
+			// 票 #67：关注事件的推送出口。nil 时 handler 只落库不推送
+			//（§7.2 的"否则只落库"分支）。
+			FollowPusher: pusher,
 		},
 		AdminDeps{
 			AuditSink:   &fakeAdminWriter{},

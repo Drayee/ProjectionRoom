@@ -24,7 +24,12 @@ import { HttpError, requestJSON } from '../http'
 import { CapabilityUnavailable } from '../mode'
 import { useAuthStore } from '../../stores/auth'
 import type { AuthedFetch } from '../http'
-import type { FollowListEntry, FollowListTab, FollowRelation } from '../../types/follows'
+import type {
+  FollowListEntry,
+  FollowListResult,
+  FollowListTab,
+  FollowRelation,
+} from '../../types/follows'
 
 /** 取认证 fetch（延迟到调用时：模块加载期 Pinia 可能还没装配）。 */
 function fetcher(): AuthedFetch {
@@ -158,13 +163,40 @@ function toListEntry(raw: ServerFollowListEntry): FollowListEntry {
  * 与 `getRelation` 同一套错误分诊：路由未注册的 404 → `CapabilityUnavailable`，
  * 其余（含 401）原样上抛。
  */
-export async function listFollowList(tab: FollowListTab): Promise<FollowListEntry[]> {
+export async function listFollowList(tab: FollowListTab): Promise<FollowListResult> {
   try {
-    const body = await requestJSON<{ items: ServerFollowListEntry[] }>(
+    const body = await requestJSON<{ items: ServerFollowListEntry[]; newCount?: number }>(
       fetcher(),
       '/api/follows?tab=' + encodeURIComponent(tab),
     )
-    return (body?.items ?? []).map(toListEntry)
+    return {
+      items: (body?.items ?? []).map(toListEntry),
+      // `newCount` 只有粉丝 tab 会带（服务端只在那一个分支回这个字段）。
+      // 用 `typeof === 'number'` 而不是 `?? 0`：字段缺失要保留成 null，
+      // 那是"这个 tab 没有红点这个概念"，与"红点是 0"不是同一件事。
+      newCount: typeof body?.newCount === 'number' ? body.newCount : null,
+    }
+  } catch (err) {
+    throw toFollowsError(err)
+  }
+}
+
+/**
+ * 把"粉丝水位线"推到服务端当前时间（票 #67；决议 #53 §4）。
+ *
+ * 什么时候调：**进粉丝 tab 时**。决议明确不做逐条已读、也不在点角标时清 ——
+ * 红点的语义是"有新的、你还没看过的人"，而"看过了"这个事实只能由
+ * "你真的打开了那一页"来表达。点角标清掉会让"点错一下红点就没了"。
+ *
+ * 为什么返回 void 而不是新计数：服务端回 204。那个新数字（必然是 0）
+ * 对调用方没有用处，回它反而会让人以为"还有事没做完"。
+ * 服务端写入走异步单写通道（铁律 I4），所以这个请求返回 204 时
+ * 水位线可能还没落库 —— 这一点由"下次拉名单时 red dot 自然消失"消化，
+ * 不需要在这里等。
+ */
+export async function markFollowersSeen(): Promise<void> {
+  try {
+    await requestJSON<null>(fetcher(), '/api/me/followers-seen', { method: 'PUT' })
   } catch (err) {
     throw toFollowsError(err)
   }

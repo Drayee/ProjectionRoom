@@ -256,16 +256,25 @@ export const useAuthStore = defineStore('auth', () => {
     applyUser(user)
   }
 
+  /**
+   * 把当前 access token 同步给用户级实时通道（取 WS 票据的唯一凭据）。
+   *
+   * **一处实现**：`applySession`（登录/注册/刷新）、`clearSession`（登出/改密）、
+   * 与 `runBootstrap`（刷新页面 / 新标签页免密恢复）都必须走它。
+   * 曾经只有 `applySession` 调了它，于是"刷新页面后实时通道永远取不到票"——
+   * 而那条路的症状（登录态正常、就是收不到推送）与"后端没上线"一模一样。
+   */
+  function syncChannelToken(): void {
+    setUserChannelToken(accessToken.value)
+  }
+
   /** 一次成功的登录/注册/刷新之后的统一落地。 */
   function applySession(session: AuthSession): void {
     accessToken.value = session.accessToken
     writeAccessToken(session.accessToken)
     applyUser(session.user)
     status.value = 'authenticated'
-    // 把 token 交给用户通道（wayfinder #31）：它是取 WS 票据的唯一凭据。
-    // 在**唯一**的 token 写入点做这件事，而不是让各处调用方自己记得同步 ——
-    // 漏一处的症状是"登录了但实时通道一直重连"（因为票据取不到）。
-    setUserChannelToken(session.accessToken)
+    syncChannelToken()
   }
 
   /**
@@ -287,7 +296,7 @@ export const useAuthStore = defineStore('auth', () => {
     status.value = 'anonymous'
     // 同时清掉用户通道的 token：否则它拿着已失效的凭据无限重连取票（每次 401），
     // 在日志里表现为一串无意义的失败请求。
-    setUserChannelToken('')
+    syncChannelToken()
   }
 
   /**
@@ -451,6 +460,14 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function runBootstrap(): Promise<void> {
+    // 用户通道的 token 必须在**每条**恢复路径上同步一次（票 #67）。
+    //
+    // 这里踩过一个真实的坑：`applySession` 会注入 token，但"刷新页面 / 新标签页
+    // 免密恢复"这两条路**不走** applySession —— 它们直接读 sessionStorage 里
+    // 现成的 token。于是页面一刷新，通道拿到的就是空串、取票永远失败、
+    // 无限退避重连，症状是"登录着但永远收不到实时提示"。
+    // 放在引导入口的第一行，是为了让"通道有没有凭据"只取决于"现在有没有 token"。
+    syncChannelToken()
     try {
       if (accessToken.value !== '') {
         status.value = 'authenticated'

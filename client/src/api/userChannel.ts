@@ -5,7 +5,8 @@
  *
  * 一条 WS 长连接，只承担**下行推送**：新私聊（`dm`）、已读回执（`dm-read`）、
  * 好友事件（`friend-request` / `friend-accepted` / `friend-removed` / `blocked`）、
- * 在线态（`presence`）。所有**写**操作仍走 REST（发消息、已读上报、加好友），
+ * 关注事件（`follow-created` / `mutual-follow`，票 #67）、
+ * 在线态（`presence`）。所有**写**操作仍走 REST（发消息、已读上报、加关注），
  * 这条通道不接受业务上行 —— 否则同一件事会有两条路径，校验与限速要各写一遍。
  *
  * # 为什么它不在 api/ 门面（mock/real）体系里
@@ -164,6 +165,13 @@ export function createUserChannel(handlers: UserChannelHandlers): UserChannel {
       case 'friend-accepted':
       case 'friend-removed':
       case 'blocked':
+        if (env.friend) handlers.onEvent({ kind: 'friend', type: env.type, event: env.friend })
+        return
+      // 关注事件（票 #67；决议 #53 §5）：复用 friend 帧的形状，
+      // 客户端按 `type` 分派。两种类型各有各的文案与落点，见
+      // `utils/followNotice.ts` —— 那里是**唯一**的文案源，真机脚本也读它。
+      case 'follow-created':
+      case 'mutual-follow':
         if (env.friend) handlers.onEvent({ kind: 'friend', type: env.type, event: env.friend })
         return
       case 'presence':

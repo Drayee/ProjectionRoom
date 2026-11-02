@@ -86,3 +86,22 @@ export interface FollowListEntry {
   mutual: boolean
   canDm: boolean
 }
+
+/**
+ * 名单查询的结果（票 #67）。
+ *
+ * 为什么不是直接返回 `FollowListEntry[]`：粉丝 tab 除了列表还要带回**红点数**
+ * （决议 #53 §2：`new_count` = 我未回关的粉丝中、关注时间晚于水位线的人数）。
+ * 两者来自**同一次查询**是刻意的 —— 拆成两个端点会让"进粉丝 tab"变成两次往返，
+ * 而两次往返之间刚好有人关注你，界面就会显示"列表里有 TA、红点却说 0"。
+ *
+ * `newCount` 只有粉丝 tab 有值（服务端只在那一个分支回这个字段）：
+ *   - `null` = 这个 tab 不提供红点（互关/关注）；
+ *   - `0`    = 有红点这个概念，但已经清干净了。
+ * 用 `null` 而不是 `0` 兜底：两者在界面上都不显示角标，但在判据里是不同的事实，
+ * 混成一个值之后"服务端忘了回这个字段"就再也测不出来了。
+ */
+export interface FollowListResult {
+  items: FollowListEntry[]
+  newCount: number | null
+}

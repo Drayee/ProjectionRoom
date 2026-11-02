@@ -116,6 +116,69 @@ func (p *RealtimePusher) PushBlocked(ctx context.Context, actorID, targetID int6
 	})
 }
 
+// PushFollowCreated 推给**被关注方**：有人关注了你（票 #67 / 决议 #53 §5）。
+//
+// 收件人是 followee，事件里的 UserID 是 follower —— 与 PushBlocked 同一条纪律：
+// "谁该收到"由方法名写死，调用点没有机会传错方向。
+//
+// 打扰豁免（拉黑双向、注销/封禁）**不在这里判**：调用点（handler.follows 的 create）
+// 已经在建边之前查过对方可见性，而 store.CreateFollow 内部又裁决了拉黑。
+// 在这里再判一次会造出第二个真源 —— 而"两处判据"正是这类静默失败最常见的来源。
+func (p *RealtimePusher) PushFollowCreated(ctx context.Context, followerID, followeeID int64) bool {
+	return p.pushFriend(ctx, model.TypeFollowCreated, followeeID, model.FriendEvent{
+		UserID:      followerID,
+		DisplayName: p.displayNameOf(ctx, followerID),
+		Status:      "following",
+	})
+}
+
+// PushMutualFollow 推给**双方**：你们互关了（票 #67 / 决议 #53 §5）。
+//
+// 推给两个人是因为这件事对两边同时成立 —— 只推给"回关的那一方"
+// 会让先关注的人永远收不到"对方回关了你"，而那正是他等的那条消息。
+//
+// 两次推送各自独立判断在线与否（SendToUser 对离线用户返回 0 而不报错），
+// 所以"一方在线一方离线"是正常形态，不是错误。
+func (p *RealtimePusher) PushMutualFollow(ctx context.Context, userA, userB int64) bool {
+	if userA == userB {
+		return false
+	}
+	// 每一方收到的帧里带的是**对方**的名字（"谁关注了你"这句话里的"谁"）。
+	nameOfB := p.displayNameOf(ctx, userB)
+	nameOfA := p.displayNameOf(ctx, userA)
+	okA := p.pushFriend(ctx, model.TypeMutualFollow, userA, model.FriendEvent{
+		UserID:      userB,
+		DisplayName: nameOfB,
+		Status:      "mutual",
+	})
+	okB := p.pushFriend(ctx, model.TypeMutualFollow, userB, model.FriendEvent{
+		UserID:      userA,
+		DisplayName: nameOfA,
+		Status:      "mutual",
+	})
+	return okA || okB
+}
+
+// displayNameOf 取一个账号的显示名，给推送帧里的 `displayName` 用。
+//
+// **为什么必须在服务端填**：客户端拿到一条 `follow-created` 之后要立刻弹出
+// 「XXX 关注了你」，而它手里只有一个 `userId` —— 要么再打一发 `/api/users/:id`
+// 去查名字（提示会晚到几百毫秒，且对方刚改过名时与列表里的名字不一致），
+// 要么就在这里带上。带上是最省事的：帧里本来就有一个 displayName 字段。
+//
+// 查不到（账号刚注销、库抖动）时返回空串 —— 客户端把空名字当成"这条不弹提示"，
+// 于是退化成"只有红点、没有提示"，而不是弹一条「  关注了你」。
+func (p *RealtimePusher) displayNameOf(ctx context.Context, userID int64) string {
+	if p == nil || p.store == nil || userID <= 0 {
+		return ""
+	}
+	u, err := p.store.UserByID(ctx, userID)
+	if err != nil || u == nil {
+		return ""
+	}
+	return u.DisplayName
+}
+
 // pushFriend 是四个好友事件的共同实现（只有 type 与收件人不同）。
 func (p *RealtimePusher) pushFriend(ctx context.Context, typ string, targetID int64, ev model.FriendEvent) bool {
 	if p == nil || p.hub == nil || targetID <= 0 {
@@ -194,6 +257,7 @@ func (p *RealtimePusher) PushPresence(ctx context.Context, userID int64, online 
 var (
 	_ messagePusherShape = (*RealtimePusher)(nil)
 	_ friendPusherShape  = (*RealtimePusher)(nil)
+	_ followPusherShape  = (*RealtimePusher)(nil)
 	_ presenceShape      = (*RealtimePusher)(nil)
 	_                    = []interface{}{}
 )
@@ -209,6 +273,16 @@ type messagePusherShape interface {
 type friendPusherShape interface {
 	PushFriendRemoved(ctx context.Context, actorID, targetID int64) bool
 	PushBlocked(ctx context.Context, actorID, targetID int64) bool
+}
+
+// followPusherShape 是关注事件的两个推送方法（对应 handler.FollowPusher）。
+//
+// 与 friendPusherShape 分开而不是合并：两者服务**不同端点**（关注 vs 拉黑），
+// 合并会让"发一条关注边"的路径也拿到"推拉黑"的能力 ——
+// 而那正是按域切接口要避免的事。
+type followPusherShape interface {
+	PushFollowCreated(ctx context.Context, followerID, followeeID int64) bool
+	PushMutualFollow(ctx context.Context, userA, userB int64) bool
 }
 
 type presenceShape interface {

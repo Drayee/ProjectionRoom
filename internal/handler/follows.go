@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -117,7 +120,7 @@ type followTargetRequest struct {
 //
 // 装配约定与其它域同形：账号能力关闭时不注册；Store 缺失时注册一组 503
 // （而不是让路由凭空消失 —— 那会让"页面 404"与"后端没上线"变成同一件事）。
-func registerFollowRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Config, auth AccountService) {
+func registerFollowRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Config, auth AccountService, pusher FollowPusher, seen AsyncJobSink) {
 	if api == nil {
 		return
 	}
@@ -135,10 +138,11 @@ func registerFollowRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Con
 		api.DELETE("/follows/:userId", unavailable)
 		api.GET("/follows", unavailable)
 		api.GET("/follows/:userId", unavailable)
+		api.PUT("/me/followers-seen", unavailable)
 		return
 	}
 
-	h := &followHandler{store: st}
+	h := &followHandler{store: st, pusher: pusher, seen: seen}
 
 	// 读端点（查关系）走只读桶（PR_ROOM_META_*，60/min）：
 	// 它高频、幂等、纯读 —— 与好友搜索同一个档位（#39 的分档纪律）。
@@ -158,6 +162,15 @@ func registerFollowRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Con
 	// 它同样走只读桶：名单是幂等纯读，与关系查询同一档位。
 	authed.GET("/follows", readLimiter, h.list)
 	authed.GET("/follows/:userId", readLimiter, h.state)
+	// 粉丝水位线（票 #67）：`PUT /api/me/followers-seen`。
+	//
+	// 挂在 `/api/me` 前缀下而不是 `/api/follows/seen`：它写的是**我自己的**一列
+	// （users.followers_seen_at），与 `PATCH /api/me`、`PUT /api/me/password` 同族 ——
+	// "改我自己的账号内部字段"这一族不该散落在各个业务前缀里。
+	//
+	// 走只读桶（不是登录桶）：它幂等、只写一行、没有滥用面（谁也不会
+	// 靠反复标记水位线骚扰别人）。登录桶是给"能被用来骚扰"的写动作留的。
+	authed.PUT("/me/followers-seen", readLimiter, h.markSeen)
 }
 
 // followHandler 是关注域的处理器。
@@ -168,6 +181,45 @@ func registerFollowRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Con
 // 而关注的实时通知是 #53/#67 的活 —— 本票不做，也不预埋）。
 type followHandler struct {
 	store *store.Store
+	// pusher 把关注事件推给对方（票 #67 / 决议 #53 §5）。
+	//
+	// nil = 不做实时投递（§7.2 的"否则只落库"），不是错误状态 ——
+	// 与 FriendPusher/MessagePusher 同一条约定。
+	pusher FollowPusher
+	// seen 是"粉丝水位线"写入的**异步**出口（票 #67 / 铁律 I4）。
+	//
+	// 为什么水位线必须异步：它是"我打开了粉丝 tab"这个动作的副作用，
+	// 而那个动作的主语是 GET 列表。在 GET 路径上同步写库，等于让一次
+	// 纯读请求承担一次数据库往返 —— I4 明确禁止的形态。
+	// 队列满/写入器缺失时只记日志：红点这次不清，下次进 tab 再清，
+	// 没有任何数据因此不一致（水位线是幂等的"推到 now"）。
+	seen AsyncJobSink
+}
+
+// AsyncJobSink 是"把一次写库投进事件单写协程"的窄出口（铁律 I4）。
+//
+// 与 handler.AdminAuditSink 的签名逐字相同，但**语义不同**：那个是审计，
+// 这个是业务状态。之所以不直接复用那个名字：读代码的人看到"AuditSink"
+// 会以为写进去的是审计行，而这里写的是 users.followers_seen_at。
+//
+// 生产装配里两者指向同一个 *service.WriterJobs —— 单写协程本来就只有一个。
+type AsyncJobSink interface {
+	SubmitJob(fn func(ctx context.Context) error) bool
+}
+
+// FollowPusher 是"把关注事件推给对方"的窄出口（票 #67）。
+//
+// 与 FriendPusher 分开而不是复用：两者服务不同端点（关注 vs 拉黑），
+// 合并会让"建一条关注边"的路径也拿到"推拉黑"的能力。
+//
+// 两个方法各自的收件人是写死的（由名字表达），因为"推给谁"是这里
+// 最容易搞错的地方：
+//
+//	PushFollowCreated  推给被关注方（有人关注了你）
+//	PushMutualFollow   推给双方（你们互关了）
+type FollowPusher interface {
+	PushFollowCreated(ctx context.Context, followerID, followeeID int64) bool
+	PushMutualFollow(ctx context.Context, userA, userB int64) bool
 }
 
 // create 是 POST /api/follows（关注）。
@@ -218,13 +270,32 @@ func (h *followHandler) create(c *gin.Context) {
 		}
 
 		// 建边（幂等；自关注与拉黑在 store 层裁决）。
-		if _, _, err := h.store.CreateFollow(c.Request.Context(), actor.ID, req.UserID); err != nil {
+		_, created, err := h.store.CreateFollow(c.Request.Context(), actor.ID, req.UserID)
+		if err != nil {
 			return 0, nil, err
 		}
 
 		view, err := h.viewOf(c, actor.ID, peer)
 		if err != nil {
 			return 0, nil, err
+		}
+
+		// 实时提示（票 #67 / 决议 #53 §5）：**只在真的新建了边时推**。
+		//
+		// 为什么必须判 created：这个端点是幂等的，用户双击「关注」会走两次
+		// 这里 —— 第二次没有新边，却会再推一帧「有人关注了你」。
+		// 那让提示变成"点得越多、对方被通知越多"，而这件事的语义是"发生了一次"。
+		//
+		// 互关时**只推 mutual-follow**（不叠加一条 follow-created）：
+		// 对收件人来说这两件事是同一时刻发生的，推两帧会让界面上叠两条提示，
+		// 而"你们互关了"已经完全包含了"有人关注了你"。
+		if created && h.pusher != nil {
+			ctx := c.Request.Context()
+			if view.Mutual {
+				h.pusher.PushMutualFollow(ctx, actor.ID, req.UserID)
+			} else {
+				h.pusher.PushFollowCreated(ctx, actor.ID, req.UserID)
+			}
 		}
 		return http.StatusCreated, view, nil
 	})
@@ -346,7 +417,74 @@ func (h *followHandler) list(c *gin.Context) {
 			CanDM:       e.CanDM(),
 		})
 	}
+
+	// 粉丝红点（票 #67 / 决议 #53 §9）：**一个端点两用**。
+	//
+	// 为什么只有 `tab=followers` 带这个字段：红点的语义是"有人关注你而你没回关"，
+	// 只有粉丝这份名单与它对应。互关/关注两份名单带上它会让前端拿到一个
+	// 与当前视图无关的数字 —— 而"这个数字属于哪份名单"恰恰是最容易读错的地方。
+	//
+	// 为什么不另开一个 `GET /api/me/followers-count`：那会让"进粉丝 tab"
+	// 变成两次往返（列表 + 计数），而它们必须一致（红点亮着、列表却看不到新人
+	// 是最糟的形态）。一个端点一次查询天然一致。
+	if tab == store.FollowListFollowers {
+		n, err := h.store.CountNewFollowers(c.Request.Context(), actor.ID)
+		if err != nil {
+			friendInternal(c, "统计新粉丝失败", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items, "newCount": n})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+// markSeen 是 PUT /api/me/followers-seen（票 #67）：把粉丝水位线推到"现在"。
+//
+// # 为什么是 PUT 而不是 POST
+//
+// PUT 的语义是"把资源置成这个状态"，而这里正是"把 followers_seen_at 置成 now"——
+// 幂等，重复调用不产生额外效果。POST 会暗示"每次调用都创建一件事"，
+// 而水位线只有一条。
+//
+// # 为什么时间由服务端取
+//
+// 客户端传时间会让"红点什么时候灭"取决于那台机器的时钟。跨时区/时钟漂移的
+// 用户会看到红点永远不灭（客户端时间永远落后）或立刻灭掉（永远超前）。
+// 水位线是一个**服务端事实**，与 created_at 同一个时钟源。
+//
+// # 为什么 DB 写走异步通道（铁律 I4）
+//
+// 这是"打开粉丝列表"的副作用，而那个动作的主语是一次 GET。在 GET 路径上
+// 同步写库就是 I4 明令禁止的形态。投递失败只记日志：红点这次不清，
+// 下次进 tab 再清 —— 水位线是"推到 now"，重放天然安全。
+func (h *followHandler) markSeen(c *gin.Context) {
+	actor, ok := CurrentUser(c)
+	if !ok {
+		abortUnauthorized(c, CodeSessionInvalid, "登录状态无效，请重新登录")
+		return
+	}
+
+	now := time.Now()
+	if h.seen != nil {
+		if !h.seen.SubmitJob(func(ctx context.Context) error {
+			return h.store.MarkFollowersSeen(ctx, actor.ID, now)
+		}) {
+			log.Printf("[WARN] 粉丝水位线入队失败（user=%d）：队列满或写入器已关闭，下次进粉丝列表再清", actor.ID)
+		}
+	} else {
+		// 没有写队列（窄实例/测试装配）：直接写。这里**不是**绕过 I4 ——
+		// 装配里没有单写协程时，"异步"没有可去的地方，而这个端点本身
+		// 不是高频热路径（一个人打开粉丝 tab 的频率）。
+		if err := h.store.MarkFollowersSeen(c.Request.Context(), actor.ID, now); err != nil {
+			friendInternal(c, "更新粉丝水位线失败", err)
+			return
+		}
+	}
+
+	// 回 204 而不是回新的计数：调用方刚刚"看过了"，它不需要知道
+	// "清掉了几条" —— 那个数字只会让人以为还有事没做完。
+	c.Status(http.StatusNoContent)
 }
 
 // viewOf 组装响应视图（关系 + 互关 + 可私聊 + 对方的两个计数）。

@@ -21,15 +21,28 @@ import { useRoute } from 'vue-router'
 import AppHeader from './components/ui/AppHeader.vue'
 import RouteSkeleton from './components/ui/RouteSkeleton.vue'
 import TooltipLayer from './components/ui/TooltipLayer.vue'
+import ToastLayer from './components/ui/ToastLayer.vue'
 import { announcement } from './utils/pageAnnouncer'
 import { routePending } from './utils/routeLoadState'
 import { useAuthStore } from './stores/auth'
 import { useRouteTransition } from './composables/useRouteTransition'
+import { useUserChannel } from './composables/useUserChannel'
 
 type HeaderVariant = 'app' | 'page' | 'bare'
 
 const route = useRoute()
 const auth = useAuthStore()
+
+/**
+ * 用户级实时通道（票 #67）。
+ *
+ * 挂在外壳上而不是某个页面里：连接的生命周期该跟**登录态**走，而不是跟
+ * "当前在哪个页面"走 —— 挂在页面里会导致换页时断开重连，而重连要重新取票
+ * （票是单次使用的），换页频繁时那段空窗就再也收不到提示。
+ *
+ * 它只在登录时连（见 composable 里的 watch），未登录时什么都不做。
+ */
+useUserChannel()
 
 /**
  * 顶栏形态：路由 meta.header 声明；缺省 'page'。
@@ -119,6 +132,11 @@ const stageStyle = computed(() => ({
     </div>
     <!-- 提示图层挂在路由之外：换页不重建，正在显示的提示不被卸载 -->
     <TooltipLayer />
+    <!--
+      轻提示（票 #67）：同样挂在路由之外。用户点了一条"有人关注了你"，
+      正在跳去粉丝 tab —— 提示不该在跳转的一瞬间被卸载掉。
+    -->
+    <ToastLayer />
     <!--
       换页播报（票 #79）：**全站唯一**的 aria-live 区域。
       为什么放在外壳里而不是每个页面各写一个：多个 live region 会各念各的，

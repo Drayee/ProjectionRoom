@@ -129,7 +129,7 @@ async function load(): Promise<void> {
     if (list.value === 'blocked') {
       blocked.value = await friendsApi.listBlocked()
     } else {
-      entries.value = await followsApi.listFollowList(list.value)
+      entries.value = (await followsApi.listFollowList(list.value)).items
     }
   } catch (err) {
     entries.value = []

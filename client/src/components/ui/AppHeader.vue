@@ -21,6 +21,7 @@ import BrandIcon from './BrandIcon.vue'
 import UserAvatar from './UserAvatar.vue'
 import IconButton from './IconButton.vue'
 import { useAuthStore } from '../../stores/auth'
+import { useFollowsStore } from '../../stores/follows'
 import { prefetchRoute } from '../../utils/routePrefetch'
 import { isSelfProfile, navSectionOf, type NavSection } from '../../utils/navSection'
 
@@ -29,6 +30,7 @@ const props = withDefaults(defineProps<{ variant?: 'app' | 'page' | 'bare' }>(),
 })
 
 const auth = useAuthStore()
+const followsStore = useFollowsStore()
 const router = useRouter()
 const route = useRoute()
 
@@ -131,6 +133,38 @@ const unreadLabel = computed(() => {
   if (n === null || n <= 0) return ''
   return n > 99 ? '99+' : String(n)
 })
+
+/**
+ * 「好友」入口上的粉丝红点（票 #67；决议 #53 §1、§3）。
+ *
+ * **另一个数、另一个来源**：`stores/follows.ts` 的 `newFollowers`，
+ * 与上面的 `unreadLabel` 毫无关系。决议 §3 把这条写得最重 ——
+ * 混用一个数字的症状是"读了私信、粉丝红点也灭了"。
+ *
+ * 两个角标在同一个导航栏里并排出现（消息 + 好友）是**有意**的：
+ * 它们回答两个不同的问题（"有人给我发消息" / "有人新关注了我"），
+ * 合成一个数字会让人以为"点进去就一起清"。
+ */
+const followLabel = computed(() => followsStore.badge)
+
+/**
+ * 一个导航项该显示哪个角标。
+ *
+ * 返回空串 = 不显示。写成函数而不是在模板里塞两个 `v-if`：
+ * 将来加第三个角标（比如"待处理举报"）时，改的是这一处。
+ */
+function badgeOf(name: string): string {
+  if (name === 'messages') return unreadLabel.value
+  if (name === 'friends') return followLabel.value
+  return ''
+}
+
+/** 角标的无障碍说明（读屏要知道这个数字是什么）。 */
+function badgeHint(name: string): string {
+  if (name === 'messages') return `消息（${unreadLabel.value} 条未读）`
+  if (name === 'friends') return `好友（${followLabel.value} 个新粉丝）`
+  return ''
+}
 </script>
 
 <template>
@@ -150,14 +184,20 @@ const unreadLabel = computed(() => {
         :class="{ 'is-active': isActive(item.section) }"
         :to="{ name: item.name }"
         :aria-current="isActive(item.section) ? 'page' : undefined"
-        :aria-label="item.name === 'messages' && unreadLabel ? `消息（${unreadLabel} 条未读）` : item.label"
+        :aria-label="badgeOf(item.name) ? badgeHint(item.name) : item.label"
         v-tip="item.label"
         @pointerenter="warmUp(item.name)"
       >
         <BrandIcon :name="item.icon" decorative :size="18" />
-        <!-- 未读角标：只在有数字时出现（`null` 与 0 都不显示，理由见 unreadLabel）。 -->
-        <span v-if="item.name === 'messages' && unreadLabel" class="dot" aria-hidden="true">
-          {{ unreadLabel }}
+        <!-- 角标：只在有数字时出现（`null` 与 0 都不显示，理由见 unreadLabel / followLabel）。
+             消息读未读数、好友读粉丝红点 —— 两个不同的数，两个不同的来源。 -->
+        <span
+          v-if="badgeOf(item.name)"
+          class="dot"
+          :data-testid="item.name === 'friends' ? 'follow-red-dot' : undefined"
+          aria-hidden="true"
+        >
+          {{ badgeOf(item.name) }}
         </span>
       </RouterLink>
     </nav>

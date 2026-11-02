@@ -745,4 +745,30 @@ CHECK (target_type IN ('post', 'room', 'anime'))
 )`,
 		`CREATE INDEX IF NOT EXISTS favorites_user_type_idx ON favorites (user_id, target_type, created_at DESC)`,
 	}},
+
+	// 0017：粉丝红点的水位线（wayfinder #53 / 票 #67）。
+	//
+	// # 为什么只有一列，没有通知表
+	//
+	// 红点**从既有数据派生**：`new_count = 我未回关的粉丝中 created_at > 这一列 的人数`。
+	// 建 notifications 表会让"有新粉丝"成为关系事实的**第二个真源** ——
+	// 关注边在 follows 里、通知行在 notifications 里，取关/拉黑/封禁发生在
+	// 哪一侧都要同步删行，漏一处的症状是"红点亮着却点不出人"。
+	// 一条反连接查询能算出来的东西，不该有第二份存储。
+	//
+	// # 可空是语义的一部分
+	//
+	// NULL = **从没看过粉丝列表**。这与"上次看到某个时刻"是两件事：
+	// 前者意味着所有未回关的粉丝都算新（新注册用户被第一个人关注，
+	// 正是红点最该亮的时刻），后者只数水位线之后的。
+	// 用 `DEFAULT now()` 会把前者悄悄变成后者 —— 新账号注册那一刻的红点
+	// 就永远不亮，而那正是它最该亮的时候。
+	//
+	// # 与消息未读毫无关系
+	//
+	// 决议 #53 §3：粉丝红点是**独立计数**，绝不进 `unread`（那个唯一写入点
+	// 在 `stores/auth.ts` 的 `setUnread()`，只管私信）。两数两源两清除点。
+	{version: "0017_followers_seen", statements: []string{
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS followers_seen_at timestamptz NULL`,
+	}},
 }

@@ -39,6 +39,9 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			"created_at":        {"timestamp with time zone", 0, false},
 			"updated_at":        {"timestamp with time zone", 0, false},
 			"last_seen_at":      {"timestamp with time zone", 0, false},
+			// 0017（wayfinder #53 / 票 #67）：粉丝红点的水位线。可空是语义的一部分 ——
+			// NULL = 从没看过粉丝列表，于是所有未回关的粉丝都算新。
+			"followers_seen_at": {"timestamp with time zone", 0, true},
 		},
 		"sessions": {
 			"id":         {"bigint", 0, false},

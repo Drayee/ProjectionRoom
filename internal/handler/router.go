@@ -295,7 +295,16 @@ func NewRouter(
 	registerAuthorContentRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
 	// 关注边（wayfinder #56）。注册在好友域之后：两者共享「拉黑」这条谓词，
 	// 但关注是**独立**的路由前缀（/api/follows），不与 /api/friends 混用。
-	registerFollowRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
+	// pusher 传 accountDeps.FollowPusher（票 #67）：关注事件与拉黑事件走同一条
+	// /ws/user 通道，生产装配里两者指向同一个 *service.RealtimePusher。
+	//
+	// 最后一个参数是"粉丝水位线的异步写入出口"。这里传的是 adminDeps.AuditSink，
+	// 名字上像是审计、实际是**同一条单写协程**（*service.WriterJobs）——
+	// 铁律 I4 要求"任何写库都不在 REST 处理路径上"，而那个协程全站只有一个。
+	// 不新开字段的理由：多一个装配位就多一处"生产指向 A、测试指向 B"的可能，
+	// 而它们本来就是同一个对象。
+	registerFollowRoutes(api, accountDeps.Store, cfg, accountDeps.Service,
+		accountDeps.FollowPusher, adminDeps.AuditSink)
 
 	// 收藏（wayfinder #48 / 票 #64）：多态私人书签，全部需登录。
 	// 排在关注域之后：它是"内容侧"的最后一块，与前面的社交域（好友/私聊/关注）

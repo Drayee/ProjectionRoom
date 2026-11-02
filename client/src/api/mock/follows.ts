@@ -17,7 +17,12 @@
  * （1 月夜猫 … 8 小满），否则 mock 态里「点进某人的主页」会看到另一个名字。
  */
 import { HttpError } from '../http'
-import type { FollowListEntry, FollowListTab, FollowRelation } from '../../types/follows'
+import type {
+  FollowListEntry,
+  FollowListResult,
+  FollowListTab,
+  FollowRelation,
+} from '../../types/follows'
 
 /** 当前登录用户 id：与 api/mock/friends.ts、api/mock/posts.ts 的「我」一致。 */
 const CURRENT_USER_ID = 1
@@ -188,7 +193,7 @@ export async function unfollow(userId: number): Promise<void> {
  *     但顺序**必须稳定**（同一份名单两次渲染顺序不同会让界面闪）；
  *  3. 未知 tab 抛错（不猜）。
  */
-export async function listFollowList(tab: FollowListTab): Promise<FollowListEntry[]> {
+export async function listFollowList(tab: FollowListTab): Promise<FollowListResult> {
   const want = (id: number): boolean => {
     const following = edges.has(edgeKey(CURRENT_USER_ID, id))
     const followedBy = edges.has(edgeKey(id, CURRENT_USER_ID))
@@ -198,7 +203,7 @@ export async function listFollowList(tab: FollowListTab): Promise<FollowListEntr
     throw http(400, 'BAD_REQUEST', 'tab 必须是 mutual / following / followers')
   }
 
-  return PEOPLE.filter((p) => p.id !== CURRENT_USER_ID)
+  const items = PEOPLE.filter((p) => p.id !== CURRENT_USER_ID)
     .filter((p) => !isBlockedEither(CURRENT_USER_ID, p.id))
     .filter((p) => want(p.id))
     .sort((a, b) => b.id - a.id)
@@ -214,6 +219,48 @@ export async function listFollowList(tab: FollowListTab): Promise<FollowListEntr
         canDm: rel.canDm,
       }
     })
+
+  // 红点只有粉丝 tab 有（服务端只在那一个分支回 `newCount`）。
+  // 其余 tab 回 `null` 而不是 0：那是"这个视图没有红点这个概念"，
+  // 与"红点是 0"是不同的事实，混成一个值之后判据就测不出"字段丢了"。
+  return { items, newCount: tab === 'followers' ? countNewFollowers() : null }
+}
+
+/**
+ * 还没"看过"的粉丝集合（票 #67 的 mock 版水位线）。
+ *
+ * 真实实现用 `users.followers_seen_at` 一个时间戳，判据是"关注时间晚于水位线"；
+ * mock 没有时间轴，退化成**一组 id**：进过粉丝 tab 的人就从这里移除。
+ *
+ * 语义对齐点（这三点才是 mock 与真机都要成立的东西）：
+ *   1. 只有**我未回关**的粉丝算新（互关的人不是"待处理的新朋友"）；
+ *   2. 被拉黑/拉黑我的人不算（与名单过滤同一口径）；
+ *   3. 进一次粉丝 tab 后归零，之后**再有人关注我**才重新点亮。
+ */
+const seenFollowers = new Set<number>()
+
+/** 我未回关、且还没看过的粉丝数（服务端 `CountNewFollowers` 的 mock 版）。 */
+function countNewFollowers(): number {
+  return PEOPLE.filter((p) => p.id !== CURRENT_USER_ID)
+    .filter((p) => !isBlockedEither(CURRENT_USER_ID, p.id))
+    .filter((p) => edges.has(edgeKey(p.id, CURRENT_USER_ID))) // TA 关注了我
+    .filter((p) => !edges.has(edgeKey(CURRENT_USER_ID, p.id))) // 我没回关
+    .filter((p) => !seenFollowers.has(p.id))
+    .length
+}
+
+/**
+ * 把"看过粉丝 tab"这个事实记下来（票 #67；决议 #53 §4）。
+ *
+ * 与服务端同一条语义：**幂等**、把当前所有未回关的粉丝标成已看过。
+ * 不逐条已读 —— 红点回答的是"有没有新的人关注我"，不是"哪一条读过"。
+ */
+export async function markFollowersSeen(): Promise<void> {
+  PEOPLE.filter((p) => p.id !== CURRENT_USER_ID)
+    .filter((p) => !isBlockedEither(CURRENT_USER_ID, p.id))
+    .filter((p) => edges.has(edgeKey(p.id, CURRENT_USER_ID)))
+    .filter((p) => !edges.has(edgeKey(CURRENT_USER_ID, p.id)))
+    .forEach((p) => seenFollowers.add(p.id))
 }
 
 // ---------- 拉黑（票 #59：从 friends mock 迁到关注域，成为唯一真源）----------

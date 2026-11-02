@@ -82,6 +82,7 @@ func NewEngineDeps(
 		if pusher := service.NewRealtimePusher(hub, res.Store); pusher != nil {
 			deps.MessagePusher = pusher
 			deps.FriendPusher = pusher
+			deps.FollowPusher = pusher
 			deps.Presence = pusher
 		}
 	}
