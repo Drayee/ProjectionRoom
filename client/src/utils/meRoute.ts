@@ -12,11 +12,16 @@
  * 同族契约（分享 / 刷新 / 后退都不丢）。设置区本身在票 #71 落地，
  * 本票先把**槽位**与键名钉下来 —— 那时只往里填内容，不改地址形态。
  *
- * ## 三个 tab
+ * ## 四个 tab
  *
- *   overview   概览：资料编辑 + 我的帖子 + 我的放映室 + 关系入口
+ *   overview   概览：资料编辑 + 我的帖子 + 我的放映室
  *   relations  关系管理：好友（互关）/ 关注 / 粉丝 三份名单 + 黑名单入口
+ *   favorites  我的收藏（票 #65）：帖子 / 番剧 / 放映室三份书签
  *   settings   账号设置（票 #71 落地；本票只放占位说明）
+ *
+ * 收藏单独一个 tab 而不是塞进概览：它是**跨对象**的（帖子、番剧、放映室三种类型），
+ * 而概览里那两块内容都是"我写的东西"。混在一起会让"我收藏的"与"我发布的"
+ * 变成同一列 —— 那是两种完全不同的关系。
  *
  * 概览与关系分成两个 tab 而不是堆在一页：三份名单每份都可能很长，
  * 堆在资料下面会让"改个昵称"要滚过几十行名单。
@@ -49,8 +54,35 @@ export function parseMeList(raw: unknown): MeRelationList {
   return ME_DEFAULT_LIST
 }
 
-/** 三个 tab。 */
-export type MeTab = 'overview' | 'relations' | 'settings'
+/**
+ * 收藏分区的类型键名。
+ *
+ * 与关系分区的 `list` 同一个理由：`tab` 表达页面级分区（概览/关系/收藏/设置），
+ * 类型是收藏分区**内部**的选择。合成一个键会让 `?tab=post` 与 `?tab=anime`
+ * 看起来像两个页面，而它们其实是同一个页面的两个筛选。
+ */
+export const ME_FAV_TYPE_QUERY = 'type'
+
+/** 收藏分区的三份书签（与 `types/favorites.ts` 的 `FavoriteType` 同值）。 */
+export type MeFavoriteType = 'post' | 'anime' | 'room'
+
+/** 默认收藏类型：帖子。它是三种里数量最多的一种。 */
+export const ME_DEFAULT_FAV_TYPE: MeFavoriteType = 'post'
+
+/**
+ * 解析 `?type=`。
+ *
+ * 未知值回落默认 —— 与 `parseMeTab` / `parseMeList` 同一纪律：地址栏是用户可以
+ * 随手改的地方，改错一个字母就给他一个错误页是没有道理的。
+ */
+export function parseMeFavType(raw: unknown): MeFavoriteType {
+  if (raw === 'anime') return 'anime'
+  if (raw === 'room') return 'room'
+  return ME_DEFAULT_FAV_TYPE
+}
+
+/** 四个 tab。 */
+export type MeTab = 'overview' | 'relations' | 'favorites' | 'settings'
 
 /** 默认 tab：地址里不写 `?tab=` 时就是它。 */
 export const ME_DEFAULT_TAB: MeTab = 'overview'
@@ -63,6 +95,7 @@ export const ME_DEFAULT_TAB: MeTab = 'overview'
  */
 export function parseMeTab(raw: unknown): MeTab {
   if (raw === 'relations') return 'relations'
+  if (raw === 'favorites') return 'favorites'
   if (raw === 'settings') return 'settings'
   return ME_DEFAULT_TAB
 }
@@ -77,13 +110,17 @@ export function parseMeTab(raw: unknown): MeTab {
  * `list` 只在 `tab=relations` 下有意义 —— 概览/设置里带着 `?list=followers`
  * 会让人以为"切个 tab 名单还在"，实际上它被忽略了。所以非关系分区**一律不写**。
  */
-export function mePath(input: { tab?: MeTab; list?: MeRelationList } = {}): string {
+export function mePath(input: { tab?: MeTab; list?: MeRelationList; type?: MeFavoriteType } = {}): string {
   const tab = input.tab ?? ME_DEFAULT_TAB
   const parts: string[] = []
   if (tab !== ME_DEFAULT_TAB) parts.push(ME_TAB_QUERY + '=' + encodeURIComponent(tab))
   if (tab === 'relations') {
     const list = input.list ?? ME_DEFAULT_LIST
     if (list !== ME_DEFAULT_LIST) parts.push(ME_LIST_QUERY + '=' + encodeURIComponent(list))
+  }
+  if (tab === 'favorites') {
+    const type = input.type ?? ME_DEFAULT_FAV_TYPE
+    if (type !== ME_DEFAULT_FAV_TYPE) parts.push(ME_FAV_TYPE_QUERY + '=' + encodeURIComponent(type))
   }
   return parts.length === 0 ? '/me' : '/me?' + parts.join('&')
 }

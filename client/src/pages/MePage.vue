@@ -8,11 +8,16 @@
  * 管理动作全部收在这里。旧实现在同一条路由里按 `isSelf` 切两套视图，
  * 症状是"同一个地址，登录前后是两个页面"—— 分享与后退都说不清。
  *
- * ## 三个分区（`?tab=`，键名唯一源 `utils/meRoute.ts`）
+ * ## 四个分区（`?tab=`，键名唯一源 `utils/meRoute.ts`）
  *
  *   overview   概览：资料编辑（昵称）+ 我的帖子 + 我的放映室
  *   relations  关系管理：好友（互关）/ 关注 / 粉丝 + 黑名单入口
+ *   favorites  我的收藏（票 #65）：帖子 / 番剧 / 放映室三份私人书签
  *   settings   账号设置 —— **票 #71 填内容**，本票只放槽位说明
+ *
+ * 收藏单独一个分区而不是塞进概览：它是**跨对象**的（三种类型各一套主键），
+ * 而概览里那两块都是"我发布的东西"。混在一列会让"我收藏的"与"我发布的"
+ * 看起来是同一类关系。
  *
  * 概览与关系分成两个分区而不是堆一页：三份名单每份都可能很长，
  * 堆在资料下面会让"改个昵称"要滚过几十行名单。
@@ -40,6 +45,7 @@ import RelativeTime from '../components/ui/RelativeTime.vue'
 import UserAvatar from '../components/ui/UserAvatar.vue'
 import AuthorPostsBlock from '../components/features/profile/AuthorPostsBlock.vue'
 import MeRelationsBlock from '../components/features/profile/MeRelationsBlock.vue'
+import MeFavoritesBlock from '../components/features/profile/MeFavoritesBlock.vue'
 import * as usersApi from '../api/users'
 import { NETWORK_MESSAGE, toHttpError } from '../api/http'
 import { isCapabilityUnavailable } from '../api/mode'
@@ -55,6 +61,7 @@ const auth = useAuthStore()
 const TABS: { key: MeTab; label: string; icon: string }[] = [
   { key: 'overview', label: '概览', icon: 'user' },
   { key: 'relations', label: '关系', icon: 'users-group' },
+  { key: 'favorites', label: '收藏', icon: 'star-fill' },
   { key: 'settings', label: '设置', icon: 'settings' },
 ]
 
@@ -307,6 +314,11 @@ watch(tab, async () => {
         <!-- ---------- 关系 ---------- -->
         <section v-else-if="tab === 'relations'" class="sect">
           <MeRelationsBlock />
+        </section>
+
+        <!-- ---------- 收藏（票 #65） ---------- -->
+        <section v-else-if="tab === 'favorites'" class="sect">
+          <MeFavoritesBlock />
         </section>
 
         <!-- ---------- 设置（票 #71 填内容） ---------- -->

@@ -11,7 +11,18 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { ME_DEFAULT_LIST, ME_DEFAULT_TAB, ME_LIST_QUERY, ME_TAB_QUERY, mePath, parseMeList, parseMeTab } from '../src/utils/meRoute.ts'
+import {
+  ME_DEFAULT_FAV_TYPE,
+  ME_DEFAULT_LIST,
+  ME_DEFAULT_TAB,
+  ME_FAV_TYPE_QUERY,
+  ME_LIST_QUERY,
+  ME_TAB_QUERY,
+  mePath,
+  parseMeFavType,
+  parseMeList,
+  parseMeTab,
+} from '../src/utils/meRoute.ts'
 
 test('URL 键名与默认值是稳定的跨票契约', () => {
   assert.equal(ME_TAB_QUERY, 'tab')
@@ -68,4 +79,36 @@ test('list 只在关系分区里写进 URL', () => {
   // 非关系分区带着 list：忽略（不能让人以为"切个 tab 名单还在"）。
   assert.equal(mePath({ tab: 'settings', list: 'followers' }), '/me?tab=settings')
   assert.equal(mePath({ list: 'followers' }), '/me')
+})
+
+// ---------- 票 #65：收藏分区 ----------
+
+test('收藏类型键名与默认值也是契约', () => {
+  assert.equal(ME_FAV_TYPE_QUERY, 'type')
+  assert.equal(ME_DEFAULT_FAV_TYPE, 'post')
+})
+
+test('favorites 是合法 tab（票 #65 新增）', () => {
+  assert.equal(parseMeTab('favorites'), 'favorites')
+  assert.equal(mePath({ tab: 'favorites' }), '/me?tab=favorites')
+})
+
+test('收藏类型解析：三个合法值原样返回，其余一律回落 post', () => {
+  assert.equal(parseMeFavType('post'), 'post')
+  assert.equal(parseMeFavType('anime'), 'anime')
+  assert.equal(parseMeFavType('room'), 'room')
+  for (const raw of ['', 'posts', 'ANIME', 'room ', undefined, null, 7, {}, []]) {
+    assert.equal(parseMeFavType(raw), 'post', '输入 ' + JSON.stringify(raw))
+  }
+})
+
+test('type 只在收藏分区里写进 URL', () => {
+  assert.equal(mePath({ tab: 'favorites', type: 'post' }), '/me?tab=favorites')
+  assert.equal(mePath({ tab: 'favorites', type: 'anime' }), '/me?tab=favorites&type=anime')
+  assert.equal(mePath({ tab: 'favorites', type: 'room' }), '/me?tab=favorites&type=room')
+  // 非收藏分区带着 type：忽略（与 list 同一条纪律）。
+  assert.equal(mePath({ tab: 'settings', type: 'anime' }), '/me?tab=settings')
+  assert.equal(mePath({ type: 'anime' }), '/me')
+  // list 与 type 互不串台。
+  assert.equal(mePath({ tab: 'relations', list: 'blocked', type: 'anime' }), '/me?tab=relations&list=blocked')
 })

@@ -222,7 +222,13 @@ async function main() {
       }
     })()`)
     evidence.overview = overview
-    record('M2a /me 标题与三个分区 tab', overview.title === '我的管理台' && overview.tabs.join('/') === '概览/关系/设置', JSON.stringify(overview.tabs))
+    // 票 #65 起多了一个「收藏」分区（私人书签的落点）。判据跟着分区数走，
+    // 而不是钉死"三个" —— 但顺序仍然是契约：概览 → 关系 → 收藏 → 设置。
+    record(
+      'M2a /me 标题与四个分区 tab',
+      overview.title === '我的管理台' && overview.tabs.join('/') === '概览/关系/收藏/设置',
+      JSON.stringify(overview.tabs),
+    )
     record('M2b 概览有昵称输入框', overview.hasInput, String(overview.hasInput))
     record(
       'M2c 概览有「我的帖子」与「我的放映室」块',

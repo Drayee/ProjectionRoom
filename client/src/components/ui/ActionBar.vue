@@ -40,10 +40,8 @@ const props = withDefaults(
     liked?: boolean
     /** 赞的计数（0 时不显示数字）。 */
     likeCount?: number
-    /** 是否已收藏（票 #64 接线前恒为 false）。 */
+    /** 是否已收藏（票 #64 接线的私人书签状态）。 */
     favorited?: boolean
-    /** 收藏的计数（0 时不显示数字）。 */
-    favoriteCount?: number
     /** 评论数（0 时不显示数字）。 */
     commentCount?: number
     /** 点赞在途：按钮显示 spinner，且**挡住重复触发**（单条在途锁的视觉面）。 */
@@ -61,7 +59,6 @@ const props = withDefaults(
     liked: false,
     likeCount: 0,
     favorited: false,
-    favoriteCount: 0,
     commentCount: 0,
     likeBusy: false,
     favoriteBusy: false,
@@ -102,7 +99,18 @@ function countText(n: number): string {
       </span>
     </button>
 
-    <!-- 收藏：本票占位（票 #64 接线）。aria-pressed 现在就给，接线后不用改契约。 -->
+    <!--
+      收藏：**没有计数位**，这是刻意的（票 #65 清掉了 #63 留下的 favoriteCount 占位）。
+
+      点赞是公开表态、计入 like_count；收藏是私人书签、不产生任何公开数字
+      （决议 #48 §3 的对照表）。`favoriteCount` 这个 prop 从 #63 起就恒为 0、
+      页面从来没传过值 —— 留着它等于在源码层面暗示"这里本该有个数"，
+      而下游真机判据（verify-me-favorites 的 G9）正是按这个字面量抓的。
+
+      `.count` 节点仍然保留但恒为空 + `data-hidden`：验收脚本
+      （verify-authorrow 的 R4a）把"三个动作各有一个计数位"当成结构契约，
+      去掉节点会打挂它。空 = 不显示，与"0 也隐藏"是同一条纪律。
+    -->
     <button
       type="button"
       class="act"
@@ -115,9 +123,7 @@ function countText(n: number): string {
     >
       <BrandIcon :name="props.favorited ? 'star-fill' : 'star'" decorative :size="14" />
       <span class="label">收藏</span>
-      <span class="count" :data-hidden="countText(props.favoriteCount) === '' ? '' : undefined">
-        {{ countText(props.favoriteCount) }}
-      </span>
+      <span class="count" data-hidden=""></span>
     </button>
 
     <button
