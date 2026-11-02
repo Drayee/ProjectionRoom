@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 帖子列表（/posts）。票 #15 定稿形态：瀑布流 masonry + 无限滚动 + 最新/热门 pill tab。
+ * 帖子列表（/posts）。票 #15 定稿形态：瀑布流 masonry + 无限滚动 + 排序 pill。
  *
  * 票 #63 把卡片拆成三层（此前整张卡是一个 `<RouterLink>`，作者/时间/计数全挤在底部一行里）：
  *
@@ -17,8 +17,16 @@
  *
  * 三态（载/空/错/能力降级）统一走 `ui/AsyncState`，点赞走共用的 `usePostLike`
  * （乐观更新 + 失败回滚 + 单条在途锁，与详情页同一份实现）。
+ *
+ * 票 #66 加了第三个 pill「关注」：
+ *
+ *   - 选中态进 URL（`?sort=`），键名唯一源是 `utils/postsRoute.ts`；
+ *   - 它**需要登录**。游客点它**不被弹走** —— 列表区就地渲染登录引导（决议 #52 §6），
+ *     理由是"读动作被弹走最烦"：用户想看关注流，却被扔到登录页，回来还得自己点回来；
+ *   - 已登录但 0 关注时给"去找人"的深链（`/friends?focus=search`），
+ *     不搞"暂无更新"那种假空态（决议 §7：不设新鲜度门槛）。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { RouterLink } from 'vue-router'
 import ActionBar from '../components/ui/ActionBar.vue'
@@ -31,6 +39,8 @@ import { useApiFailure } from '../components/features/common/useApiFailure'
 import { useFavorite } from '../components/features/common/useFavorite'
 import { usePostLike } from '../components/features/common/usePostLike'
 import { useAuthStore } from '../stores/auth'
+import { POSTS_SORT_QUERY, parsePostsSort, postsPath, sortNeedsLogin, type PostsSort } from '../utils/postsRoute'
+import { findPeoplePath } from '../utils/friendsRoute'
 import type { Post } from '../types/posts'
 
 const route = useRoute()
@@ -50,7 +60,13 @@ const { setFavorite, isBusy: isFavBusy, toast: favToast } = useFavorite()
 const notice = computed(() => toast.value || favToast.value)
 
 const posts = ref<Post[]>([])
-const sort = ref<'latest' | 'hot'>('latest')
+/**
+ * 当前排序。**URL 是唯一真源**（票 #66 / 决议 #52 §8）。
+ *
+ * 用 computed 读 URL 而不是用 ref 存一份：两份状态一定会漂 ——
+ * 症状是"后退键回到上一个 pill，但列表还是新的那个"。
+ */
+const sort = computed<PostsSort>(() => parsePostsSort(route.query[POSTS_SORT_QUERY]))
 const busy = ref(false)
 const loadingMore = ref(false)
 const page = ref(1)
@@ -61,6 +77,14 @@ const hasMore = ref(false)
  */
 const capabilityMissing = ref(false)
 
+/**
+ * 关注流需要登录（票 #66 / 决议 #52 §6）。
+ *
+ * 刻意**不是** `auth.redirectToLogin()`：读动作被弹走最烦。这里只在列表区
+ * 就地渲染一段登录引导，URL 保持 `?sort=following` —— 用户登录回来还在这个 pill 上。
+ */
+const needsLogin = computed(() => sortNeedsLogin(sort.value) && !auth.isLoggedIn && !auth.restoring)
+
 /** 失败态的一行文案（分诊结果，见 useApiFailure）。 */
 const failureText = computed(() => {
   const f = failure.value
@@ -70,21 +94,45 @@ const failureText = computed(() => {
   return ''
 })
 
-/** AsyncState 的三种非 ready 态（`ready` 时直接渲染瀑布流，不多套一层空壳）。 */
-type ListState = 'loading' | 'empty' | 'error' | 'capability'
+/** AsyncState 的非 ready 态（`ready` 时直接渲染瀑布流，不多套一层空壳）。 */
+type ListState = 'loading' | 'empty' | 'error' | 'capability' | 'login'
 
 /**
  * 列表区该渲染哪一态。
  *
- * 顺序刻意是「能力降级 → 错误 → 加载 → 空」：能力降级与错误都必须在**有旧数据**时
- * 也优先显示，否则用户会以为"刷新成功了，只是变少了"。
+ * 顺序刻意是「登录引导 → 能力降级 → 错误 → 加载 → 空」：
+ *
+ *   - 登录引导排最前：游客看关注流时**根本没有请求可发**，让它落到 error/empty
+ *     都是在描述一件没发生过的事；
+ *   - 能力降级与错误都必须在**有旧数据**时也优先显示，否则用户会以为
+ *     "刷新成功了，只是变少了"。
  */
 const listState = computed<ListState | 'ready'>(() => {
+  if (needsLogin.value) return 'login'
   if (capabilityMissing.value) return 'capability'
   if (failureText.value) return 'error'
   if (busy.value) return 'loading'
   if (posts.value.length === 0) return 'empty'
   return 'ready'
+})
+
+/**
+ * 空态文案：**关注流空**与**全站没有帖子**必须分开说（决议 #52 §7）。
+ *
+ * 关注流空时用户要做的事是"去找人关注"，而不是"去发第一帖" ——
+ * 后者会让一个刚注册的人以为"关注流里应该有我的帖子"。
+ */
+const emptyCopy = computed(() => {
+  if (sort.value === 'following') {
+    return {
+      title: '还没有关注任何人',
+      hint: '关注是单向的，不需要对方同意。去好友页找一个人，点「关注」就能在这里看到 TA 的帖子。',
+    }
+  }
+  return {
+    title: '这里还没有帖子',
+    hint: '第一条帖子可能就是你写的 —— 说说今晚想一起看什么。',
+  }
 })
 
 const sentinel = ref<HTMLElement | null>(null)
@@ -101,6 +149,9 @@ function excerpt(content: string, max = 72): string {
 }
 
 async function load() {
+  // 游客点进关注流：不发请求（发出去必然 401，而那个 401 会被分诊成"错误"，
+  // 把一段本可以就地展示的登录引导变成一句吓人的红字）。
+  if (needsLogin.value) return
   if (busy.value) return
   busy.value = true
   const r = await run(() => postsApi.listPosts({ sort: sort.value, page: 1 }))
@@ -138,10 +189,14 @@ async function loadMore() {
   hasMore.value = r.hasMore
 }
 
-function switchSort(next: 'latest' | 'hot') {
+function switchSort(next: PostsSort) {
   if (sort.value === next) return
-  sort.value = next
-  void load()
+  // 只改 URL —— `watch(sort)` 负责重取（票 #66：URL 是唯一真源）。
+  //
+  // 这样做的好处是**后退键免费生效**：用户从"关注"点回"最新"再按后退，
+  // 地址栏与列表会一起回去；如果这里同时 `void load()`，后退就会
+  // 变成"地址变了、列表还是新的"（两份状态各走各的）。
+  void router.replace(postsPath({ sort: next }))
 }
 
 /**
@@ -179,6 +234,33 @@ onMounted(() => {
   }
 })
 
+/**
+ * 排序变了就重取（票 #66）。
+ *
+ * 盯 `sort`（也就是 URL）而不是盯点击：这样后退键、手改地址栏、
+ * 从别处跳进来三种来源都走同一条路径。
+ *
+ * 关注流对游客不发请求（`load()` 内部早退），所以"游客切到关注流"不会打出
+ * 一个必然 401 的请求 —— 那个 401 只该在真的没登录却硬发请求时出现。
+ */
+watch(sort, () => {
+  posts.value = []
+  hasMore.value = false
+  page.value = 1
+  failure.value = null
+  if (needsLogin.value) return
+  void load()
+})
+
+/** 登录态翻转后补一次（游客点了「去登录」、在新标签页登录回来时用得上）。 */
+watch(
+  () => auth.isLoggedIn,
+  (loggedIn) => {
+    if (!loggedIn || !sortNeedsLogin(sort.value)) return
+    if (posts.value.length === 0) void load()
+  },
+)
+
 onBeforeUnmount(() => {
   observer?.disconnect()
   observer = undefined
@@ -196,12 +278,13 @@ onBeforeUnmount(() => {
         </RouterLink>
       </div>
       <!-- 排序标签页：外壳是 ui/Button（票 #62 首批替换），选中态用组件暴露的变量接上，
-           页面不重写状态色。 -->
+           页面不重写状态色。三个 pill 的选中态都来自 URL（票 #66）。 -->
       <div class="tabs" role="tablist">
         <Button
           variant="ghost"
           class="tab"
           role="tab"
+          data-sort="latest"
           :aria-selected="sort === 'latest'"
           :class="{ on: sort === 'latest' }"
           @click="switchSort('latest')"
@@ -212,40 +295,68 @@ onBeforeUnmount(() => {
           variant="ghost"
           class="tab"
           role="tab"
+          data-sort="hot"
           :aria-selected="sort === 'hot'"
           :class="{ on: sort === 'hot' }"
           @click="switchSort('hot')"
         >
           热门
         </Button>
+        <!-- 「关注」对游客**可见可点**（决议 #52 §6）：点进来看到的是就地登录引导，
+             而不是被弹到登录页。 -->
+        <Button
+          variant="ghost"
+          class="tab"
+          role="tab"
+          data-sort="following"
+          :aria-selected="sort === 'following'"
+          :class="{ on: sort === 'following' }"
+          @click="switchSort('following')"
+        >
+          关注
+        </Button>
       </div>
 
-      <!-- 三态统一出口（票 #63）。空态带一个"去发第一帖"的行动，而不是一句干巴巴的说明。 -->
+      <!-- 三态统一出口（票 #63）。空态带一个行动，而不是一句干巴巴的说明；
+           关注流空时那个行动是"去找人"（票 #66 / 决议 #52 §7）。 -->
       <AsyncState
         v-if="listState !== 'ready'"
-        :state="listState"
+        :state="listState === 'login' ? 'empty' : listState"
         :title="
-          listState === 'capability'
-            ? '帖子分区后端尚未上线'
-            : listState === 'error'
-              ? '没能加载出帖子'
-              : listState === 'empty'
-                ? '这里还没有帖子'
-                : '加载中'
+          listState === 'login'
+            ? '登录后可看关注流'
+            : listState === 'capability'
+              ? '帖子分区后端尚未上线'
+              : listState === 'error'
+                ? '没能加载出帖子'
+                : listState === 'empty'
+                  ? emptyCopy.title
+                  : '加载中'
         "
         :hint="
-          listState === 'capability'
-            ? '上线后这里是瀑布流帖子列表：最新 / 热门排序、封面与评论计数。'
-            : listState === 'error'
-              ? failureText
-              : listState === 'empty'
-                ? '第一条帖子可能就是你写的 —— 说说今晚想一起看什么。'
-                : ''
+          listState === 'login'
+            ? '关注流只显示你关注的人发的帖子。登录之后就能看到，不需要对方同意。'
+            : listState === 'capability'
+              ? '上线后这里是瀑布流帖子列表：最新 / 热门 / 关注排序、封面与评论计数。'
+              : listState === 'error'
+                ? failureText
+                : listState === 'empty'
+                  ? emptyCopy.hint
+                  : ''
         "
+        :icon="listState === 'login' ? 'users-group' : 'info'"
         :retryable="listState === 'error' || listState === 'capability'"
         @retry="load"
       >
-        <RouterLink v-if="listState === 'empty'" class="empty-cta" :to="{ name: 'post-editor' }">
+        <!-- 登录引导：留在原地，URL 不动 —— 登录回来还停在「关注」这个 pill 上。 -->
+        <RouterLink v-if="listState === 'login'" class="empty-cta" :to="{ name: 'login', query: { redirect: route.fullPath } }">
+          <Button variant="primary" size="sm">去登录</Button>
+        </RouterLink>
+        <!-- 关注流为空：深链到好友页并聚焦页头搜索框（#50 已定搜索是状态不是去处）。 -->
+        <RouterLink v-else-if="listState === 'empty' && sort === 'following'" class="empty-cta" :to="findPeoplePath()">
+          <Button variant="primary" size="sm">去找人关注</Button>
+        </RouterLink>
+        <RouterLink v-else-if="listState === 'empty'" class="empty-cta" :to="{ name: 'post-editor' }">
           <Button variant="primary" size="sm">去发第一帖</Button>
         </RouterLink>
       </AsyncState>

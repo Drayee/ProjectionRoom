@@ -25,6 +25,18 @@ export const FRIENDS_TAB_QUERY = 'tab'
 export const FRIENDS_Q_QUERY = 'q'
 
 /**
+ * "进页就把焦点放进搜索框"的 query 键名（票 #66 的空态深链用）。
+ *
+ * 决议 #52 §7 的空态引导是「还没有关注任何人 → 按钮深链找人入口」，
+ * 而找人的动作就发生在好友页**页头那个常驻搜索框**里（#50 已定：搜索是状态，不是去处）。
+ * 所以深链要能把焦点直接送进去 —— 否则用户点完按钮落到一屏列表上，
+ * 还得自己找到输入框再点一下。
+ *
+ * 合法值只有 `search`；未知值等于没写（见 `wantsSearchFocus`）。
+ */
+export const FRIENDS_FOCUS_QUERY = 'focus'
+
+/**
  * 四个 tab（票 #50 定稿）。
  *
  * `mutual` = 好友（互关）。它不是"另一种关系状态"，而是**派生事实**
@@ -100,4 +112,25 @@ export function friendsPath(input: { tab?: FriendsTab; q?: string } = {}): strin
  */
 export function shouldSearch(raw: string): boolean {
   return Array.from(raw.trim()).length >= FRIENDS_MIN_QUERY
+}
+
+/**
+ * 这个 URL 是不是要求"进页聚焦搜索框"。
+ *
+ * 只认 `focus=search` 一个值：URL 是别人给的，一个手改错的 `?focus=xx`
+ * 不该让页面做出任何意外动作（这里最坏的结果只是"没聚焦"）。
+ */
+export function wantsSearchFocus(raw: unknown): boolean {
+  return typeof raw === 'string' && raw.trim() === 'search'
+}
+
+/**
+ * 「找人」的深链（票 #66 的空态引导用）。
+ *
+ * 落点刻意是 `/friends?focus=search` 而**不是**某个 tab：
+ * 搜索是页头常驻状态、不依附任何 tab（#50 的勘误已把 `tab=followers` 那半截划掉）——
+ * 带一个 tab 只会让人以为"搜索只在这个 tab 里有效"。
+ */
+export function findPeoplePath(): string {
+  return '/friends?' + FRIENDS_FOCUS_QUERY + '=search'
 }

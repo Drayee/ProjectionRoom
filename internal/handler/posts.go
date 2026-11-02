@@ -222,8 +222,10 @@ func (h *postHandler) list(c *gin.Context) {
 		sort = store.PostsSortLatest
 	case "hot":
 		sort = store.PostsSortHot
+	case "following":
+		sort = store.PostsSortFollowing
 	default:
-		adminBadRequest(c, "sort 只支持 latest 或 hot")
+		adminBadRequest(c, "sort 只支持 latest、hot 或 following")
 		return
 	}
 
@@ -239,8 +241,25 @@ func (h *postHandler) list(c *gin.Context) {
 	}
 
 	viewer := h.optionalViewer(c)
+	// 关注流（票 #66）：匿名请求 → 401，**不是**空列表。
+	//
+	// 为什么在 handler 里显式判而不是让 store 回空：匿名视角下"我关注的人"没有意义，
+	// 回空列表会把"没登录"伪装成"你还没关注谁"，界面于是给出错误引导（叫游客去关注人）。
+	// 状态码用 401 而不是 400：参数是对的，缺的是登录态 —— 前端 authedFetch 对 401
+	// 有既定的分诊路径（刷新或弹登录），400 会走"参数写错了"的提示。
+	if sort == store.PostsSortFollowing && viewer == 0 {
+		abortUnauthorized(c, CodeUnauthorized, "关注流需要登录后查看")
+		return
+	}
+
 	rows, hasMore, err := h.store.ListPosts(c.Request.Context(), sort, limit, offset, viewer)
 	if err != nil {
+		// store 层的兜底：即使 handler 上面的判据被绕过（比如将来有别的入口），
+		// 也不会退化成"空列表"。
+		if errors.Is(err, store.ErrFlowNeedsViewer) {
+			abortUnauthorized(c, CodeUnauthorized, "关注流需要登录后查看")
+			return
+		}
 		postInternal(c, "帖子列表查询失败", err)
 		return
 	}

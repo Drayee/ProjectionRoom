@@ -46,12 +46,14 @@ import { useAuthStore } from '../stores/auth'
 import { conversationPath } from '../utils/dmRoute'
 import {
   FRIENDS_DEBOUNCE_MS,
+  FRIENDS_FOCUS_QUERY,
   FRIENDS_Q_QUERY,
   FRIENDS_TAB_QUERY,
   friendsPath,
   parseFriendsQuery,
   parseFriendsTab,
   shouldSearch,
+  wantsSearchFocus,
   type FriendsTab,
 } from '../utils/friendsRoute'
 import type { FollowListEntry, FollowListTab } from '../api/follows'
@@ -406,6 +408,14 @@ onMounted(() => {
   draft.value = applied.value
   if (auth.isLoggedIn) void loadList()
   if (applied.value !== '') void runSearch()
+  // 深链带 focus=search：进页把焦点送进搜索框（票 #66 的空态引导落点）。
+  //
+  // 用 `nextTick` 是因为输入框在 `v-if` 的登录态分支里 —— 首帧时它可能还不存在。
+  // 与下面那条"列表为空才聚焦"的 watch 不冲突：那条只在空态触发，
+  // 而这条是**显式意图**（用户点了「去找人」），所以无论列表空不空都执行。
+  if (wantsSearchFocus(route.query[FRIENDS_FOCUS_QUERY])) {
+    void nextTick(() => searchInput.value?.focus())
+  }
 })
 
 /**

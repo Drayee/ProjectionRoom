@@ -210,6 +210,14 @@ type ListPostsSort string
 const (
 	PostsSortLatest ListPostsSort = "latest" // created_at DESC（默认）
 	PostsSortHot    ListPostsSort = "hot"    // (like+comment) DESC, created_at DESC
+
+	// PostsSortFollowing 是"只看我关注的人"（决议 #52 §1-§2 / 票 #66）。
+	//
+	// 排序**严格按时间倒序**，与 latest 同口径：不做热度加权、不搞"智能排序"——
+	// 加权参数要调，而空窗期会让流整天不更新；时间线永远可预测。
+	//
+	// 它需要登录（`ErrFlowNeedsViewer`）：匿名视角下"我关注的人"没有意义。
+	PostsSortFollowing ListPostsSort = "following"
 )
 
 // ListAnimeThreadsSort 是**板块内**主题串列表的排序方式（wayfinder #38）。
@@ -252,12 +260,28 @@ func (s *Store) ListPosts(ctx context.Context, sort ListPostsSort, limit, offset
 		order = "(p.like_count + p.comment_count) DESC, p.created_at DESC"
 	}
 
-	var rows []Post
-	err := s.db.WithContext(ctx).
+	db := s.db.WithContext(ctx).
 		Table("posts AS p").
 		Select("p.*, u.display_name AS author_name").
 		Joins("JOIN users u ON u.id = p.author_id").
-		Order(order + ", p.id DESC").
+		Order(order + ", p.id DESC")
+
+	// 关注流（票 #66）：先缩到"我关注的人"，再统一过可见性谓词。
+	//
+	// 两件事分开调是刻意的（见 flow.go 的注释）：`applyFollowingScope` 回答
+	// "要不要只挑这一批"，`applyAuthorVisibility` 回答"这批里谁能被看见"。
+	// 合成一个函数会让他人档案页（#68）无处复用后半段。
+	if sort == PostsSortFollowing {
+		var err error
+		db, err = applyFollowingScope(db, viewerID, "p.author_id")
+		if err != nil {
+			return nil, false, err
+		}
+		db = s.applyAuthorVisibility(db, viewerID, "p.author_id")
+	}
+
+	var rows []Post
+	err := db.
 		Limit(limit + 1).Offset(offset). // 多取一行：hasMore 的判据
 		Find(&rows).Error
 	if err != nil {

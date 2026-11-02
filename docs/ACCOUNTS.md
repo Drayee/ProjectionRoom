@@ -224,6 +224,34 @@ can_dm(A,B) := mutual_follow(A,B) ∧ NOT blocked_either(A,B) —— 唯一的�
 `GET /api/follows/:userId`（我与 TA 的关系 + TA 的关注/粉丝数）/
 **`GET /api/follows?tab=mutual|following|followers`**（名单；好友列表就是 `tab=mutual`）。
 
+### 7.1c 关注流（票 #66；决议 #52）
+`GET /api/posts?sort=following` —— **sort 枚举扩展，不新建子资源路由**（关注流是"同一批帖子换一种挑法"，
+不是另一种资源）。只看我关注的人发的帖：普通帖与板块主题串**都算**（关注的是人，不是帖子类型），
+严格时间倒序，不做热度加权（时间线永远可预测；热度加权有空窗期，空窗期里用户以为坏了）。
+
+过滤口径是 `internal/store/flow.go` 的**唯一实现**，刻意分成两层：
+
+- `applyFollowingScope(db, viewerID, authorCol)` —— 「要不要只挑这一批」。
+  `viewerID <= 0` 返回 `store.ErrFlowNeedsViewer`，**不返回空列表**：匿名视角下"我关注的人"
+  没有意义，空列表会把"没登录"伪装成"你还没关注谁"，界面于是给出错误引导。
+- `applyAuthorVisibility(db, viewerID, authorCol)` —— 「能不能看见」：作者未封禁 ∧ 双向无拉黑。
+  匿名时跳过拉黑那一条（`requester_id = 0` 匹配不到任何行），封禁对匿名同样生效。
+
+两层分开是刻意的：合成一个函数的话，他人档案页（#68）的帖列表就只能复用后半段，
+注销隐藏（#51）又要再写第三遍。
+
+**匿名请求 `sort=following` 一律 401**：handler 层先判一次（`CodeUnauthorized` +
+「关注流需要登录后查看」），store 层再用 `ErrFlowNeedsViewer` 兜一次 —— 后者防的是
+"别的入口绕过 handler 直接调 store"。用例 `TestFollowingFlowRejectsAnonymous` 与
+`TestFollowingFlowRequiresViewer` 各钉一头。
+
+前端：`/posts` 第三个 pill，选中态**只读 URL**（`client/src/utils/postsRoute.ts` 是键名唯一源，
+`sort` 的默认值不写进 URL）。`switchSort` 只 `router.replace`，不碰内存 ref ——
+两份状态一定会漂，症状是"后退键回到上一个 pill 但列表还是新的那个"。
+**游客点「关注」pill 不被弹走**（决议 #52 §6「读动作被弹走最烦」）：就地渲染登录引导，
+`?redirect=` 带回当前 URL，登录回来还停在关注流。0 关注空态深链 `/friends?focus=search`
+（#50 已定搜索是页头常驻**状态**、不依附任何 tab，所以不带 `tab=`）。
+
 **已退役的端点（票 #59）**：`GET /api/friends`、`GET|POST /api/friends/requests`、
 `POST /api/friends/requests/:id/{accept,reject}`、`DELETE /api/friends/:id`。
 它们**不在路由表里**了 —— 与 `/api/auth/forgot`、`/api/auth/reset` 同一先例，
@@ -318,6 +346,7 @@ GET    /api/favorites?type=post|room|anime&before=&limit=
 好友 / 关注（票 #59 之后）
   POST   /api/follows                       DELETE /api/follows/:userId
   GET    /api/follows/:userId               GET    /api/follows?tab=mutual|following|followers
+  GET    /api/posts?sort=following          关注流（票 #66；需登录，匿名 401）
   POST   /api/blocks                        GET    /api/blocks
   DELETE /api/blocks/:userId                GET    /api/users/search?q=
   （已退役：GET /api/friends、GET|POST /api/friends/requests、

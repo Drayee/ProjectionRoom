@@ -228,6 +228,36 @@ export function mockBlockedIds(): number[] {
 }
 
 /**
+ * 我关注的人（按 id 升序，稳定）—— 关注流（票 #66）用。
+ *
+ * 只回 id，与服务端 `ListFollowing` 同形状：调用方要的是"作者 id 集合"，
+ * 不是一个渲染好的人列表。关注流在 mock 里就是按这个集合过滤帖子。
+ *
+ * **只给 id 还有一个必要**：`api/mock/posts.ts` 需要它做过滤，而如果这里返回
+ * 带 `displayName` 的对象，就会把"人怎么显示"的职责泄漏到一个数据模块里
+ * （帖子域自己已经有作者表了）。
+ */
+export function mockFolloweeIds(): number[] {
+  const out: number[] = []
+  for (const key of edges) {
+    const [follower, followee] = key.split('->').map(Number)
+    if (follower === CURRENT_USER_ID) out.push(followee)
+  }
+  return out.sort((a, b) => a - b)
+}
+
+/**
+ * 这个作者对当前用户可见吗（关注流的谓词，与服务端 `applyAuthorVisibility` 同口径）。
+ *
+ * 三条：不是我自己、我没拉黑他、他没拉黑我。
+ * （"未封禁"这一条 mock 没有对应状态：8 人目录里没有封禁的人。）
+ */
+export function mockAuthorVisibleInFlow(authorId: number): boolean {
+  if (authorId === CURRENT_USER_ID) return false
+  return !isBlockedEither(CURRENT_USER_ID, authorId)
+}
+
+/**
  * 拉黑。
  *
  * 服务端 `BlockUser` 在一个事务里做两件事：写 blocked 行 + 删掉

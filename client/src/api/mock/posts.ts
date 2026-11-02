@@ -9,6 +9,7 @@ import { HttpError } from '../http'
 import type { Comment, ListPostsInput, ListPostsResult, Post } from '../../types/posts'
 import { MOCK_ANIME_THREADS } from './animeSeed'
 import { isFavorited } from './favoriteStore'
+import { mockAuthorVisibleInFlow, mockFolloweeIds } from './follows'
 
 // ---------- Mock 数据 ----------
 
@@ -166,15 +167,28 @@ for (const thread of MOCK_ANIME_THREADS) {
   }
 }
 
-// ---------- 排序（按最新 / 按热度） ----------
+// ---------- 排序（按最新 / 按热度 / 按关注） ----------
 
-function sortPosts(posts: Post[], sort: 'latest' | 'hot'): Post[] {
+/**
+ * 排序（最新 / 热门 / 关注）。
+ *
+ * 关注流（票 #66）在 mock 里同样要过两条：缩到"我关注的人"、再滤掉不可见的作者。
+ * 与服务端 `applyFollowingScope` + `applyAuthorVisibility` 一一对应 ——
+ * 只是那边是 SQL 谓词，这里是内存过滤。
+ */
+function sortPosts(posts: Post[], sort: 'latest' | 'hot' | 'following'): Post[] {
   const list = [...posts]
   if (sort === 'hot') {
     list.sort((a, b) => (b.likeCount + b.commentCount) - (a.likeCount + a.commentCount))
-  } else {
-    list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    return list
   }
+  if (sort === 'following') {
+    const followees = new Set(mockFolloweeIds())
+    return list
+      .filter((p) => followees.has(p.authorId) && mockAuthorVisibleInFlow(p.authorId))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+  }
+  list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
   return list
 }
 

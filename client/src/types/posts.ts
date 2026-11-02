@@ -53,7 +53,13 @@ export interface Comment {
 
 /** 帖子列表入参（排序 + 页码）。 */
 export interface ListPostsInput {
-  sort?: 'latest' | 'hot'
+  /**
+   * 排序（票 #66 扩了第三个值）。
+   *
+   * `following` = 只看我关注的人，按发帖时间倒序（决议 #52 §1-§2）。
+   * 它**需要登录**：服务端对匿名请求回 401，页面据此渲染分区内登录引导。
+   */
+  sort?: 'latest' | 'hot' | 'following'
   page?: number
 }
 
