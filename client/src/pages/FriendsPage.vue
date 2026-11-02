@@ -179,16 +179,22 @@ const rows = computed<Row[]>(() => {
   }))
 })
 
-/** 搜索结果也归一成 Row（`SearchHit` 的四个布尔是可选的，缺省按 relation 回退）。 */
+/**
+ * 搜索结果也归一成 Row。
+ *
+ * 五个布尔在 `SearchHit` 上是**必填**的（票 #59 之后服务端总是给全），
+ * 所以这里不再有"缺省按 relation 回退"的分支 —— 那条兼容路径随
+ * friendships 流水线一起退役了。
+ */
 const hitRows = computed<Row[]>(() =>
   hits.value.map((h) => ({
     userId: h.id,
     displayName: h.displayName,
     username: '',
-    following: h.following === true,
-    followedBy: h.followedBy === true,
-    mutual: h.mutual === true,
-    blocked: h.blocked === true || h.relation === 'blocked',
+    following: h.following,
+    followedBy: h.followedBy,
+    mutual: h.mutual,
+    blocked: h.blocked,
   })),
 )
 

@@ -312,20 +312,30 @@ async function main() {
       tokenText: tokens.text,
     }
     // "--state-active" 在 tokens.css 里是 #272033 → 计算样式是 rgb(39, 32, 51)。
+    //
+    // ⚠ 必须归一化再比：同一个颜色 Chrome 会按需给出 `rgb(r, g, b)` 或
+    // `rgba(r, g, b, 1)` 两种写法（取决于这条声明有没有经过合成层/过渡的路径），
+    // 直接字符串相等就是"平时绿、偶尔红"的假门槛 —— 实测在本文件里出现过一次
+    // `rgba(39, 32, 51, 1)` 被判定失败。颜色是数值，就该按数值比。
     const expectedBg = '#272033'
     const hexToRgb = (hex) => {
       const n = Number.parseInt(hex.slice(1), 16)
       return 'rgb(' + ((n >> 16) & 255) + ', ' + ((n >> 8) & 255) + ', ' + (n & 255) + ')'
     }
+    /** `rgba(r, g, b, 1)` → `rgb(r, g, b)`；其余原样返回（含 `transparent`）。 */
+    const normalizeColor = (value) => {
+      const m = /^rgba\((.+),\s*1(?:\.0+)?\)$/.exec(String(value || '').trim())
+      return m ? 'rgb(' + m[1] + ')' : String(value || '').trim()
+    }
     const expectedActiveBg = hexToRgb(expectedBg)
     record(
       'N8a 当前项底色 == --state-active（#272033）',
-      Boolean(litItem) && litItem.bg === expectedActiveBg,
+      Boolean(litItem) && normalizeColor(litItem.bg) === expectedActiveBg,
       '当前项 ' + (litItem ? litItem.bg : '') + ' / 期望 ' + expectedActiveBg + ' / 令牌原文 ' + tokens.active,
     )
     record(
       'N8b 未选中项没有状态底（与当前项不同色）',
-      Boolean(dim) && dim.bg !== (litItem ? litItem.bg : ''),
+      Boolean(dim) && normalizeColor(dim.bg) !== normalizeColor(litItem ? litItem.bg : ''),
       '未选中 ' + (dim ? dim.bg : '') + ' / 当前 ' + (litItem ? litItem.bg : ''),
     )
     record(

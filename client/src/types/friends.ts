@@ -1,18 +1,16 @@
 /**
  * 好友域的数据模型（纯文本插值，无 HTML）。
  *
- * 门面契约（`FriendEntry` / `FriendRequests` / `SearchHit` / `BlockedEntry`）也收在这里：
- * mock 与 real 两份实现共同遵守，放类型层避免 `mock → 门面 → mock` 的环
- * （与 `types/posts.ts` 收 `ListPostsInput` 是同一条理由）。
+ * ⚠ **票 #59 之后这里只剩「搜索」与「黑名单」两件事**：
+ * 「好友」不再是这张表里的一种状态，而是关注域的**派生**（互关）。
+ * 曾经的 `FriendshipStatus` / `FriendEntry` / `FriendRequest(s)` / `RelationState`
+ * 随好友请求流水线一起退役 —— 留着它们只会诱使新代码再去读一个没有真源的状态。
  *
- * 形状对着服务端 #29 冻结的 `friendshipView`（`relationshipId` / `userId` / `displayName` /
- * `status`）做了一层**显示层化**：把 `userId + displayName` 收进 `user`，并补上前端才需要的
- * 两个派生字段（头像首字母/颜色）与 `presence`。派生只在 `api/real/friends.ts` 里做，
- * 服务端契约不掺显示层（同 #26 对帖子域的处理）。
+ * 三个仍然活着的形状对着服务端冻结的契约：
+ *   - `searchHitView`    → `SearchHit`（关注域四个布尔 + blocked）
+ *   - `blockedEntryView` → `BlockedEntry`
+ *   - `UserAvatar` 的 `user` prop → `PersonRef`
  */
-
-/** 关系状态：与服务端 `friendships.status` 逐字一致（docs/ACCOUNTS.md §7.1）。 */
-export type FriendshipStatus = 'pending' | 'accepted' | 'blocked'
 
 /**
  * 在线态。
@@ -31,71 +29,37 @@ export interface PersonRef {
   avatarColor: string
 }
 
-/** 好友列表里的一行：`accepted` 关系 + 对方。 */
-export interface FriendEntry {
-  /**
-   * 关系行 id。
-   *
-   * **它是删除好友 / 接受请求时唯一正确的身份**，不是对方的 `userId`：
-   * `DELETE /api/friends/:friendshipId` 收的是关系 id，传成 userId 只会 404
-   * （服务端对越权与不存在统一回 404，见 #29）。
-   */
-  relationshipId: number
-  /** 关系里的"对方"（相对当前登录用户）。 */
-  user: PersonRef
-  status: FriendshipStatus
-  presence: PresenceState
-}
-
-/** 待处理请求的一行（收件箱 / 发件箱共用一个形状）。 */
-export interface FriendRequest {
-  relationshipId: number
-  user: PersonRef
-  status: FriendshipStatus
-}
-
-/** 待处理请求的两摞：别人发给我的（可接受/拒绝）与我发出去的（只能等）。 */
-export interface FriendRequests {
-  incoming: FriendRequest[]
-  outgoing: FriendRequest[]
-}
-
 /**
- * 搜索结果里"我和这个人现在是什么关系" —— 决定按钮该显示什么、能不能点。
+ * 搜索结果里的一行。
  *
- * 与服务端 #39 的 `relation` 逐字对应（store.RelationState 那一组常量）：
- * `none|friend|pending-out|pending-in|blocked`。`pending-*` 的**方向**由谁是
- * 请求方决定（服务端按 requester 判），前端不重新推导。
+ * **关系事实全部来自关注域**（票 #58 落地、#59 收口）：服务端一次算好四个布尔，
+ * 前端据此决定给「关注 / 已关注 / 回关 / 发消息」哪一颗按钮，不自己推导方向
+ * （I3：授权与关系判定都在服务端）。
+ *
+ * 旧版本这里还有一个 `relation: 'none'|'friend'|'pending-out'|'pending-in'|'blocked'`，
+ * 那是 friendships 流水线的语言。它退役之后，「是不是好友」由 `mutual` 回答 ——
+ * 同一个问题有两个字段可读，早晚会读到不一样的那个。
  */
-export type RelationState = 'none' | 'friend' | 'pending-out' | 'pending-in' | 'blocked'
-
 export interface SearchHit extends PersonRef {
-  relation: RelationState
-  /**
-   * 关注域的四个事实（票 #58）。
-   *
-   * 为什么搜索结果要带这一组：好友页的结果行按**关注方向**给按钮
-   * （关注 / 已关注 / 回关 / 发消息），而这四个布尔是服务端算好的权威值。
-   * 让前端拿 `relation` 去推方向，等于在客户端重建一份关注模型（违反 I3）。
-   *
-   * 旧实现（`api/mock/friends.ts`）没有这四个字段，所以类型上做成可选：
-   * 缺省时页面按 `relation` 回退（兼容路径），有值时优先用它们。
-   */
-  following?: boolean
-  followedBy?: boolean
-  mutual?: boolean
-  canDm?: boolean
+  /** 我关注了 TA。 */
+  following: boolean
+  /** TA 关注了我。 */
+  followedBy: boolean
+  /** 互关 = 好友（GLOSSARY：好友 ≡ 互关，没有独立的好友请求状态）。 */
+  mutual: boolean
+  /** 能私聊：互关且双向无拉黑（服务端 `can_dm`）。 */
+  canDm: boolean
   /**
    * 我们之间存在拉黑（**不区分方向**）。
    *
    * 拉黑存续期整个不给关注按钮（GLOSSARY：拉黑存续期禁止新关注）。
-   * 与 `relation === 'blocked'` 的区别：后者只反映 friendships 表里那行的状态，
-   * 而拉黑从任意一侧成立都算 —— 这个布尔由关注域统一算出。
+   * 刻意不告诉前端"是谁拉黑了谁" —— 那个方向没有产品用途，
+   * 却能让被拉黑的人知道对方拉黑了自己。
    */
-  blocked?: boolean
+  blocked: boolean
 }
 
-/** 黑名单里的一行。解除拉黑按 `userId`（`DELETE /api/blocks/:userId`，#39）。 */
+/** 黑名单里的一行。解除拉黑按 `userId`（`DELETE /api/blocks/:userId`）。 */
 export interface BlockedEntry {
   user: PersonRef
 }

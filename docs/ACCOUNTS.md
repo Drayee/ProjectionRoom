@@ -182,23 +182,50 @@ schema_migrations
 
 ## 7. 社交：好友与私聊
 
-### 7.1 好友
-`POST /api/friends/requests`（发起）→ 对方 `accept`/`reject`。
-**存储形态：一段关系只存一行**（`requester_id`/`addressee_id` 按登记时的角色写入）。三种状态的语义分别是：
-`accepted` **对称**（任一方查询都能看到对方，不需要第二条边）；`pending` **有向**（只有 `addressee_id` 能 accept/reject）；`blocked` **有向**（`blocked_by_id` 记录是谁拉黑了谁，被拉黑方发不进消息也发不出请求）。
-这样既不会出现"两条边不同步"的不一致，也能表达拉黑的单向语义。
-拉黑：`POST /api/blocks` → `status=blocked`，**服务端强制**：被拉黑方发不进消息、好友请求被拒、列表互不可见（不是前端隐藏）。
+### 7.1 好友（**已退役**，见 7.1b）
+
+> ⚠ **本节描述的是旧模型，票 #59 之后系统里不存在「好友请求」了。**
+> 保留这段是为了解释存量数据长什么样（`friendships` 表里的 `pending` / `accepted` 行
+> 仍然存在，迁移只做加法，不删行）。**新代码不得再产生或消费这两种状态。**
+
+旧流程是 `POST /api/friends/requests`（发起）→ 对方 `accept`/`reject`，
+存储形态「一段关系只存一行」（`requester_id`/`addressee_id` 按登记时的角色写入）。
+三种状态的旧语义：`accepted` **对称**、`pending` **有向**（只有 `addressee_id` 能 accept/reject）、
+`blocked` **有向**（`blocked_by_id` 记录是谁拉黑了谁）。
+
+**现在只剩 `blocked` 这一种活状态**，且它的语义收紧了两处：
+
+1. **拉黑 = 一个事务里的两件事**（`store.BlockUser`）：写/覆盖 blocked 行，
+   **并删掉「拉黑方 → 被拉黑方」的 follow 边**，保留反向那条（票 42 §4）。
+   为什么保留反向：拉黑是我对自己的约束，不是对他的惩罚 —— 解黑之后他关注我这件事
+   不该被我单方面抹掉，我回关一下就能恢复互关。
+2. **被拉黑方发不出关注**（不是"发不出好友请求"，那条路已经没有入口）：
+   `store.CreateFollow` 对**两个方向**都返回 `ErrFollowBlocked`（`403 FOLLOW_BLOCKED`）。
+
+拉黑仍是 `POST /api/blocks`，**服务端强制**：双方发不进私聊、双向不能新关注、
+好友/关注/粉丝名单里互不可见（不是前端隐藏）。
 
 ### 7.1b 关注（wayfinder #56；ADR 0001「好友 ≡ 互关」）
 关注是**单向、免同意**的有向边，存 `follows` 表（一对用户可有两条边：A→B 与 B→A 各一行）。
 「互关」因此是**派生**事实（两条边同时存在的合取），不是要维护的状态 —— 免去"忘了更新互关标记"的漂移。
-「好友」是「互关」的产品同义词；好友请求流程（`pending`）随 ADR 0001 退役（见 wayfinder #59）。
-拉黑存续期**双向**禁止新关注（票 42 决议）；拉黑事务（删拉黑方的 follow、保留反向 follow）属 wayfinder #57。
+「好友」是「互关」的产品同义词；好友请求流程（`pending`）随 ADR 0001 **已退役**（票 #59）。
+拉黑存续期**双向**禁止新关注（票 42 决议）；拉黑事务（删拉黑方的 follow、保留反向 follow）已落地在 `store.BlockUser`。
 can_dm(A,B) := mutual_follow(A,B) ∧ NOT blocked_either(A,B) —— 唯一的实现落在 `store.CanDM`。
-端点：`POST /api/follows`（关注，201）/ `DELETE /api/follows/:userId`（取关，204）/ `GET /api/follows/:userId`（我与 TA 的关系 + TA 的关注/粉丝数）。
+端点：`POST /api/follows`（关注，201）/ `DELETE /api/follows/:userId`（取关，204）/
+`GET /api/follows/:userId`（我与 TA 的关系 + TA 的关注/粉丝数）/
+**`GET /api/follows?tab=mutual|following|followers`**（名单；好友列表就是 `tab=mutual`）。
+
+**已退役的端点（票 #59）**：`GET /api/friends`、`GET|POST /api/friends/requests`、
+`POST /api/friends/requests/:id/{accept,reject}`、`DELETE /api/friends/:id`。
+它们**不在路由表里**了 —— 与 `/api/auth/forgot`、`/api/auth/reset` 同一先例，
+落到 `NoRoute` 的 `/api` 前缀拦截，返回 404 + 中文错误（**明确失败，不是静默成功**）。
+「好友列表」没有替代端点：它就是 `GET /api/follows?tab=mutual`。
 
 ### 7.2 私聊
-- 用户通道 `/ws/user`（ticket 必填）：`friend-request` / `friend-accepted` / `friend-removed` / `blocked` / `dm` / `dm-read` / `presence`。
+- 用户通道 `/ws/user`（ticket 必填）：`friend-removed` / `blocked` / `dm` / `dm-read` / `presence`。
+  （`friend-request` / `friend-accepted` 两种帧随票 #59 一起退役：产生它们的用例已经不存在，
+  线上保留 `FriendEvent` 这一帧的编码只是为了不改 protobuf —— 加字段比删字段安全，
+  而删字段要先确认没有旧客户端在等它。**当前前端没有任何消费者**：`createUserChannel` 全仓无调用点。）
 - 投递：服务端先校验**关系 + 非拉黑**；对方在线直投，否则只落库 → 登录时按未读拉取。
 - 历史：`GET /api/messages?peer=<userId>&before=<id>`，分页 50；`read_at` 由客户端上报已读位置（`POST /api/messages/read`）。
 - 限速：单对 20 条/分钟；正文长度 ≤ 2000；不允许空消息。
@@ -245,10 +272,13 @@ can_dm(A,B) := mutual_follow(A,B) ∧ NOT blocked_either(A,B) —— 唯一的�
   POST   /api/auth/ws-ticket
 用户
   PATCH  /api/me                   GET  /api/users/:id
-好友
-  GET    /api/friends              POST /api/friends/requests
-  POST   /api/friends/requests/:id/accept|reject
-  DELETE /api/friends/:id          POST /api/blocks
+好友 / 关注（票 #59 之后）
+  POST   /api/follows                       DELETE /api/follows/:userId
+  GET    /api/follows/:userId               GET    /api/follows?tab=mutual|following|followers
+  POST   /api/blocks                        GET    /api/blocks
+  DELETE /api/blocks/:userId                GET    /api/users/search?q=
+  （已退役：GET /api/friends、GET|POST /api/friends/requests、
+    POST /api/friends/requests/:id/accept|reject、DELETE /api/friends/:id → 一律 404）
 消息
   GET    /api/messages?peer&before           POST /api/messages/read
 公开房间
@@ -262,7 +292,8 @@ can_dm(A,B) := mutual_follow(A,B) ∧ NOT blocked_either(A,B) —— 唯一的�
 WebSocket
   /ws       房间信令（游客可用；带 ticket 则绑定账号）
   /ws/user  用户通道（ticket 必填）
-  新增信封：friend-request / friend-accepted / friend-removed / blocked / dm / dm-read / presence / rooms-changed
+  新增信封：friend-removed / blocked / dm / dm-read / presence / rooms-changed
+  （friend-request / friend-accepted 的**用例**已随票 #59 退役，帧编码保留未删）
 ```
 
 `POST /api/rooms` 响应新增（已有）：`hostToken`；join 信封已有 `host_token = 34`。
@@ -299,7 +330,7 @@ WebSocket
 - 验收：`verify-public-rooms.mjs`（列表只含公开且有主播的房间；密码房不外泄信息）、`verify-admin.mjs`（非管理员访问 `/api/admin/*` 必须 403；每个写操作都有审计行）。
 
 **三期：好友 + 私聊 + 房间聊天落库**
-- 交付：`/ws/user`、好友请求/同意/删除/拉黑、离线未读、历史分页、房间聊天入库与 30 天清理。
+- 交付：`/ws/user`、关注/取关/拉黑（好友请求流水线已在票 #59 退役）、离线未读、历史分页、房间聊天入库与 30 天清理。
 - 验收：`verify-social.mjs`（A 发给 B 的私聊在 B 离线时落库、上线后未读正确；拉黑后服务端拒绝投递；断线重连不丢未读）。
 
 **每期都必须重跑现有回归**：`verify-m2` / `verify-health` / `verify-room-resume` / `verify-ice` / `go test ./...`。

@@ -269,28 +269,32 @@ func TestSearchUsersRequireAuthAndValidation(t *testing.T) {
 	}
 }
 
-// TestSearchUsersReturnsRelations 覆盖验收第 1 条的 HTTP 面：排除自己、
-// 中文昵称可搜、结果带关系状态、blocked 不隐藏。
-func TestSearchUsersReturnsRelations(t *testing.T) {
+// TestSearchUsersReturnsFollowState 覆盖验收第 1 条的 HTTP 面：排除自己、
+// 中文昵称可搜、结果带**关注域事实**、被拉黑的人不隐藏但标出来。
+//
+// 票 #59 之前这里断言的是 friendships 流水线的 `relation` 字符串
+// （pending-out / pending-in / blocked）。请求流水线退役后，搜索结果的
+// 关系列换成关注域的五个布尔 —— 前端拿它们直接决定给「关注 / 已关注 /
+// 回关 / 发消息」哪一颗按钮，不必再自己拼。
+func TestSearchUsersReturnsFollowState(t *testing.T) {
 	env := newFriendEnv(t)
 	ctx := context.Background()
 
 	// 造三种关系：
-	//   alice → bob：pending（alice 发出）→ 搜索 bob 得 pending-out
-	//   carol → alice：pending → 搜索 carol 得 pending-in
-	//   alice 拉黑 carol：那唯一一行原地转 blocked → 搜索 carol 得 blocked
-	if _, err := env.st.CreateFriendshipRequest(ctx, env.alice.ID, env.bob.ID); err != nil {
-		t.Fatalf("alice→bob 请求: %v", err)
+	//   alice → bob：单向关注        → 搜索 bob 得 following=true
+	//   carol → alice：单向关注       → 搜索 carol 得 followedBy=true
+	//   alice 拉黑 carol：同时删掉 alice→carol 那条边 → 搜索 carol 得 blocked=true
+	if _, _, err := env.st.CreateFollow(ctx, env.alice.ID, env.bob.ID); err != nil {
+		t.Fatalf("alice→bob 关注: %v", err)
 	}
-	if _, err := env.st.CreateFriendshipRequest(ctx, env.carol.ID, env.alice.ID); err != nil {
-		t.Fatalf("carol→alice 请求: %v", err)
+	if _, _, err := env.st.CreateFollow(ctx, env.carol.ID, env.alice.ID); err != nil {
+		t.Fatalf("carol→alice 关注: %v", err)
 	}
 	if _, err := env.st.BlockUser(ctx, env.alice.ID, env.carol.ID); err != nil {
 		t.Fatalf("alice 拉黑 carol: %v", err)
 	}
 
-	// 按中文昵称搜：三个昵称都含"罗"以外的共同字？不 —— 用各自的前缀分别验。
-	// 先搜"鲍"：只命中 bob（鲍勃），不含 alice 自己。
+	// 先搜「鲍」：只命中 bob（鲍勃），不含 alice 自己。
 	w := env.do(t, http.MethodGet, "/api/users/search?q="+"鲍", env.tokA)
 	if w.Code != http.StatusOK {
 		t.Fatalf("搜索应 200：got %d body=%s", w.Code, w.Body.String())
@@ -304,15 +308,16 @@ func TestSearchUsersReturnsRelations(t *testing.T) {
 	if len(res.Items) != 1 || res.Items[0].UserID != env.bob.ID {
 		t.Fatalf("搜「鲍」应只命中 bob：%+v", res.Items)
 	}
-	if res.Items[0].Relation != store.RelationPendingOut {
-		t.Fatalf("bob 的关系应为 pending-out：got %q", res.Items[0].Relation)
+	bob := res.Items[0]
+	if !bob.Following || bob.FollowedBy || bob.Mutual || bob.Blocked {
+		t.Fatalf("alice 单向关注 bob，四个布尔应只有 following：%+v", bob)
 	}
-	if res.Items[0].Username != "fr-bob" || res.Items[0].DisplayName != "鲍勃" {
-		t.Fatalf("结果必须带 username 与 displayName：%+v", res.Items[0])
+	if bob.Username != "fr-bob" || bob.DisplayName != "鲍勃" {
+		t.Fatalf("结果必须带 username 与 displayName：%+v", bob)
 	}
 
-	// 搜用户名共同前缀 "fr-"：命中 bob 与 carol（以及 alice 自己，但被排除），
-	// 于是正好验"排除自己"与"username 参与匹配"两件事。
+	// 搜用户名共同前缀 "fr-"：命中 bob 与 carol（alice 自己被排除），
+	// 于是正好验「排除自己」与「username 参与匹配」两件事。
 	w = env.do(t, http.MethodGet, "/api/users/search?q=fr-", env.tokA)
 	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
 		t.Fatalf("解析响应失败：%v body=%s", err, w.Body.String())
@@ -327,10 +332,15 @@ func TestSearchUsersReturnsRelations(t *testing.T) {
 		}
 		byID[it.UserID] = it
 	}
-	// carol 那一行：alice 拉黑了 carol（blocked 覆盖 pending-in），
-	// 而**方向不区分** —— 搜索结果只告诉前端"不能加好友"，不告诉用户是谁拉黑了谁。
-	if got := byID[env.carol.ID].Relation; got != store.RelationBlocked {
-		t.Fatalf("carol 的关系应为 blocked：got %q", got)
+	// carol：她关注了 alice（反向边还在），而 alice 拉黑了她。
+	// **方向不区分** —— 搜索只告诉前端「不能关注」，不告诉用户是谁拉黑了谁。
+	carol := byID[env.carol.ID]
+	if !carol.Blocked || !carol.FollowedBy || carol.Following || carol.Mutual || carol.CanDM {
+		t.Fatalf("carol 应 blocked=true/followedBy=true 且其余为假：%+v", carol)
+	}
+	// 被拉黑的人**不隐藏**（否则「解除拉黑」就没有入口了）。
+	if _, ok := byID[env.carol.ID]; !ok {
+		t.Fatalf("被拉黑的人应仍出现在搜索结果里: %+v", res.Items)
 	}
 
 	// 空结果集是空数组而不是 null（前端对 items 直接 .map）。
@@ -339,44 +349,29 @@ func TestSearchUsersReturnsRelations(t *testing.T) {
 		t.Fatalf("空结果必须是空数组：%s", w.Body.String())
 	}
 
-	// pending-in 方向：alice 收到了 carol 的请求（carol→alice 那行被 alice 拉黑覆盖了，
-	// 所以这里用**第四个人**造一条干净的 pending-in）。
-	//
-	// 为什么必须换人：alice 拉黑 carol 之后那一行是 blocked，pending-in 已经被覆盖 ——
-	// 这正是"一段关系只存一行"的代价（一个方向的状态会盖掉另一个方向的）。
-	dave := newFriendUser(t, env.st, "fr-dave", "戴夫")
-	if _, err := env.st.CreateFriendshipRequest(ctx, dave.ID, env.alice.ID); err != nil {
-		t.Fatalf("dave→alice 请求: %v", err)
+	// 互关：alice 回关 bob 之后，bob 那一行四个布尔全真（canDm 也真）。
+	if _, _, err := env.st.CreateFollow(ctx, env.bob.ID, env.alice.ID); err != nil {
+		t.Fatalf("bob→alice 回关: %v", err)
 	}
-	w = env.do(t, http.MethodGet, "/api/users/search?q=dave", env.tokA)
-	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-		t.Fatalf("解析响应失败：%v", err)
-	}
-	if len(res.Items) != 1 || res.Items[0].Relation != store.RelationPendingIn {
-		t.Fatalf("alice 看 dave 应为 pending-in（请求是 dave 发出的）：%+v", res.Items)
-	}
-
-	// 对照：bob 看 alice 是 **pending-in**（请求是 alice 发出的，收到的是 bob）。
-	// 这一对与上一对正好互补，把"方向按 requester 判"两个方向都钉住：
-	//   - dave 发出 → alice 看到 pending-in
-	//   - alice 发出 → bob 看到 pending-in
-	//   （两者的观察者都是收到请求的那一方）
-	w = env.do(t, http.MethodGet, "/api/users/search?q=alice", env.tokB)
-	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-		t.Fatalf("解析响应失败：%v", err)
-	}
-	if len(res.Items) != 1 || res.Items[0].Relation != store.RelationPendingIn {
-		t.Fatalf("bob 看 alice 应为 pending-in：%+v", res.Items)
-	}
-
-	// 再验观察者是**发出方**的情形：alice 搜 bob 应是 pending-out
-	// （alice 自己发出的那个请求）。这与文件末尾的"鲍"搜索互为对照。
 	w = env.do(t, http.MethodGet, "/api/users/search?q=bob", env.tokA)
 	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
 		t.Fatalf("解析响应失败：%v", err)
 	}
-	if len(res.Items) != 1 || res.Items[0].Relation != store.RelationPendingOut {
-		t.Fatalf("alice 搜 bob 应为 pending-out：%+v", res.Items)
+	if len(res.Items) != 1 {
+		t.Fatalf("搜 bob 应只命中一人: %+v", res.Items)
+	}
+	bob = res.Items[0]
+	if !bob.Following || !bob.FollowedBy || !bob.Mutual || !bob.CanDM || bob.Blocked {
+		t.Fatalf("互关后 bob 应 following/followedBy/mutual/canDm 全真：%+v", bob)
+	}
+
+	// 观察者换人：bob 搜 alice 也应看到互关（方向对称）。
+	w = env.do(t, http.MethodGet, "/api/users/search?q=alice", env.tokB)
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("解析响应失败：%v", err)
+	}
+	if len(res.Items) != 1 || !res.Items[0].Mutual {
+		t.Fatalf("bob 看 alice 也应是互关：%+v", res.Items)
 	}
 }
 
@@ -435,7 +430,7 @@ func TestBlocksListAndUnblock(t *testing.T) {
 		t.Fatalf("userId=0 应 400：got %d", w.Code)
 	}
 
-	// 正常解除：204 + 关系回到 none + 能重新发请求 + 审计投递。
+	// 正常解除：204 + 关系回到 none + 能重新关注 + 审计投递。
 	w = env.do(t, http.MethodDelete, "/api/blocks/"+strconv.FormatInt(env.bob.ID, 10), env.tokA)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("解除拉黑应 204：got %d body=%s", w.Code, w.Body.String())
@@ -444,8 +439,8 @@ func TestBlocksListAndUnblock(t *testing.T) {
 	if row != nil {
 		t.Fatalf("解除后那行应被删除：%+v", row)
 	}
-	if _, err := env.st.CreateFriendshipRequest(ctx, env.alice.ID, env.bob.ID); err != nil {
-		t.Fatalf("解除后应能重新发请求：%v", err)
+	if _, _, err := env.st.CreateFollow(ctx, env.alice.ID, env.bob.ID); err != nil {
+		t.Fatalf("解除后应能重新关注：%v", err)
 	}
 
 	// 审计：解除拉黑必须留下"谁解除了对谁的拉黑"。
@@ -466,6 +461,53 @@ func TestBlocksListAndUnblock(t *testing.T) {
 	}
 	if n := len(env.auditsOf("friend.unblock")); n != 1 {
 		t.Fatalf("重复解除不该再投递审计：got %d 条", n)
+	}
+}
+
+// TestRetiredFriendRequestEndpointsAreGone 钉住票 #59 的核心交付：
+// 好友请求流水线的五条端点**真的不在了**，而且不是静默消失。
+//
+// 为什么"非静默"值得单独一条判据：这些端点若被改成返回 200 空体，
+// 前端会把"操作成功"演给用户看（点了没反应但也没报错），
+// 这正是本轮要消灭的那类缺陷。所以断言三件事：
+//  1. 状态码是 404（不是 200/204/410/500）；
+//  2. 响应体**非空**（有一个可读的错误说明）；
+//  3. 带合法 token 也一样 404 —— 不是"未登录被拦"的伪装。
+//
+// 生产态（PR_SERVE_STATIC=1）下由 NoRoute → isReservedPath 给出
+// 「未找到该资源」；本用例的装配里静态托管关着，落到 gin 自己的 404 兜底，
+// 两者都是 404 + 非空体，判据对两种装配同时成立。
+func TestRetiredFriendRequestEndpointsAreGone(t *testing.T) {
+	env := newFriendEnv(t)
+
+	cases := []struct {
+		method string
+		path   string
+		why    string
+	}{
+		{http.MethodGet, "/api/friends", "好友列表（好友 = 互关，走 /api/follows?tab=mutual）"},
+		{http.MethodGet, "/api/friends/requests", "请求列表"},
+		{http.MethodPost, "/api/friends/requests", "发起请求（关注即请求）"},
+		{http.MethodPost, "/api/friends/requests/1/accept", "接受请求"},
+		{http.MethodPost, "/api/friends/requests/1/reject", "拒绝请求"},
+		{http.MethodDelete, "/api/friends/1", "删好友（取关即可）"},
+	}
+	for _, c := range cases {
+		w := env.do(t, c.method, c.path, env.tokA)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s %s（%s）应 404，实际 %d body=%s", c.method, c.path, c.why, w.Code, w.Body.String())
+		}
+		if strings.TrimSpace(w.Body.String()) == "" {
+			t.Fatalf("%s %s（%s）404 时不该是空体：静默失败无法归因", c.method, c.path, c.why)
+		}
+	}
+
+	// 对照：替代它们的关注域端点是活的（否则"下线"就成了"功能没了"）。
+	if w := env.do(t, http.MethodGet, "/api/follows?tab=mutual", env.tokA); w.Code != http.StatusOK {
+		t.Fatalf("互关名单端点应仍然可用：got %d body=%s", w.Code, w.Body.String())
+	}
+	if w := env.do(t, http.MethodGet, "/api/blocks", env.tokA); w.Code != http.StatusOK {
+		t.Fatalf("黑名单端点应仍然可用：got %d body=%s", w.Code, w.Body.String())
 	}
 }
 

@@ -25,69 +25,11 @@ func newFriendFixture(t *testing.T) (*Store, int64, int64, int64) {
 	return s, ids[0], ids[1], ids[2]
 }
 
-// TestFriendshipLifecycle 覆盖 pending → accepted → remove 的完整生命周期，
-// 以及"一段关系只存一行"与"只有 addressee 能 accept/reject"。
-func TestFriendshipLifecycle(t *testing.T) {
-	s, a, b, c := newFriendFixture(t)
-	ctx := context.Background()
-
-	// a 向 b 发请求
-	req, err := s.CreateFriendshipRequest(ctx, a, b)
-	if err != nil || req.Status != FriendshipPending {
-		t.Fatalf("发请求应 pending: %+v err=%v", req, err)
-	}
-	if req.RequesterID != a || req.AddresseeID != b {
-		t.Fatalf("登记角色错误: req=%d addr=%d", req.RequesterID, req.AddresseeID)
-	}
-
-	// 重复发（a 再发一次）→ 已 pending，不新建
-	if _, err := s.CreateFriendshipRequest(ctx, a, b); !errors.Is(err, ErrRequestAlreadyPending) {
-		t.Fatalf("重复请求期望 ErrRequestAlreadyPending，得到 %v", err)
-	}
-	// 反方向（b 向 a）也发 → 同样已 pending（一段关系只存一行，锁两个方向）
-	if _, err := s.CreateFriendshipRequest(ctx, b, a); !errors.Is(err, ErrRequestAlreadyPending) {
-		t.Fatalf("反方向请求期望 ErrRequestAlreadyPending，得到 %v", err)
-	}
-
-	// 只有 b（addressee）能 accept；c 无权 → ErrFriendshipForbidden
-	if _, err := s.AcceptFriendshipRequest(ctx, req.ID, c); !errors.Is(err, ErrFriendshipForbidden) {
-		t.Fatalf("第三人 accept 期望 Forbidden，得到 %v", err)
-	}
-	// a（requester）也无权 accept 自己的请求（有向语义）
-	if _, err := s.AcceptFriendshipRequest(ctx, req.ID, a); !errors.Is(err, ErrFriendshipForbidden) {
-		t.Fatalf("请求方 accept 期望 Forbidden，得到 %v", err)
-	}
-
-	// b 接受
-	acc, err := s.AcceptFriendshipRequest(ctx, req.ID, b)
-	if err != nil || acc.Status != FriendshipAccepted {
-		t.Fatalf("accept 应 accepted: %+v err=%v", acc, err)
-	}
-
-	// 好友列表对称：a 与 b 都能看到对方，c 看不到
-	friendsA, err := s.ListFriends(ctx, a)
-	if err != nil || len(friendsA) != 1 || friendsA[0].PeerName != "friendb" {
-		t.Fatalf("a 的好友应只有 b: %+v err=%v", friendsA, err)
-	}
-	friendsB, err := s.ListFriends(ctx, b)
-	if err != nil || len(friendsB) != 1 || friendsB[0].PeerName != "frienda" {
-		t.Fatalf("b 的好友应只有 a: %+v err=%v", friendsB, err)
-	}
-	friendsC, _ := s.ListFriends(ctx, c)
-	if len(friendsC) != 0 {
-		t.Fatalf("c 不应有好友: %+v", friendsC)
-	}
-
-	// 删除好友：双方都能删；删后列表空
-	if err := s.RemoveFriendship(ctx, acc.ID, a); err != nil {
-		t.Fatalf("a 删好友: %v", err)
-	}
-	if fa, _ := s.ListFriends(ctx, a); len(fa) != 0 {
-		t.Fatalf("删除后 a 不应有好友: %+v", fa)
-	}
-}
-
-// TestFriendshipBlock 覆盖拉黑语义：覆盖已有关系、双向不可见、被拉黑方发不出请求。
+// TestFriendshipBlock 覆盖拉黑语义：新建 blocked 行、双向可见、双向都发不出关注。
+//
+// 票 #59 之后 friendships 表只剩 blocked 一种活状态，「被拉黑方发不出好友请求」
+// 那条判据随之搬到了关注域：`CreateFollow` 对**两个方向**都返回 ErrFollowBlocked
+// （票 #42 §4「拉黑存续期双方都不能新关注」）。
 func TestFriendshipBlock(t *testing.T) {
 	s, a, b, _ := newFriendFixture(t)
 	ctx := context.Background()
@@ -98,9 +40,13 @@ func TestFriendshipBlock(t *testing.T) {
 		t.Fatalf("拉黑应 blocked 且 blocked_by_id=a: %+v err=%v", blk, err)
 	}
 
-	// 被拉黑方（b）发请求 → ErrBlockedByTarget（服务端强制）
-	if _, err := s.CreateFriendshipRequest(ctx, b, a); !errors.Is(err, ErrBlockedByTarget) {
-		t.Fatalf("被拉黑方发请求期望 ErrBlockedByTarget，得到 %v", err)
+	// 被拉黑方（b）关注 a → ErrFollowBlocked（服务端强制，双向）
+	if _, _, err := s.CreateFollow(ctx, b, a); !errors.Is(err, ErrFollowBlocked) {
+		t.Fatalf("被拉黑方关注期望 ErrFollowBlocked，得到 %v", err)
+	}
+	// 拉黑方（a）也不能关注 b —— 同一条规则的另一半。
+	if _, _, err := s.CreateFollow(ctx, a, b); !errors.Is(err, ErrFollowBlocked) {
+		t.Fatalf("拉黑方关注期望 ErrFollowBlocked，得到 %v", err)
 	}
 
 	// BlockStatusBetween：双向都能查到 blocked，且 blocked_by 是 a
@@ -113,38 +59,87 @@ func TestFriendshipBlock(t *testing.T) {
 		t.Fatalf("BlockStatusBetween(b,a) 应 blocked by a: %v,%d err=%v", blocked, by, err)
 	}
 
-	// 拉黑后列表互不可见（都不是 accepted，list 里没有对方）
-	fa, _ := s.ListFriends(ctx, a)
-	fb, _ := s.ListFriends(ctx, b)
-	if len(fa) != 0 || len(fb) != 0 {
-		t.Fatalf("拉黑后应互不可见: a=%+v b=%+v", fa, fb)
+	// 拉黑后双方都不在对方的互关名单里（名单层共用同一条可见性过滤）。
+	fa, err := s.ListFollowList(ctx, a, FollowListMutual)
+	if err != nil || len(fa) != 0 {
+		t.Fatalf("拉黑后 a 的互关名单应为空: %+v err=%v", fa, err)
+	}
+	fb, err := s.ListFollowList(ctx, b, FollowListMutual)
+	if err != nil || len(fb) != 0 {
+		t.Fatalf("拉黑后 b 的互关名单应为空: %+v err=%v", fb, err)
 	}
 }
 
-// TestFriendshipBlockOverridesAccepted 拉黑覆盖已 accept 的关系（§7.1 服务端强制）。
-func TestFriendshipBlockOverridesAccepted(t *testing.T) {
+// TestBlockUserKeepsReverseFollow 钉住票 #42 §4 的那条不对称：
+// 拉黑删掉 **我→TA** 的关注边，但**保留 TA→我**的那条。
+//
+// 为什么这条值得一个用例：两个方向都删与只删一个方向，在"拉黑后不能互关"的
+// 表象下看不出区别（两边都不能再关注），只有在**解除拉黑之后**才分叉 ——
+// 若把对方的关注也删了，解黑就等于把对方的关注弄丢了，他得重新关注一次。
+func TestBlockUserKeepsReverseFollow(t *testing.T) {
 	s, a, b, _ := newFriendFixture(t)
 	ctx := context.Background()
 
-	req, err := s.CreateFriendshipRequest(ctx, a, b)
-	if err != nil {
-		t.Fatalf("发请求: %v", err)
+	// 先造互关（a⇄b），再让 a 拉黑 b。
+	if _, _, err := s.CreateFollow(ctx, a, b); err != nil {
+		t.Fatalf("a 关注 b: %v", err)
 	}
-	if _, err := s.AcceptFriendshipRequest(ctx, req.ID, b); err != nil {
-		t.Fatalf("accept: %v", err)
+	if _, _, err := s.CreateFollow(ctx, b, a); err != nil {
+		t.Fatalf("b 关注 a: %v", err)
+	}
+	if _, err := s.BlockUser(ctx, a, b); err != nil {
+		t.Fatalf("a 拉黑 b: %v", err)
 	}
 
-	// b 拉黑 a：关系行原地转 blocked，blocked_by_id=b（addressee 拉黑 requester，
-	// 这正是 blocked_by_id 必须独立成列的原因）
+	// a→b 被删。
+	if following, err := s.IsFollowing(ctx, a, b); err != nil || following {
+		t.Fatalf("拉黑后 a→b 的关注边应被删除: following=%v err=%v", following, err)
+	}
+	// b→a 仍在。
+	if following, err := s.IsFollowing(ctx, b, a); err != nil || !following {
+		t.Fatalf("拉黑后 b→a 的关注边应保留: following=%v err=%v", following, err)
+	}
+
+	// 解除拉黑后：a 回关即恢复互关（不必让 b 重新关注）。
+	if err := s.Unblock(ctx, a, b); err != nil {
+		t.Fatalf("解除拉黑: %v", err)
+	}
+	if _, _, err := s.CreateFollow(ctx, a, b); err != nil {
+		t.Fatalf("解黑后 a 应能回关 b: %v", err)
+	}
+	state, err := s.FollowStateBetween(ctx, a, b)
+	if err != nil || !state.Mutual() {
+		t.Fatalf("解黑并回关后应恢复互关: %+v err=%v", state, err)
+	}
+}
+
+// TestBlockOverridesLegacyAcceptedRow 拉黑覆盖**历史遗留**的 accepted 行（§7.1 服务端强制）。
+//
+// 票 #59 之后应用层不再产生 pending / accepted，但**旧库里有**。这一行若不被覆盖，
+// 它就会永远挡着这对人的拉黑（唯一约束只允许一对人一行）。
+// 用例直接写 SQL 造旧行，因为产生它的函数已经退役了 —— 这正是"迁移前后等价"的测资。
+func TestBlockOverridesLegacyAcceptedRow(t *testing.T) {
+	s, a, b, _ := newFriendFixture(t)
+	ctx := context.Background()
+
+	// 造一行旧版本的好友关系（直接写库，模拟存量数据）。
+	if err := s.db.WithContext(ctx).Exec(
+		`INSERT INTO friendships (requester_id, addressee_id, status, created_at, updated_at)
+		 VALUES (?, ?, ?, now(), now())`, a, b, FriendshipAccepted).Error; err != nil {
+		t.Fatalf("造旧 accepted 行: %v", err)
+	}
+
+	// b 拉黑 a：那一行原地转 blocked，blocked_by_id=b
+	// （addressee 拉黑 requester，这正是 blocked_by_id 必须独立成列的原因）。
 	blk, err := s.BlockUser(ctx, b, a)
 	if err != nil || blk.Status != FriendshipBlocked || derefInt64(blk.BlockedByID) != b {
-		t.Fatalf("拉黑覆盖好友关系失败: %+v err=%v", blk, err)
+		t.Fatalf("拉黑覆盖旧好友关系失败: %+v err=%v", blk, err)
 	}
 
-	// 关系行只有一条（一段关系只存一行）
+	// 关系行只有一条（一对人只存一行）。
 	var count int64
-	if err := s.db.Raw(`SELECT count(*) FROM friendships WHERE requester_id=? AND addressee_id=?`,
-		a, b).Scan(&count).Error; err != nil {
+	if err := s.db.Raw(`SELECT count(*) FROM friendships WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)`,
+		a, b, b, a).Scan(&count).Error; err != nil {
 		t.Fatalf("数关系行: %v", err)
 	}
 	if count != 1 {
@@ -152,38 +147,24 @@ func TestFriendshipBlockOverridesAccepted(t *testing.T) {
 	}
 }
 
-// TestFriendshipSelfRelation 不能对自己建立关系。
+// TestFriendshipSelfRelation 不能对自己建立拉黑。
 func TestFriendshipSelfRelation(t *testing.T) {
 	s, a, _, _ := newFriendFixture(t)
 	ctx := context.Background()
-	if _, err := s.CreateFriendshipRequest(ctx, a, a); !errors.Is(err, ErrSelfRelation) {
-		t.Fatalf("自己发请求期望 ErrSelfRelation，得到 %v", err)
-	}
 	if _, err := s.BlockUser(ctx, a, a); !errors.Is(err, ErrSelfRelation) {
 		t.Fatalf("自己拉黑期望 ErrSelfRelation，得到 %v", err)
 	}
 }
 
-// TestSearchUsersExcludesSelfAndCarriesRelations 覆盖 #39 的搜索语义：
-// 排除自己、按 username 与 display_name 两列匹配、结果带关系状态所需的原始行。
-func TestSearchUsersExcludesSelfAndCarriesRelations(t *testing.T) {
+// TestSearchUsersExcludesSelf 覆盖 #39 的搜索语义：
+// 排除自己、按 username 与 display_name 两列匹配、通配符按字面处理、结果集上限。
+//
+// 票 #59 之前这里还断言"结果带关系状态所需的原始行"，那条随请求流水线退役；
+// 关注域事实由 `FollowStatesFor` 单独批量算（见 follows_list_test.go 的
+// TestFollowStatesForIsBatchAndCarriesBlocked），搜索本身只管找人。
+func TestSearchUsersExcludesSelf(t *testing.T) {
 	s, a, b, c := newFriendFixture(t)
 	ctx := context.Background()
-
-	// 造几种关系，让"关系状态"有东西可判：
-	//   a → b：pending（a 发出，pending-out）
-	//   c → a：pending（a 收到，pending-in）
-	//   a 拉黑 c：那唯一一行原地转 blocked，blocked_by=a
-	// 于是 a 搜索 c 应得到 blocked（不是隐藏），a 搜索 b 应得到 pending 行。
-	if _, err := s.CreateFriendshipRequest(ctx, a, b); err != nil {
-		t.Fatalf("a→b 请求: %v", err)
-	}
-	if _, err := s.CreateFriendshipRequest(ctx, c, a); err != nil {
-		t.Fatalf("c→a 请求: %v", err)
-	}
-	if _, err := s.BlockUser(ctx, a, c); err != nil {
-		t.Fatalf("a 拉黑 c: %v", err)
-	}
 
 	// 空关键词：不去查库，直接空结果。
 	if hits, err := s.SearchUsers(ctx, "   ", a); err != nil || len(hits) != 0 {
@@ -210,19 +191,20 @@ func TestSearchUsersExcludesSelfAndCarriesRelations(t *testing.T) {
 		t.Fatalf("按 username 搜应命中 b（大小写不敏感）: %+v err=%v", hits, err)
 	}
 
-	// blocked 行仍作为结果出现（要显示"已拉黑"，不是隐藏）。
-	blockedRow, err := relationBetweenIn(ctx, s.db, a, c)
-	if err != nil {
-		t.Fatalf("查 a-c 关系: %v", err)
-	}
-	if blockedRow == nil || blockedRow.Status != FriendshipBlocked || derefInt64(blockedRow.BlockedByID) != a {
-		t.Fatalf("a-c 应是被 a 拉黑的 blocked 行: %+v", blockedRow)
-	}
-
 	// 通配符按字面处理：搜 "friend_" 不该命中 "friendb"（_ 被转义）。
 	hits, err = s.SearchUsers(ctx, "friend_", a)
 	if err != nil || len(hits) != 0 {
 		t.Fatalf("下划线应被当字面量（无人匹配）: %+v err=%v", hits, err)
+	}
+
+	// 被拉黑的人**仍然出现在搜索结果里**：用户要能看见自己拉黑了谁，
+	// 而搜索是唯一不需要先记住 userId 的入口（隐藏它会让"解除拉黑"没有入口）。
+	if _, err := s.BlockUser(ctx, a, c); err != nil {
+		t.Fatalf("a 拉黑 c: %v", err)
+	}
+	hits, err = s.SearchUsers(ctx, "friendc", a)
+	if err != nil || len(hits) != 1 || hits[0].ID != c {
+		t.Fatalf("被拉黑的人应仍出现在搜索结果里: %+v err=%v", hits, err)
 	}
 
 	// 结果集上限：再造 25 个人，搜共同前缀，最多 searchLimit 条。
@@ -262,7 +244,7 @@ func TestListBlockedOnlyMine(t *testing.T) {
 	}
 
 	// b 拉黑 a：**不会新建第二行** —— BlockUser 命中已有的 (a,b) 那一行并原地翻转
-	// （#29 的"一段关系只存一行"）。翻转后 blocked_by 从 a 变成 b，
+	// （#29 的"一对人只存一行"）。翻转后 blocked_by 从 a 变成 b，
 	// 于是 a 的黑名单从 {b,c} 缩成 {c}。这正是单向语义在单行模型下的样子：
 	// "谁拉黑谁"是那一行上的一个字段，不是两行各自的记录。
 	if _, err := s.BlockUser(ctx, b, a); err != nil {
@@ -294,7 +276,7 @@ func TestListBlockedOnlyMine(t *testing.T) {
 }
 
 // TestUnblockReturnsToNone 覆盖 #39 的解除拉黑：删掉那一行、关系回到 none、
-// 之后能重新发请求；且动不了别人拉黑的行（统一 404 的 store 侧依据）。
+// 之后能重新关注；且动不了别人拉黑的行（统一 404 的 store 侧依据）。
 func TestUnblockReturnsToNone(t *testing.T) {
 	s, a, b, c := newFriendFixture(t)
 	ctx := context.Background()
@@ -321,10 +303,9 @@ func TestUnblockReturnsToNone(t *testing.T) {
 		t.Fatalf("解除后那行应被删除: %+v", row)
 	}
 
-	// 解除后能重新发请求（验收第 1 条）。
-	req, err := s.CreateFriendshipRequest(ctx, a, b)
-	if err != nil || req.Status != FriendshipPending {
-		t.Fatalf("解除后应能重新发请求: %+v err=%v", req, err)
+	// 解除后能重新关注（验收第 1 条；票 #59 之后"重新发请求"就是"重新关注"）。
+	if _, created, err := s.CreateFollow(ctx, a, b); err != nil || !created {
+		t.Fatalf("解除后应能重新关注: created=%v err=%v", created, err)
 	}
 
 	// 重复解除 → ErrBlockedRowNotFound（幂等且不泄露存在性）。
@@ -356,7 +337,7 @@ func TestUnblockReturnsToNone(t *testing.T) {
 
 // relationBetweenIn 返回 a 与 b 之间那唯一的一行（任一方向），没有则 nil。
 //
-// 与 areFriendsIn / blockStatusBetweenIn 同一条纪律：吃 *gorm.DB 而不是连接池，
+// 与 blockStatusBetweenIn 同一条纪律：吃 *gorm.DB 而不是连接池，
 // 让用例能在同一把连接上验证"事务里看到的与事务外看到的一致"。
 func relationBetweenIn(ctx context.Context, db *gorm.DB, a, b int64) (*Friendship, error) {
 	var f Friendship

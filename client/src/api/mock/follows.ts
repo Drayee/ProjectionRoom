@@ -34,7 +34,13 @@ const PEOPLE: { id: number; displayName: string }[] = [
   { id: 8, displayName: '小满' },
 ]
 
-/** 我拉黑了谁（与 api/mock/friends.ts 的种子一致：id 6 被我拉黑）。 */
+/**
+ * 我拉黑了谁。
+ *
+ * ⚠ **这是 mock 态里「拉黑」的唯一真源**（票 #59）：`api/mock/friends.ts` 的
+ * `blockUser` / `listBlocked` / `unblock` 全部委托到本文件导出的三个函数，
+ * 而不是各存一份。两份真源的症状是"黑名单里有人、搜索结果里却能关注他"。
+ */
 const BLOCKED_BY_ME = new Set<number>([6])
 
 /** 谁拉黑了我（拉黑存续期同样禁止关注，且方向不区分）。 */
@@ -208,6 +214,40 @@ export async function listFollowList(tab: FollowListTab): Promise<FollowListEntr
         canDm: rel.canDm,
       }
     })
+}
+
+// ---------- 拉黑（票 #59：从 friends mock 迁到关注域，成为唯一真源）----------
+
+/**
+ * 我拉黑的人（按 id 升序，稳定）。
+ *
+ * 与服务端 `ListBlocked` 同口径：**只列我拉黑的**，别人拉黑我的不可见。
+ */
+export function mockBlockedIds(): number[] {
+  return Array.from(BLOCKED_BY_ME).sort((a, b) => a - b)
+}
+
+/**
+ * 拉黑。
+ *
+ * 服务端 `BlockUser` 在一个事务里做两件事：写 blocked 行 + 删掉
+ * **我→TA** 的关注边（保留 TA→我，票 #42 §4）。mock 必须同样做这两件事 ——
+ * 只改拉黑集合不删边的话，解黑之后会凭空多出一条早该消失的关注边。
+ */
+export function mockBlock(userId: number): void {
+  if (!Number.isInteger(userId) || userId <= 0 || userId === CURRENT_USER_ID) {
+    throw http(400, 'SELF_RELATION', '不能对自己建立关系')
+  }
+  if (!person(userId)) throw http(404, 'NOT_FOUND', '用户不存在')
+  BLOCKED_BY_ME.add(userId)
+  // 我自己拉黑的那一侧关注边被删除；对方关注我的那条保留。
+  edges.delete(edgeKey(CURRENT_USER_ID, userId))
+}
+
+/** 解除拉黑：从我的黑名单移除（关系回到"没有关系"，不是回到好友）。 */
+export function mockUnblock(userId: number): void {
+  if (!BLOCKED_BY_ME.has(userId)) throw http(404, 'NOT_FOUND', '黑名单里没有这个人')
+  BLOCKED_BY_ME.delete(userId)
 }
 
 /**

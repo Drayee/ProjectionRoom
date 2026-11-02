@@ -129,14 +129,13 @@ func TestSendDMRejectsNonFriends(t *testing.T) {
 	if _, err := s.SendDM(ctx, a.ID, b.ID, "hi"); !errors.Is(err, ErrMessageNotFriends) {
 		t.Fatalf("非好友发送应返回 ErrMessageNotFriends：got %v", err)
 	}
-	// 只有 pending（a 发了请求、b 没接受）：仍然不是好友 → 拒。
-	req, err := s.CreateFriendshipRequest(ctx, a.ID, b.ID)
-	if err != nil {
-		t.Fatalf("发好友请求失败：%v", err)
+	// 只有单向关注（a 关注了 b、b 没回关）：仍然不是好友 → 拒。
+	// 票 #59 之后"发好友请求"就是"关注对方"，而门闩看的是**互关**。
+	if _, _, err := s.CreateFollow(ctx, a.ID, b.ID); err != nil {
+		t.Fatalf("建单向关注边失败：%v", err)
 	}
-	_ = req
 	if _, err := s.SendDM(ctx, a.ID, b.ID, "hi"); !errors.Is(err, ErrMessageNotFriends) {
-		t.Fatalf("pending 状态仍应返回 ErrMessageNotFriends：got %v", err)
+		t.Fatalf("单向关注仍应返回 ErrMessageNotFriends：got %v", err)
 	}
 
 	// 被拒的消息不得落库。

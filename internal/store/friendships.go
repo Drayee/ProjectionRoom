@@ -10,7 +10,16 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// 好友关系的三种状态（docs/ACCOUNTS.md §7.1）。
+// 关系行的状态取值（docs/ACCOUNTS.md §7.1）。
+//
+// 票 #59 之后**只有 blocked 是活的**：好友请求流水线（pending）与「已接受」
+// （accepted）都已退役 —— 好友 ≡ 互关，判据只看 follows 表的两条边，
+// friendships 表只剩「拉黑」这一种用途。
+//
+// pending / accepted 两个常量**刻意保留**：`BackfillLegacyFollows` 仍要按它们
+// 去读**历史行**（旧库里的存量请求与好友），那是只读的一次性回填，
+// 与"应用层还在产生这两种状态"是两件事。删掉常量会让那段回填变成魔法字符串，
+// 而魔法字符串正是回填演练里最容易写错的地方。
 const (
 	FriendshipPending  = "pending"
 	FriendshipAccepted = "accepted"
@@ -22,17 +31,7 @@ const (
 var (
 	// ErrFriendshipNotFound 是"按 id 查不到这条关系"。
 	ErrFriendshipNotFound = errors.New("store: 好友关系不存在")
-	// ErrFriendshipForbidden 是"这条关系不归你管"（pending 只有 addressee 能处理、
-	// 删好友只有双方能删）。handler 统一翻译成 404 而非 403 —— 避免存在性探测：
-	// 403 会告诉别人"这条关系存在，只是不归你"。
-	ErrFriendshipForbidden = errors.New("store: 无权操作这条好友关系")
-	// ErrAlreadyFriends 是"这段关系已经是 accepted"。
-	ErrAlreadyFriends = errors.New("store: 已经是好友")
-	// ErrRequestAlreadyPending 是"已有一条待处理请求"。
-	ErrRequestAlreadyPending = errors.New("store: 已有待处理的好友请求")
-	// ErrBlockedByTarget 是"对方已拉黑你，发不出请求"（服务端强制，§7.1）。
-	ErrBlockedByTarget = errors.New("store: 对方已将你拉黑")
-	// ErrSelfRelation 是"不能对自己发起好友/拉黑"。
+	// ErrSelfRelation 是"不能对自己建立拉黑"。
 	ErrSelfRelation = errors.New("store: 不能对自己建立关系")
 	// ErrBlockedRowNotFound 是"这一行拉黑不是你的"或"压根没有这一行"（#39 的解除拉黑）。
 	//
@@ -52,52 +51,6 @@ var (
 // （#27 的分页教训：一个域里混两种分页风格是 off-by-one 的温床）。
 const searchLimit = 20
 
-// 我与另一个人的关系状态（#39 的搜索结果要带上它）。
-//
-// 与前端 `types/friends.ts` 的 RelationState 逐字对应 —— 两端各有一份同值常量，
-// 而 protobuf 在这条链路上不参与（好友域是纯 REST），所以没有生成代码能保证一致。
-// 改名/加值时必须两边同步：症状是前端把未知状态显示成"还不是好友"（它的 default 分支），
-// 而那种错**不会报错**。
-const (
-	// RelationNone 是没有关系（可以发好友请求）。
-	RelationNone = "none"
-	// RelationFriend 是 accepted（已对称，任一方都能看到对方）。
-	RelationFriend = "friend"
-	// RelationPendingOut 是我发出的 pending 请求（等对方处理）。
-	RelationPendingOut = "pending-out"
-	// RelationPendingIn 是对方发给我的 pending 请求（去收件箱处理）。
-	RelationPendingIn = "pending-in"
-	// RelationBlocked 是存在拉黑关系（不区分方向，见 handler 的说明）。
-	RelationBlocked = "blocked"
-)
-
-// RelationStateOf 回答"actor 与 peer 之间现在是什么关系"（#39 的搜索用）。
-//
-// pending 的**方向**由登记角色判：requester 是 actor → pending-out，反之 pending-in。
-// blocked 不区分方向：搜索结果的按钮语义在两种拉黑下都一样（不能加好友），
-// 而"是谁拉黑了谁"是对方视角的信息，不该由这个字段泄露。
-//
-// 传 nil 表示"没有关系行"（RelationNone）—— 调用方（handler）从批量查询里
-// 拿不到对应行时就传 nil，不必为"没有关系"再查一次库。
-func RelationStateOf(f *Friendship, actorID int64) string {
-	if f == nil {
-		return RelationNone
-	}
-	switch f.Status {
-	case FriendshipAccepted:
-		return RelationFriend
-	case FriendshipBlocked:
-		return RelationBlocked
-	case FriendshipPending:
-		if f.RequesterID == actorID {
-			return RelationPendingOut
-		}
-		return RelationPendingIn
-	default:
-		return RelationNone
-	}
-}
-
 // Friendship 是关系行。requester/addressee 按登记时的角色写入，此后不变。
 type Friendship struct {
 	ID          int64     `gorm:"column:id;primaryKey"`
@@ -114,231 +67,93 @@ type Friendship struct {
 
 func (Friendship) TableName() string { return "friendships" }
 
-// lockFriendPair 在事务里锁住 (a,b) 两个方向的既有行，供"裁决"用。
+// blockRowIn 是**拉黑行的语句级唯一 owner**：锁住 (a,b) 两个方向的既有行，
+// 没有就新建，有就原地转成 blocked。
 //
-// 为什么必须锁：唯一约束只挡 (A,B) 方向的重复，挡不住 (B,A)。并发下 A、B 同时
-// 向对方发请求，若不锁，两条 pending 都会插入，"一段关系只存一行"就破了。
-// 锁两个方向（无论有没有行，用 FOR UPDATE 锁住会命中的区间），再裁决，唯一约束
-// 作为最后的兜底。
-func lockFriendPair(tx *gorm.DB, a, b int64) (*Friendship, error) {
-	var row Friendship
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+// # 为什么必须锁
+//
+// 唯一约束只挡 (A,B) 方向的重复，挡不住 (B,A)。并发下 A、B 同时拉黑对方，
+// 若不锁，两条 blocked 行都会插入，「一对人只有一行关系」就破了 —— 而那一行
+// 是"谁拉黑了谁"的唯一记录，重复之后解除拉黑只能解掉一半。
+// 锁两个方向（无论有没有行，用 FOR UPDATE 锁住会命中的区间），再裁决，
+// 唯一约束作为最后的兜底。
+//
+// # 票 #59 之后它只服务拉黑
+//
+// 旧版本这里还要裁决 pending / accepted 的请求流水线（"已经是好友"、
+// "已有待处理请求"），那条流水线随票 #59 退役 —— 好友 ≡ 互关，没有"请求"这回事。
+// 因此**撞到任何状态的历史行一律原地转 blocked**（不再有"不能覆盖 accepted"的分支）：
+// 历史行只是旧版本的残留，让它继续挡着拉黑才是错的。
+func blockRowIn(ctx context.Context, tx *gorm.DB, a, b int64) (*Friendship, error) {
+	var existing Friendship
+	err := tx.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where(`(requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?)`,
 			a, b, b, a).
-		Take(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil // 两个方向都没有：可以新建
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: 锁定好友关系失败: %w", err)
-	}
-	return &row, nil
-}
-
-// CreateFriendshipRequest 发起好友请求（pending）。
-//
-// 裁决顺序（都在事务里，先锁后判）：
-//  1. 反方向已 accepted → ErrAlreadyFriends（对方已经发过且你们已是好友）；
-//  2. 任一方已是 blocked → ErrBlockedByTarget（被拉黑方发不出请求，§7.1 服务端强制）；
-//  3. 已有一条 pending（任一方向）→ ErrRequestAlreadyPending（幂等提示，不新建）；
-//  4. 都没有 → 插入 pending，requester=发起方。
-func (s *Store) CreateFriendshipRequest(ctx context.Context, requesterID, addresseeID int64) (*Friendship, error) {
-	if requesterID <= 0 || addresseeID <= 0 {
-		return nil, ErrFriendshipNotFound
-	}
-	if requesterID == addresseeID {
-		return nil, ErrSelfRelation
-	}
-
-	var created *Friendship
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		row, err := lockFriendPair(tx, requesterID, addresseeID)
-		if err != nil {
-			return err
-		}
-		if row != nil {
-			switch row.Status {
-			case FriendshipAccepted:
-				return ErrAlreadyFriends
-			case FriendshipBlocked:
-				return ErrBlockedByTarget
-			case FriendshipPending:
-				return ErrRequestAlreadyPending
-			}
-		}
+		Take(&existing).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		now := time.Now()
-		created = &Friendship{
-			RequesterID: requesterID,
-			AddresseeID: addresseeID,
-			Status:      FriendshipPending,
+		row := &Friendship{
+			RequesterID: a,
+			AddresseeID: b,
+			Status:      FriendshipBlocked,
+			BlockedByID: &a,
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		}
-		if err := tx.Create(created).Error; err != nil {
-			// 唯一约束兜底：并发竞态下真撞了，当作"已有待处理请求"。
-			if isUniqueViolation(err) {
-				return ErrRequestAlreadyPending
+		if cerr := tx.WithContext(ctx).Create(row).Error; cerr != nil {
+			if isUniqueViolation(cerr) {
+				// 并发竞态兜底：另一条事务刚插进去，重读一次返回它。
+				var f Friendship
+				if gerr := tx.WithContext(ctx).
+					Where(`(requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?)`,
+						a, b, b, a).Take(&f).Error; gerr == nil {
+					return &f, nil
+				}
 			}
-			return fmt.Errorf("store: 创建好友请求失败: %w", err)
+			return nil, fmt.Errorf("store: 拉黑失败: %w", cerr)
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		return row, nil
+	case err != nil:
+		return nil, fmt.Errorf("store: 锁定拉黑关系失败: %w", err)
 	}
-	return created, nil
-}
 
-// AcceptFriendshipRequest 接受好友请求：pending → accepted。
-// 只有 addressee 能 accept（§7.1 有向语义），否则 ErrFriendshipForbidden。
-func (s *Store) AcceptFriendshipRequest(ctx context.Context, requestID, actorID int64) (*Friendship, error) {
-	if requestID <= 0 {
-		return nil, ErrFriendshipNotFound
+	if err := tx.WithContext(ctx).Model(&Friendship{}).Where("id = ?", existing.ID).
+		Updates(map[string]any{
+			"status":        FriendshipBlocked,
+			"blocked_by_id": a,
+			"updated_at":    time.Now(),
+		}).Error; err != nil {
+		return nil, fmt.Errorf("store: 拉黑失败: %w", err)
 	}
-	var row *Friendship
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var f Friendship
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", requestID).Take(&f).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrFriendshipNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("store: 查询好友请求失败: %w", err)
-		}
-		if f.Status != FriendshipPending {
-			// 已经处理过（accepted / blocked）：当作不存在，不暴露内部状态。
-			return ErrFriendshipNotFound
-		}
-		if f.AddresseeID != actorID {
-			return ErrFriendshipForbidden
-		}
-		if err := tx.Model(&Friendship{}).Where("id = ?", requestID).
-			Updates(map[string]any{"status": FriendshipAccepted, "updated_at": time.Now()}).Error; err != nil {
-			return fmt.Errorf("store: 接受好友请求失败: %w", err)
-		}
-		f.Status = FriendshipAccepted
-		row = &f
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return row, nil
-}
-
-// RejectFriendshipRequest 拒绝好友请求：删掉 pending 行。只有 addressee 能 reject。
-func (s *Store) RejectFriendshipRequest(ctx context.Context, requestID, actorID int64) error {
-	if requestID <= 0 {
-		return ErrFriendshipNotFound
-	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var f Friendship
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", requestID).Take(&f).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrFriendshipNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("store: 查询好友请求失败: %w", err)
-		}
-		if f.Status != FriendshipPending {
-			return ErrFriendshipNotFound
-		}
-		if f.AddresseeID != actorID {
-			return ErrFriendshipForbidden
-		}
-		if err := tx.Delete(&Friendship{}, requestID).Error; err != nil {
-			return fmt.Errorf("store: 拒绝好友请求失败: %w", err)
-		}
-		return nil
-	})
-}
-
-// ListFriends 返回某用户的好友（accepted，对称语义：任一方都能查到对方）。
-// 返回的每一行里 PeerName 是**对方**的显示名。
-func (s *Store) ListFriends(ctx context.Context, userID int64) ([]Friendship, error) {
-	var rows []Friendship
-	err := s.db.WithContext(ctx).
-		Table("friendships AS f").
-		Select("f.id, f.requester_id, f.addressee_id, f.status, f.blocked_by_id, f.created_at, f.updated_at,"+
-			" u.display_name AS peer_name").
-		Joins("JOIN users u ON u.id = CASE WHEN f.requester_id = ? THEN f.addressee_id ELSE f.requester_id END", userID).
-		Where("f.status = ? AND (f.requester_id = ? OR f.addressee_id = ?)", FriendshipAccepted, userID, userID).
-		Order("f.updated_at DESC, f.id DESC").
-		Find(&rows).Error
-	if err != nil {
-		return nil, fmt.Errorf("store: 查询好友列表失败: %w", err)
-	}
-	return rows, nil
-}
-
-// ListIncomingRequests 返回发给 userID 的 pending 请求（收件箱，PeerName 是请求方）。
-func (s *Store) ListIncomingRequests(ctx context.Context, userID int64) ([]Friendship, error) {
-	var rows []Friendship
-	err := s.db.WithContext(ctx).
-		Table("friendships AS f").
-		Select("f.id, f.requester_id, f.addressee_id, f.status, f.blocked_by_id, f.created_at, f.updated_at,"+
-			" u.display_name AS peer_name").
-		Joins("JOIN users u ON u.id = f.requester_id").
-		Where("f.status = ? AND f.addressee_id = ?", FriendshipPending, userID).
-		Order("f.created_at DESC, f.id DESC").
-		Find(&rows).Error
-	if err != nil {
-		return nil, fmt.Errorf("store: 查询待处理请求失败: %w", err)
-	}
-	return rows, nil
-}
-
-// ListOutgoingRequests 返回 userID 发出的 pending 请求（PeerName 是被请求方）。
-func (s *Store) ListOutgoingRequests(ctx context.Context, userID int64) ([]Friendship, error) {
-	var rows []Friendship
-	err := s.db.WithContext(ctx).
-		Table("friendships AS f").
-		Select("f.id, f.requester_id, f.addressee_id, f.status, f.blocked_by_id, f.created_at, f.updated_at,"+
-			" u.display_name AS peer_name").
-		Joins("JOIN users u ON u.id = f.addressee_id").
-		Where("f.status = ? AND f.requester_id = ?", FriendshipPending, userID).
-		Order("f.created_at DESC, f.id DESC").
-		Find(&rows).Error
-	if err != nil {
-		return nil, fmt.Errorf("store: 查询已发出请求失败: %w", err)
-	}
-	return rows, nil
-}
-
-// RemoveFriendship 删除好友关系（accepted → 删除）。双方都能删（对称语义）。
-func (s *Store) RemoveFriendship(ctx context.Context, friendshipID, actorID int64) error {
-	if friendshipID <= 0 {
-		return ErrFriendshipNotFound
-	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var f Friendship
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", friendshipID).Take(&f).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrFriendshipNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("store: 查询好友关系失败: %w", err)
-		}
-		if f.Status != FriendshipAccepted {
-			return ErrFriendshipNotFound
-		}
-		if f.RequesterID != actorID && f.AddresseeID != actorID {
-			return ErrFriendshipForbidden
-		}
-		if err := tx.Delete(&Friendship{}, friendshipID).Error; err != nil {
-			return fmt.Errorf("store: 删除好友关系失败: %w", err)
-		}
-		return nil
-	})
+	existing.Status = FriendshipBlocked
+	existing.BlockedByID = &a
+	return &existing, nil
 }
 
 // BlockUser 拉黑某人（服务端强制，§7.1）。
 //
-// 与 CreateFriendshipRequest 同一条"一段关系只存一行"的裁决：
-//   - 已有一条关系（任何方向、任何状态）→ 原地转成 blocked，blocked_by_id=actor；
-//   - 没有 → 新建 blocked 行，requester=actor（拉黑方）、addressee=target。
+// 一次事务里做两件事，**顺序不能反**：
 //
-// 这样拉黑会**覆盖**已有的好友/待处理请求，天然实现"好友请求被拒、列表互不可见"。
+//  1. 写/覆盖 friendships 的 blocked 行（`blockRowIn`）—— 拉黑事实的唯一记录。
+//  2. 删掉 `actor → target` 那条关注边，**保留** `target → actor`（票 #42 §4）。
+//
+// # 为什么删 A→B 却留 B→A
+//
+// 关注是单向边，"我拉黑你"要表达的是"我不想再跟你有来往"，所以**我**的关注
+// 应当消失（我不再订阅你的内容）。而对方关不关注我是**他的**选择，我没有权利
+// 替他取关 —— 拉黑是我对自己的约束，不是对他的惩罚。两条边的不对称正是
+// "拉黑是单向的"在数据上的样子。
+//
+// 保留 B→A 还有一层：解除拉黑后如果 B 仍然关注 A，那 A 只要回关就恢复互关，
+// 不必让 B 重新关注一次。若这里把两条边都删了，解黑就等于"把对方的关注也弄丢了"。
+//
+// # 为什么"双方都不能新关注"不在这里写
+//
+// 那条规则由 `CreateFollow` 的裁决保证（`hasBlockBetweenIn` → ErrFollowBlocked，
+// 双向判定）。在这里再删一次 B→A 只会让上面那条不对称失效，而在这里加一个
+// "禁止"的判断则是把同一条规则写成两份 —— 两份真源迟早会分叉。
+//
 // 拉黑自己返回 ErrSelfRelation。
 func (s *Store) BlockUser(ctx context.Context, actorID, targetID int64) (*Friendship, error) {
 	if actorID <= 0 || targetID <= 0 {
@@ -350,45 +165,16 @@ func (s *Store) BlockUser(ctx context.Context, actorID, targetID int64) (*Friend
 
 	var row *Friendship
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		existing, err := lockFriendPair(tx, actorID, targetID)
+		locked, err := blockRowIn(ctx, tx, actorID, targetID)
 		if err != nil {
 			return err
 		}
-		if existing != nil {
-			// 原地转 blocked：无论之前是 pending 还是 accepted，拉黑都覆盖它。
-			if err := tx.Model(&Friendship{}).Where("id = ?", existing.ID).
-				Updates(map[string]any{
-					"status":        FriendshipBlocked,
-					"blocked_by_id": actorID,
-					"updated_at":    time.Now(),
-				}).Error; err != nil {
-				return fmt.Errorf("store: 拉黑失败: %w", err)
-			}
-			existing.Status = FriendshipBlocked
-			existing.BlockedByID = &actorID
-			row = existing
-			return nil
-		}
-		now := time.Now()
-		row = &Friendship{
-			RequesterID: actorID,
-			AddresseeID: targetID,
-			Status:      FriendshipBlocked,
-			BlockedByID: &actorID,
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if err := tx.Create(row).Error; err != nil {
-			if isUniqueViolation(err) {
-				// 并发竞态兜底：已有关系，重读一次返回它（调用方拿到的是 blocked 事实）。
-				var f Friendship
-				if gerr := tx.Where(`(requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?)`,
-					actorID, targetID, targetID, actorID).Take(&f).Error; gerr == nil {
-					row = &f
-					return nil
-				}
-			}
-			return fmt.Errorf("store: 拉黑失败: %w", err)
+		row = locked
+		// 删 actor→target 的边（保留反向），见上面「为什么删 A→B 却留 B→A」。
+		if err := tx.WithContext(ctx).
+			Where("follower_id = ? AND followee_id = ?", actorID, targetID).
+			Delete(&Follow{}).Error; err != nil {
+			return fmt.Errorf("store: 拉黑时清理关注边失败: %w", err)
 		}
 		return nil
 	})
@@ -404,30 +190,6 @@ func (s *Store) BlockUser(ctx context.Context, actorID, targetID int64) (*Friend
 		}
 	}
 	return row, nil
-}
-
-// FriendshipByID 按主键取一条关系行（只读）。
-//
-// 用途只有一个：删除/变更**之前**记下"对方是谁"（实时推送需要收件人 id）。
-// 之所以不并进 RemoveFriendship 的返回值：那会改一个已被 #29 真库用例覆盖的
-// 签名，而"尽力而为地取一个收件人 id"不该让那个签名变形。
-//
-// 不做权限判定（这里没有 actor 概念）：调用方拿到的行只用于自己算对方是谁，
-// 真正的越权判定仍在 RemoveFriendship 的事务里（I3：授权在服务端，且在最知道
-// 事实的那一层）。
-func (s *Store) FriendshipByID(ctx context.Context, id int64) (*Friendship, error) {
-	if id <= 0 {
-		return nil, ErrFriendshipNotFound
-	}
-	var f Friendship
-	err := s.db.WithContext(ctx).Where("id = ?", id).Take(&f).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrFriendshipNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: 查询好友关系失败: %w", err)
-	}
-	return &f, nil
 }
 
 // BlockStatusBetween 回答"a 与 b 之间有没有 blocked 关系，以及是谁拉黑了谁"。
@@ -466,27 +228,6 @@ func derefInt64(p *int64) int64 {
 	return *p
 }
 
-// areFriendsIn 判断 a 与 b 之间是否有一条 accepted 的好友关系（任一方向）。
-//
-// 与 blockStatusBetweenIn 同一条纪律：吃 *gorm.DB 而不是连接池，让"发消息前的
-// 关系校验"能跑在 SendDM 的**同一个事务**里 —— 否则"先查是好友"与"再插入消息"
-// 之间，对方刚删了好友，消息就发给了已经不再是好友的人。
-// accepted 是**对称**的（§7.1），所以一条查询两个方向都认。
-func areFriendsIn(ctx context.Context, db *gorm.DB, a, b int64) (bool, error) {
-	var f Friendship
-	err := db.WithContext(ctx).
-		Where(`status = ? AND ((requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?))`,
-			FriendshipAccepted, a, b, b, a).
-		Take(&f).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("store: 查询好友关系失败: %w", err)
-	}
-	return true, nil
-}
-
 // UserSearchHit 是"按用户名找人"的一行（wayfinder #39）。
 //
 // 带出 username 与 display_name 两列：**用户名与昵称一起搜**（前端「找朋友」的
@@ -508,11 +249,12 @@ func (UserSearchHit) TableName() string { return tableUsers }
 //  1. **排除自己**。搜索结果里出现"我自己"没有意义，而"加自己为好友"是
 //     服务端明确拒绝的（ErrSelfRelation）—— 让一个注定失败的按钮出现在界面上，
 //     比不让它出现更糟。同理，自己也能在结果里看到自己会让人以为账号信息泄露。
-//  2. **带上关系状态**。`relation ∈ none|friend|pending-out|pending-in|blocked`
-//     由调用方（handler）再查一次关系行得到 —— 不在这里返回，是因为"关系"是
-//     friendships 域的事实，而本方法的职责是"在 users 里找人"。
-//     少了它前端每个结果还得再问一次，且"加好友"按钮的可用性要靠猜。
-//  3. **blocked 行仍然作为结果出现**（relation=blocked，不是隐藏）。
+//  2. **关系状态不在这里返回**。本方法的职责是"在 users 里找人"；
+//     "我跟他什么关系"是关注域（`FollowStatesFor`）与拉黑域（`ListBlocked`）
+//     的事实，由调用方（handler）各查一次再拼上去。票 #59 之前这里还提过
+//     `relation ∈ none|friend|pending-out|pending-in|blocked` 那套流水线取值，
+//     它随好友请求一起退役了。
+//  3. **被拉黑的人仍然作为结果出现**（前端据 `blocked` 布尔渲染成"已拉黑"）。
 //     它要用来显示"已拉黑" —— 用户需要能看见自己拉黑了谁，而搜索是唯一
 //     不需要先记住 userId 的入口。隐藏它会让"解除拉黑"没有入口。
 //
@@ -599,9 +341,11 @@ func (s *Store) ListBlocked(ctx context.Context, actorID int64) ([]BlockedRow, e
 //     （#28 的 mock 与前端说明都是这个语义）。回退状态需要决定"回到哪一个"，
 //     而"被拉黑前是什么"并没有被可靠记录 —— requester/addressee 只是登记角色，
 //     不表示拉黑前的状态。
-//  3. **删除后可以重新发请求**：行没了，CreateFriendshipRequest 的裁决自然放行
-//     （验收第 1 条）。这也意味着解除拉黑是一个**可逆的、完整的**动作 ——
-//     与 #28 记录的"拉黑单向不可逆"痛点对应。
+//  3. **删除后可以重新关注**：行没了，`CreateFollow` 的拉黑裁决自然放行
+//     （验收第 1 条）。若解除时对方仍关注着你，你回关即恢复互关 ——
+//     这正是 `BlockUser` 刻意保留反向关注边的原因。
+//     解除拉黑因此是一个**可逆的、完整的**动作，与 #28 记录的
+//     "拉黑单向不可逆"痛点对应。
 func (s *Store) Unblock(ctx context.Context, actorID, targetID int64) error {
 	if actorID <= 0 || targetID <= 0 {
 		return ErrBlockedRowNotFound

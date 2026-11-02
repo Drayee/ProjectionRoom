@@ -18,6 +18,15 @@ Terms locked by [锁定关注与好友关系模型（互关=好友）](https://g
 
 - `friendships.status = pending | accepted` as friend source of truth.
 - UI: 待处理请求、加好友请求、删除好友（use 取关 / 拉黑 only).
+- **Endpoints** (removed in #59, now 404 with a Chinese error — never a silent 200):
+  `GET /api/friends`, `GET|POST /api/friends/requests`,
+  `POST /api/friends/requests/:id/accept|reject`, `DELETE /api/friends/:id`.
+  The friend list has **no replacement endpoint**: it is `GET /api/follows?tab=mutual`.
+- **WS frames**: `friend-request` / `friend-accepted` have no producer any more
+  (the `FriendEvent` frame encoding is kept to avoid a protobuf change).
+- `friendships` still exists, but only `status = 'blocked'` is live. Blocking is now a
+  transaction of **two** steps: write/override the blocked row **and** delete the
+  blocker's own follow edge (`A→B`), keeping the target's edge (`B→A`).
 
 ### Related
 

@@ -299,18 +299,22 @@ func TestBackfillLegacyFollowsFollowsTicket42(t *testing.T) {
 	s, alice, bob := followEnv(t)
 	ctx := context.Background()
 
+	// 造**旧版本**的存量行。票 #59 之后产生 pending/accepted 的函数已经退役，
+	// 所以这里直接写 SQL —— 这正是"迁移前后等价"该被钉住的地方：
+	// 回填能力不能依赖那个已经删掉的写入路径。
+	legacyRow := func(requester, addressee int64, status string) {
+		t.Helper()
+		if err := s.db.WithContext(ctx).Exec(
+			`INSERT INTO friendships (requester_id, addressee_id, status, created_at, updated_at)
+			 VALUES (?, ?, ?, now(), now())`, requester, addressee, status).Error; err != nil {
+			t.Fatalf("造旧关系行（%s）失败：%v", status, err)
+		}
+	}
 	// alice → bob：accepted（旧好友）。
-	if _, err := s.CreateFriendshipRequest(ctx, alice.ID, bob.ID); err != nil {
-		t.Fatalf("造请求失败：%v", err)
-	}
-	if _, err := s.AcceptFriendshipRequest(ctx, 1, bob.ID); err != nil {
-		t.Fatalf("接受请求失败：%v", err)
-	}
+	legacyRow(alice.ID, bob.ID, FriendshipAccepted)
 	// carol → alice：pending（旧请求）。
 	carol := seedUser(t, s, "fol-carol")
-	if _, err := s.CreateFriendshipRequest(ctx, carol.ID, alice.ID); err != nil {
-		t.Fatalf("造请求失败：%v", err)
-	}
+	legacyRow(carol.ID, alice.ID, FriendshipPending)
 	// dave → alice：blocked（拉黑，不动）。
 	dave := seedUser(t, s, "fol-dave")
 	if _, err := s.BlockUser(ctx, dave.ID, alice.ID); err != nil {
@@ -430,12 +434,22 @@ func TestSendDMGatedByMutualFollow(t *testing.T) {
 		t.Fatalf("拉黑方自己也不该发得出去，实际 %v", err)
 	}
 
-	// 4) 解黑：恢复可发。
+	// 4) 解黑**不自动**恢复可发 —— 票 #59 落地了票 #42 §4 的那条不对称：
+	//    BlockUser 删掉「拉黑方→被拉黑方」那条关注边（bob→alice 被删），
+	//    所以解黑之后两人只剩 alice→bob 的单向边，互关已经断了。
+	//    这不是回归：拉黑是我对自己的约束，恢复联系得由我重新关注一次。
 	if err := s.Unblock(ctx, bob.ID, alice.ID); err != nil {
 		t.Fatalf("解除拉黑失败：%v", err)
 	}
+	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "解开了"); !errors.Is(err, ErrMessageNotFriends) {
+		t.Fatalf("解黑但未回关时应仍是 ErrMessageNotFriends，实际 %v", err)
+	}
+	// 5) 拉黑方重新关注 → 恢复互关 → 恢复可发。
+	if _, _, err := s.CreateFollow(ctx, bob.ID, alice.ID); err != nil {
+		t.Fatalf("解黑后回关失败：%v", err)
+	}
 	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "解开了"); err != nil {
-		t.Fatalf("解黑后应当恢复可发：%v", err)
+		t.Fatalf("回关恢复互关后应当可发：%v", err)
 	}
 }
 
@@ -510,9 +524,12 @@ func TestBackfillLegacyFollowsOnceRunsOnlyOnce(t *testing.T) {
 	s, alice, _ := requireIsolatedSchemaDB(t)
 	ctx := context.Background()
 
+	// 直接写一条**旧版本**的 pending 行（产生它的函数已随票 #59 退役）。
 	carol := seedUser(t, s, "fol-carol")
-	if _, err := s.CreateFriendshipRequest(ctx, carol.ID, alice.ID); err != nil {
-		t.Fatalf("造 pending 请求失败：%v", err)
+	if err := s.db.WithContext(ctx).Exec(
+		`INSERT INTO friendships (requester_id, addressee_id, status, created_at, updated_at)
+		 VALUES (?, ?, ?, now(), now())`, carol.ID, alice.ID, FriendshipPending).Error; err != nil {
+		t.Fatalf("造旧 pending 行失败：%v", err)
 	}
 
 	first, ran, err := s.BackfillLegacyFollowsOnce(ctx)
@@ -565,12 +582,11 @@ func TestCanDMOverridesLegacyAcceptedFriendship(t *testing.T) {
 	ctx := context.Background()
 
 	// 造一段**旧**好友关系（accepted），但不补关注边。
-	req, err := s.CreateFriendshipRequest(ctx, alice.ID, bob.ID)
-	if err != nil {
-		t.Fatalf("造旧好友请求失败：%v", err)
-	}
-	if _, err := s.AcceptFriendshipRequest(ctx, req.ID, bob.ID); err != nil {
-		t.Fatalf("接受旧好友请求失败：%v", err)
+	// 直接写 SQL：产生 accepted 的函数随票 #59 退役，而这段存量数据仍是回填的输入。
+	if err := s.db.WithContext(ctx).Exec(
+		`INSERT INTO friendships (requester_id, addressee_id, status, created_at, updated_at)
+		 VALUES (?, ?, ?, now(), now())`, alice.ID, bob.ID, FriendshipAccepted).Error; err != nil {
+		t.Fatalf("造旧好友关系失败：%v", err)
 	}
 
 	// 门闩已经是 can_dm：旧 accepted 行不再构成发消息资格。

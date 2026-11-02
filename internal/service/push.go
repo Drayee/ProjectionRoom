@@ -97,26 +97,6 @@ func (p *RealtimePusher) PushDMRead(ctx context.Context, readerID, senderID, msg
 	return sent > 0
 }
 
-// PushFriendRequest 推给**被请求方**（handler.FriendPusher）。
-func (p *RealtimePusher) PushFriendRequest(ctx context.Context, actorID, targetID int64, relationshipID int64, actorName string) bool {
-	return p.pushFriend(ctx, model.TypeFriendRequest, targetID, model.FriendEvent{
-		RelationshipID: relationshipID,
-		UserID:         actorID,
-		DisplayName:    actorName,
-		Status:         store.FriendshipPending,
-	})
-}
-
-// PushFriendAccepted 推给**请求方**（handler.FriendPusher）。
-func (p *RealtimePusher) PushFriendAccepted(ctx context.Context, actorID, requesterID int64, relationshipID int64, actorName string) bool {
-	return p.pushFriend(ctx, model.TypeFriendAccepted, requesterID, model.FriendEvent{
-		RelationshipID: relationshipID,
-		UserID:         actorID,
-		DisplayName:    actorName,
-		Status:         store.FriendshipAccepted,
-	})
-}
-
 // PushFriendRemoved 推给**另一方**（handler.FriendPusher）。
 //
 // 关系已经删了，所以没有 relationshipID 可带（0 表示"这条关系已不存在"）。
@@ -150,21 +130,26 @@ func (p *RealtimePusher) pushFriend(ctx context.Context, typ string, targetID in
 }
 
 // FriendIDs 返回某账号的好友 id 列表（handler.PresenceBroadcaster）。
+//
+// 好友 ≡ 互关（票 #42 §1），所以这里读的是关注域：`ListFollowList(mutual)`
+// 已经算好了"双向都有边"的人，并且顺带排除了已拉黑与已封禁的账号 ——
+// presence 只该推给"还在正常来往"的人，而那正是那份名单的口径。
+//
+// 票 #59 之前这里读的是 `store.ListFriends`（friendships 的 accepted 行）。
+// 那条流水线退役后，两处判据（私聊门闩与 presence）终于同源：
+// 旧版本里"能不能私聊"看 follows、"谁收到在线状态"看 friendships，
+// 一个用户在界面上"是好友"却收不到对方的上线提示，就是这个分叉的症状。
 func (p *RealtimePusher) FriendIDs(ctx context.Context, userID int64) ([]int64, error) {
 	if p == nil || p.store == nil || userID <= 0 {
 		return nil, nil
 	}
-	rows, err := p.store.ListFriends(ctx, userID)
+	rows, err := p.store.ListFollowList(ctx, userID, store.FollowListMutual)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]int64, 0, len(rows))
 	for i := range rows {
-		if rows[i].RequesterID == userID {
-			out = append(out, rows[i].AddresseeID)
-		} else {
-			out = append(out, rows[i].RequesterID)
-		}
+		out = append(out, rows[i].UserID)
 	}
 	return out, nil
 }
@@ -222,8 +207,6 @@ type messagePusherShape interface {
 }
 
 type friendPusherShape interface {
-	PushFriendRequest(ctx context.Context, actorID, targetID int64, relationshipID int64, actorName string) bool
-	PushFriendAccepted(ctx context.Context, actorID, requesterID int64, relationshipID int64, actorName string) bool
 	PushFriendRemoved(ctx context.Context, actorID, targetID int64) bool
 	PushBlocked(ctx context.Context, actorID, targetID int64) bool
 }
