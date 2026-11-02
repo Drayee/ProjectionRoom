@@ -20,11 +20,24 @@
  * 与服务端 `GET /api/users/:id/posts?limit&offset` 一一对应，门面用 `page`（1 起）。
  * 滚动到底自动加载下一页；`IntersectionObserver` 不可用时（极老的浏览器 /
  * 测试环境）退化成"加载更多"按钮 —— 按钮始终存在，只是通常被观察器抢先触发。
+ *
+ * # 删帖（票 #70）
+ *
+ * 只在 `self` 为真时出现删除按钮 —— 这一块的 `userId` 在他人档案页是**别人**，
+ * 而"能不能删"是服务端判的（I3）。前端不靠"这行是我写的"来隐藏，而是靠
+ * "这一页是不是我的管理台"：他人档案页上根本不该有删除入口，连灰的都不该有
+ * （那会让人以为点了会有用）。
+ *
+ * 删除是**乐观移除 + 失败回滚**：先在列表里摘掉，服务端 403/404/网络错时按原位置
+ * 插回去并给一句人话。为什么不是"等服务端回来再移除"：那样点一下要等一整个往返，
+ * 而删除是用户已经决定好的事，等待只是让界面显得卡。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import AsyncState from '../../ui/AsyncState.vue'
+import Button from '../../ui/Button.vue'
 import RelativeTime from '../../ui/RelativeTime.vue'
+import * as postsApi from '../../../api/posts'
 import * as usersApi from '../../../api/users'
 import { formatCount } from '../../../utils/count'
 import { isCapabilityUnavailable } from '../../../api/mode'
@@ -160,6 +173,46 @@ function excerpt(content: string, max = 72): string {
   const flat = content.replace(/\s+/g, ' ').trim()
   return flat.length <= max ? flat : flat.slice(0, max) + '…'
 }
+
+// ---------- 删帖（票 #70） ----------
+
+/** 正在删的那条（同一时刻只允许删一条：连点两下不该发两个请求）。 */
+const deletingId = ref<number | null>(null)
+/** 删除失败的人话提示（`notice` 与它分开：一个是中性结果，一个是错误）。 */
+const deleteError = ref('')
+
+/**
+ * 乐观删除：先摘掉，失败插回原位。
+ *
+ * `index` 用来插回**原来的位置**而不是塞到末尾 —— 一条删失败的帖子跑到列表最后，
+ * 会让人以为列表顺序变了（其实只是它被重排了）。
+ */
+async function remove(post: Post): Promise<void> {
+  if (deletingId.value !== null) return
+  const index = items.value.findIndex((p) => p.id === post.id)
+  if (index === -1) return
+  deletingId.value = post.id
+  deleteError.value = ''
+  items.value.splice(index, 1)
+  try {
+    await postsApi.deletePost(post.id)
+  } catch (err) {
+    // 404 = 服务端已经没有它了（比如另一个标签页删过）：**不回滚**，
+    // 因为把它插回列表等于显示一条不存在的帖子。
+    const status = toHttpError(err).status
+    if (status !== 404) {
+      items.value.splice(index, 0, post)
+    }
+    deleteError.value =
+      status === 403
+        ? '只能删除自己的帖子'
+        : status === 404
+          ? '这帖已经不存在了'
+          : toHttpError(err).message
+  } finally {
+    deletingId.value = null
+  }
+}
 </script>
 
 <template>
@@ -204,6 +257,8 @@ function excerpt(content: string, max = 72): string {
     </AsyncState>
 
     <template v-else>
+      <p v-if="deleteError" class="alert" role="alert">{{ deleteError }}</p>
+
       <ul class="rows">
         <li v-for="post in items" :key="post.id" class="row">
           <RouterLink class="row-link" :to="{ name: 'post-detail', params: { id: String(post.id) } }">
@@ -221,6 +276,20 @@ function excerpt(content: string, max = 72): string {
               </template>
             </span>
           </RouterLink>
+          <!-- 删除入口只在 /me（self）出现：他人档案页上连灰的都不该有。 -->
+          <div v-if="props.self" class="row-acts">
+            <Button
+              variant="danger"
+              size="xs"
+              data-testid="delete-post"
+              :loading="deletingId === post.id"
+              :disabled="deletingId !== null"
+              :aria-label="`删除帖子：${post.title}`"
+              @click="remove(post)"
+            >
+              删除
+            </Button>
+          </div>
         </li>
       </ul>
 
@@ -266,6 +335,22 @@ function excerpt(content: string, max = 72): string {
 .row {
   border: 1px solid var(--line);
   background: var(--surface);
+  /* 删除按钮在右侧独立一列：它不能落在 `.row-link` 里面（那是整块链接）。 */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding-right: 12px;
+}
+.row-acts {
+  padding-top: 10px;
+}
+.alert {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 13px;
 }
 .row-link {
   display: flex;

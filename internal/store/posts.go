@@ -36,6 +36,13 @@ var ErrCommentNotFound = errors.New("store: 评论不存在")
 // 授权判定仍然 100% 在服务端，只是落在持有事实的那一层。
 var ErrCommentForbidden = errors.New("store: 只能删除自己的评论")
 
+// ErrPostForbidden 表示"这篇帖子不是你的"（票 #70 的删帖）。
+//
+// 与 ErrCommentForbidden 同一套理由：判据是数据事实（author_id == 请求者），
+// 落在持有那张表的一层；handler 只把它翻译成 403。**不是**在 handler 里
+// 先查一次再判断 —— 那会把"谁有权删"复制到 HTTP 层，两处迟早分叉。
+var ErrPostForbidden = errors.New("store: 只能删除自己的帖子")
+
 // Post 是帖子行。Images 的 jsonb 往返方式与 Anime.Aliases 相同（serializer:json）。
 type Post struct {
 	ID           int64     `gorm:"column:id;primaryKey"`
@@ -708,5 +715,56 @@ func (s *Store) DeletePostComment(ctx context.Context, commentID, actorID int64)
 		// 排序键偏新的代价是零，引入一次聚合 + 一个漂移窗口的代价不是。
 		return tx.Exec(`UPDATE posts SET comment_count = GREATEST(comment_count - 1, 0),
 			updated_at = now() WHERE id = ?`, row.PostID).Error
+	})
+}
+
+// DeletePost 删除一篇帖子；actor 不是作者时返回 ErrPostForbidden（票 #70）。
+//
+// # 为什么是硬删而不是软删
+//
+// 用户删自己的帖是"我发错了 / 不想留了"，软删只会让列表多一个"你看不到但
+// 数据库里还在"的状态，而正文仍然躺在库里 —— 对一个说"删掉"的人这是欺骗。
+// 软删真正需要的场景是**账号注销的冷静期**（决议 #51：30 天内可撤销），
+// 那里软删的是 users 行，与这里无关。
+//
+// # 子行怎么清
+//
+// 靠数据库的 ON DELETE CASCADE（迁移 0010：post_comments / post_likes 的外键），
+// **不在这里手写 DELETE**。手写会漏掉将来新增的子表，而漏掉的症状是
+// "帖删了、评论还在"，且没有任何报错。
+//
+// # 一个刻意的例外：收藏条目保留
+//
+// favorites 表**故意没有外键**（迁移 0016 的注释），所以删帖不会带走收藏行。
+// 这不是疏漏，是决议 #48 §5 的语义：对象失效时条目保留、列表显示失效态、
+// 由用户自行移除 —— "我收藏过的东西后来没了"本身是用户需要知道的信息。
+// store/post_delete_test.go 的 TestDeletePostKeepsFavoritesEntry 钉住它。
+//
+// # 为什么先查作者再删，而不是 DELETE ... WHERE id=? AND author_id=?
+//
+// 一条带条件的 DELETE 无法区分"帖子不存在"与"帖子存在但不是你的"：两者都
+// RowsAffected==0。而这两件事必须回不同的状态码（404 vs 403）—— 把"别人的
+// 帖子"回成 404 看似更安全，但它会让"我的帖子哪去了"变成一次无解的排查。
+// 同一事务里先 Take 再判，多一次主键查询，换一个确定的错误。
+func (s *Store) DeletePost(ctx context.Context, postID, actorID int64) error {
+	if postID <= 0 {
+		return ErrPostNotFound
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row Post
+		err := tx.Select("id, author_id").Where("id = ?", postID).Take(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrPostNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: 查询帖子失败: %w", err)
+		}
+		if row.AuthorID != actorID {
+			return ErrPostForbidden
+		}
+		if err := tx.Delete(&Post{}, postID).Error; err != nil {
+			return fmt.Errorf("store: 删除帖子失败: %w", err)
+		}
+		return nil
 	})
 }

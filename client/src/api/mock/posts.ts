@@ -328,3 +328,26 @@ export async function deleteComment(id: number): Promise<void> {
 export function mockPostTitle(id: number): string | null {
   return allPosts.find((p) => p.id === id)?.title ?? null
 }
+
+/**
+ * 删除自己的帖子（票 #70）。
+ *
+ * 与真实实现的三条对齐：
+ *   1. **只有作者能删** —— 不是作者抛 403 形状的 `HttpError`（不是裸 Error，
+ *      否则页面会把它显示成"网络不可达"）；
+ *   2. 不存在抛 404；
+ *   3. 连带的评论一起清掉（服务端靠 `ON DELETE CASCADE`，mock 手动清）。
+ *      **收藏条目刻意不动**：那是私人书签，服务端也没有外键，失效条目要留着
+ *      让用户在收藏列表里看见「已失效」并自己移除（决议 #48 §5 / 票 #65 G5a）。
+ */
+export async function deletePost(id: number): Promise<void> {
+  const idx = allPosts.findIndex((p) => p.id === id)
+  if (idx === -1) {
+    throw new HttpError({ status: 404, code: 'NOT_FOUND', message: '帖子不存在' })
+  }
+  if (allPosts[idx].authorId !== CURRENT_USER_ID) {
+    throw new HttpError({ status: 403, code: 'FORBIDDEN', message: '只能删除自己的帖子' })
+  }
+  allPosts.splice(idx, 1)
+  delete MOCK_COMMENTS[id]
+}

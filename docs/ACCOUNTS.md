@@ -363,6 +363,45 @@ GET /api/users/:id/rooms?limit&offset   → { items: { roomId, title, createdAt,
   页面从没传过值，留着等于在源码层面暗示"这里本该有个数"。计数位节点仍保留（空 + 隐藏），
   那是 `verify-authorrow` 的结构契约。
 
+### 7.7 我的内容管理（票 #70）
+
+`/me` 的概览分区里，本人的帖子与放映室是**可管理**的，与 `/user/:id` 上的只读橱窗不同。
+
+**删帖** `DELETE /api/posts/:postId`（需登录，204）：
+
+- **授权在服务端**（I3）：判据是 `posts.author_id == 请求者`，落在 store 层
+  （`store.DeletePost` 返回 `ErrPostForbidden`），handler 只把它翻译成 403。
+- 403 与 404 **必须分开**：`DELETE ... WHERE id = ? AND author_id = ?` 一条 SQL 写不出这个语义 ——
+  "帖子不存在"与"不是你的帖子"的 `RowsAffected` 都是 0，而前者该回 404、后者该回 403。
+  所以先查 `id, author_id`，再判、再删。
+- **硬删，不软删**：用户点"删除"之后正文还躺在库里是欺骗。真正需要软删的是账号注销
+  （那里软删的是 `users` 行，见票 #73）。
+- 子行靠 `ON DELETE CASCADE`（`post_likes` / `post_comments`），**不手写 DELETE** ——
+  手写会漏掉将来新增的子表，症状是"帖删了、评论还在"且没有任何报错。
+- **收藏条目刻意保留**：`favorites` 表没有外键指向 `posts`（票 #64 的决定），
+  帖子删掉之后收藏行还在，收藏列表里显示"已失效：这篇帖子已被删除"，由用户自己移除。
+  `store.TestDeletePostKeepsFavoritesEntry` 把这个例外钉在 store 层，
+  防止以后有人"顺手补个外键"。
+- 前端 `AuthorPostsBlock` 在 `self` 为真时给每条帖一个「删除」：**乐观移除 + 失败插回原位置**；
+  404 例外地**不**插回（服务端已经没有它了，插回去等于显示一条不存在的帖）。
+
+**我的放映室** `GET /api/rooms/mine?limit&offset`（需登录）→ `{ items, hasMore }`，
+每行 `{ roomId, title, isPublic, isClosed, hasPassword, createdAt, lastSeenAt }`：
+
+- **房主全部房**，含 `is_public = false` 与 `closed_at` 非空的。与 `GET /api/users/:id/rooms`
+  （对外橱窗：只列已公开且未关闭）**口径互补**：他人页是"别人能看到的"，这一条是"我拥有的"。
+  房主是唯一需要据此重新开放那间房的人，若复用公开房的过滤条件，
+  症状是"我把房关掉了，它就凭空消失了"。
+- store 层对应 `ListRoomsByOwner`（不过滤公开性与关闭态），注释明确**只该被"我的"路径调用**。
+- 为什么是 `/api/rooms/mine` 而不是 `?owner=me`：身份只能来自 token，
+  能传 owner 的查询串立刻引出"能不能传别人的 id"。代价是房间码不能叫 `MINE`
+  （`^[A-Z0-9]{4,12}$` 技术上合法），与"`/api/users/search` 吃掉 id=search"同族，
+  属已知可接受边界。
+- 前端 `MeRoomsBlock` **刻意不复用 `AuthorRoomsBlock`**：那是对外橱窗，
+  连 `isPublic`/`isClosed` 两个字段都没有，而这一页要给「私密」「已关闭」徽章。
+- 这是第三个开关域之外的第九个：`VITE_MOCK_ROOMS`（`/api/rooms/mine` 是房主资产清单，
+  不能挂在 `official` 下面 —— 官方区是运营位）。
+
 ## 8. 管理端
 
 - 前端 `/admin` 独立视图；**所有** `/api/admin/*` 由服务端 `RequireAdmin` 保护（前端 `v-if` 只控显示）。
@@ -412,6 +451,9 @@ GET /api/users/:id/rooms?limit&offset   → { items: { roomId, title, createdAt,
   GET    /api/favorites?type=post|room|anime&before=&limit=
 消息
   GET    /api/messages?peer&before           POST /api/messages/read
+我的内容（票 #70；需登录）
+  DELETE /api/posts/:postId                仅作者；403/404 分开；硬删 + CASCADE
+  GET    /api/rooms/mine?limit&offset      房主全部房（含未公开与已关闭）
 公开房间
   GET    /api/public-rooms[?official=true|false]    PATCH /api/rooms/:id/meta（房主改标题/公开性）
 管理端（全部 RequireAdmin）

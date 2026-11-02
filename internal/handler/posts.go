@@ -115,6 +115,11 @@ func registerPostRoutes(api *gin.RouterGroup, st *store.Store, cfg *config.Confi
 	api.POST("/posts/:postId/like", RequireAuth(auth), interactLimiter, h.like)
 	api.POST("/posts/:postId/comments", RequireAuth(auth), interactLimiter, h.addComment)
 	api.DELETE("/comments/:commentId", RequireAuth(auth), readLimiter, h.deleteComment)
+
+	// 删自己的帖（票 #70）。挂在**只读桶**上，与删评论同一条理由：
+	// 它是幂等的（重试不会产生第二份效果）、只会减少数据，而"连着删几条自己
+	// 发错的东西"是正常动作，不该被互动桶挡成 429。
+	api.DELETE("/posts/:postId", RequireAuth(auth), readLimiter, h.deletePost)
 }
 
 type postHandler struct {
@@ -546,6 +551,40 @@ func (h *postHandler) deleteComment(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "只能删除自己的评论", "code": CodeForbidden})
 		default:
 			postInternal(c, "删除评论失败", err)
+		}
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// deletePost 删除自己的帖子（票 #70）。
+//
+// 三个状态码的分工，每一个都对应一次具体的用户疑问：
+//
+//	401 未登录 —— "我点了删除怎么跳去登录了"
+//	403 不是我的 —— "这篇不是我写的"（**不**回 404：那会让"我的帖哪去了"无解）
+//	404 不存在 —— "我刚才删过了？"（重复删也走这里，它是幂等的）
+//
+// 授权判据在 store（author_id == 请求者），这里只翻译错误 —— 与 deleteComment
+// 逐字同构。在 handler 里先查一次再判断会把"谁有权删"复制到 HTTP 层。
+func (h *postHandler) deletePost(c *gin.Context) {
+	actor, ok := CurrentUser(c)
+	if !ok {
+		abortUnauthorized(c, CodeSessionInvalid, "登录状态无效，请重新登录")
+		return
+	}
+	id, ok := postIDParam(c)
+	if !ok {
+		return
+	}
+	if err := h.store.DeletePost(c.Request.Context(), id, actor.ID); err != nil {
+		switch {
+		case errors.Is(err, store.ErrPostNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "帖子不存在", "code": codeNotFound})
+		case errors.Is(err, store.ErrPostForbidden):
+			c.JSON(http.StatusForbidden, gin.H{"error": "只能删除自己的帖子", "code": CodeForbidden})
+		default:
+			postInternal(c, "删除帖子失败", err)
 		}
 		return
 	}

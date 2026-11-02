@@ -32,12 +32,21 @@
 import { HttpError, toHttpError } from './http'
 
 /**
- * 六个可切换的域。
+ * 九个可切换的域。
  *
- * 与 `client/.env.example` 的六个 `VITE_MOCK_*` 一一对应；新增域时两处都要加，否则
+ * 与 `client/.env.example` 的九个 `VITE_MOCK_*` 一一对应；新增域时两处都要加，否则
  * `SWITCHES` 的 `Record` 类型会立刻报缺键（故意的：漏一个就会静默沿用别的域的开关）。
  */
-export type ApiDomain = 'posts' | 'friends' | 'messages' | 'forum' | 'official' | 'users' | 'follows' | 'favorites'
+export type ApiDomain =
+  | 'posts'
+  | 'friends'
+  | 'messages'
+  | 'forum'
+  | 'official'
+  | 'users'
+  | 'follows'
+  | 'favorites'
+  | 'rooms'
 
 /**
  * 整域能力尚未上线。
@@ -132,6 +141,11 @@ const SWITCHES: Record<ApiDomain, () => string | undefined> = {
   //   它是**跨对象**的（帖/番剧/放映室都能收），所以不能挂在 posts 的开关下面 ——
   //   否则"帖子翻真、收藏还是 mock"会让动作条亮着而 /me 里空空。
   favorites: () => readRaw(import.meta.env.VITE_MOCK_FAVORITES),
+  // 房间元数据域（票 #70）：
+  //   `/api/rooms/mine` 是**房主资产清单**，与公开房列表（`/api/public-rooms`，
+  //   走 stores/publicRooms 直连）不是一件事。它不能挂在 official 下面 ——
+  //   官方区是运营位，跟"我开过哪些房"没有关系。
+  rooms: () => readRaw(import.meta.env.VITE_MOCK_ROOMS),
 }
 
 /** 该域当前是否走本地 mock（默认 true）。 */
@@ -210,7 +224,7 @@ export async function toCapabilityUnavailableIf(
 /**
  * 开关快照（诊断与验收脚本用，不参与渲染）。
  *
- * 生产构建里也保留：它不含任何凭据，只是六个布尔值，而"我现在到底在跟 mock 还是真实
+ * 生产构建里也保留：它不含任何凭据，只是九个布尔值，而"我现在到底在跟 mock 还是真实
  * 接口说话"是排查空态时第一个要回答的问题。
  */
 export function mockSwitchSnapshot(): Record<ApiDomain, boolean> {
@@ -223,5 +237,6 @@ export function mockSwitchSnapshot(): Record<ApiDomain, boolean> {
     users: isMock('users'),
     follows: isMock('follows'),
     favorites: isMock('favorites'),
+    rooms: isMock('rooms'),
   }
 }

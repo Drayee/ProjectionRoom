@@ -31,8 +31,9 @@
  *
  * ## 与票 #70 / #71 的边界
  *
- * 本票只做**路由切分与区块骨架**：
- *   - 删帖入口与「我的放映室含未公开/已关闭」由 #70 接（`GET /api/rooms/mine` 还不存在）；
+ *   - 删帖入口与「我的放映室含未公开/已关闭」已由 #70 接（`DELETE /api/posts/:id`、
+ *     `GET /api/rooms/mine`）；帖子块复用他人档案页那一份，只是 `self` 为真时
+ *     多出删除按钮 —— 他人页上不该有那个入口，连灰的都不该有；
  *   - 设置区五块由 #71 接。
  * 所以这里两块各自说明"还差什么"，而不是画一个假的完成态。
  */
@@ -46,6 +47,7 @@ import UserAvatar from '../components/ui/UserAvatar.vue'
 import AuthorPostsBlock from '../components/features/profile/AuthorPostsBlock.vue'
 import MeRelationsBlock from '../components/features/profile/MeRelationsBlock.vue'
 import MeFavoritesBlock from '../components/features/profile/MeFavoritesBlock.vue'
+import MeRoomsBlock from '../components/features/profile/MeRoomsBlock.vue'
 import * as usersApi from '../api/users'
 import { NETWORK_MESSAGE, toHttpError } from '../api/http'
 import { isCapabilityUnavailable } from '../api/mode'
@@ -297,18 +299,11 @@ watch(tab, async () => {
           <AuthorPostsBlock :user-id="auth.profile?.id ?? 0" title="我的帖子" self />
 
           <!--
-            我的放映室：票 #70 才接「含未公开与已关闭」的全口径
-            （`GET /api/rooms/mine` 尚不存在）。这里先说明缺口，
-            而不是只显示已公开的那几间 —— 那会让人以为私密房丢了。
+            我的放映室（票 #70）：owner 全部房，含未公开与已关闭。
+            与档案页那块不是同一个组件 —— 那一块只列公开且未关闭的房（对外橱窗），
+            这一块是资产清单，两个布尔本身就是信息。
           -->
-          <section class="card" aria-labelledby="me-rooms-head">
-            <h2 id="me-rooms-head" class="sect-title">我的放映室</h2>
-            <p class="dim small">
-              「我开过的全部房间」需要服务端提供一个按房主查询的端点（含未公开与已关闭），
-              那在票 #70 落地。现在想看自己公开的房，去
-              <RouterLink :to="{ name: 'public-rooms' }">公开房间</RouterLink>。
-            </p>
-          </section>
+          <MeRoomsBlock />
         </section>
 
         <!-- ---------- 关系 ---------- -->

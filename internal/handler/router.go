@@ -297,6 +297,13 @@ func NewRouter(
 	// 分开 —— 收藏不涉及任何人与人之间的关系，只涉及"我"与"一个对象"。
 	registerFavoriteRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
 
+	// 我的放映室（票 #70）：owner 全部房，含未公开与已关闭。
+	//
+	// 紧跟收藏之后、`/ws/user` 之前。它与上面的 `GET /api/rooms/:roomId`
+	// （房间探测，免登录）**同前缀不同语义**：那条是"任何人都能问某个房间码
+	// 是什么"，这条是"我自己开过哪些房"。后者要登录，且身份只来自 token。
+	registerMyRoomRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
+
 	// 用户级实时通道（wayfinder #31）：/ws/user。票据必填，不属于任何房间。
 	registerUserWSRoute(r, cfg, accountDeps.UserHub, accountDeps, accountDeps.Presence)
 

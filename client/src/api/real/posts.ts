@@ -204,3 +204,22 @@ export async function deleteComment(id: number): Promise<void> {
     throw toCapabilityUnavailable('posts', err)
   }
 }
+
+/**
+ * 删除自己的帖子（票 #70）。
+ *
+ * 服务端：`DELETE /api/posts/:postId` → 204；403 = 不是你的；404 = 不存在。
+ *
+ * **不能**在这里把 404 无脑翻成 `CapabilityUnavailable`：这一域的列表端点
+ * 一定会成功（页面正是从列表进来的），所以 404 只可能是"这帖没了"。
+ * 用带探针的版本反而会多打一发请求 —— 因此这里用 `toCapabilityUnavailableIf`
+ * 的轻量版：只把**非** 404 的错误原样透出，404 原样透出（页面据 404 判"已被删"）。
+ * 唯一的例外是整域没注册时的纯文本 404 —— 那由列表页自己先撞上，走不到这里。
+ */
+export async function deletePost(id: number): Promise<void> {
+  try {
+    await requestJSON<null>(fetcher(), `/api/posts/${id}`, { method: 'DELETE' })
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err))
+  }
+}

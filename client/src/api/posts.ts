@@ -9,6 +9,7 @@
  *   listComments(postId) → Comment[]
  *   addComment({postId, content}) → Comment
  *   deleteComment(id) → void
+ *   deletePost(id) → void            （票 #70）
  *
  * 实现由 `api/mode.ts` 的 `VITE_MOCK_POSTS` 在**模块加载时**二选一：
  * 默认 mock（`api/mock/posts.ts`），配成 `0`/`false`/`off`/`no` 时用真实实现
@@ -30,6 +31,13 @@ type PostsApi = {
   listComments(postId: number): Promise<import('../types/posts').Comment[]>
   addComment(input: { postId: number; content: string }): Promise<import('../types/posts').Comment>
   deleteComment(id: number): Promise<void>
+  /**
+   * 删除自己的帖子（票 #70）。
+   *
+   * 服务端判据是 I3（授权 100% 在服务端）：不是作者 → 403，不存在 → 404。
+   * 页面据此区分"这帖已经被删了"（从列表里移除即可）与"你不能删它"（提示）。
+   */
+  deletePost(id: number): Promise<void>
 }
 
 const impl: PostsApi = isMock('posts') ? mock : real
@@ -41,6 +49,7 @@ export const toggleLike = impl.toggleLike
 export const listComments = impl.listComments
 export const addComment = impl.addComment
 export const deleteComment = impl.deleteComment
+export const deletePost = impl.deletePost
 
 /** 类型再导出：页面从门面拿类型，不必知道 `types/posts.ts` 的位置。 */
 export type { Comment, ListPostsInput, ListPostsResult, Post } from '../types/posts'

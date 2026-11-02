@@ -130,6 +130,7 @@ jobs:
           VITE_MOCK_USERS: ${{ vars.VITE_MOCK_USERS || '0' }}
           VITE_MOCK_FOLLOWS: ${{ vars.VITE_MOCK_FOLLOWS || '0' }}
           VITE_MOCK_FAVORITES: ${{ vars.VITE_MOCK_FAVORITES || '0' }}
+          VITE_MOCK_ROOMS: ${{ vars.VITE_MOCK_ROOMS || '0' }}
         run: |
           npm --prefix client ci
           npm --prefix client run build
