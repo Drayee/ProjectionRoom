@@ -33,8 +33,10 @@
  *  R4 **计数缩写**：0 隐数字、999 原样、1200 → 1.2k、12345 → 1.2w。
  *     用页面里真的渲染出来的三个计数钉（mock 数据里 likeCount 是 23/41/9…，不够表达四档，
  *     所以这条判据走 `formatCount` 的纯函数面 + 组件渲染面两条：见 R4b）。
- *  R5 **AsyncState 三态单一出口**：帖子两页的加载/空/错都由 ui/AsyncState 渲染
- *     （结构面：`[data-testid=async-state]` 存在且带 data-state）。
+ *  R5 **AsyncState 三态单一出口**：帖子两页的加载/空/错都由 ui/AsyncState 渲染。
+ *     注意判据刻意**不**在列表页上找 loading/empty —— mock 域的 `listPosts` 在同一微任务里
+ *     就 resolve，浏览器从不绘制那个中间态；而种子帖有 13 条，empty 也不可达。所以 R5a 用一个
+ *     必然失败的请求（不存在的帖子）钉 error 态 + 重试出口，R5b 源码级钉两页都接了 AsyncState。
  *  R6 **详情页的作者行是 detail 尺寸**、评论行是 comment 尺寸。
  *  R7 **Tab 序**：从卡片链接出发 Tab，依次落到赞 → 收藏 → 评论。
  *  R8 **源码级**：帖子两页不再有 `{{ p.author.displayName }} · 赞` 这类拼串；
@@ -234,15 +236,35 @@ async function main() {
     record('R4b 计数为 0 时数字节点隐藏（不显示 0）', zeroHidden === true, String(zeroHidden))
 
     // ---------- R5 AsyncState 单一出口 ----------
-    await cdp.navigate(site.url + '/posts')
+    //
+    // 为什么不用「列表页上找个 async-state」来钉：mock 域的 `listPosts` 是**同一个微任务里
+    // 就 resolve** 的，`busy` 置真又置假之间浏览器从不绘制，loading 骨架在 mock 模式下
+    // **结构上不可观察**；而 mock 有 13 条种子帖，empty 也不可达。早先这版判据因此在
+    // mock 模式下恒红 —— 那不是实现的问题，是判据选了一个不可达的观测点。
+    //
+    // 改成两条**确定可达**的判据：
+    //   R5a 一个必然失败的真实请求（不存在的帖子）→ 必须由 ui/AsyncState 渲染 error 态，
+    //       且带重试出口。这条同时钉住了「错误不是裸文案，而是有结构的空态件」。
+    //   R5b 源码级：帖子两页的三态分支都走 AsyncState（不是各自写一段 v-if 文案）。
+    await cdp.navigate(site.url + '/posts/999999')
+    await waitFor(
+      async () => (await cdp.evaluate("Boolean(document.querySelector('[data-testid=async-state]'))")),
+      { label: '不存在的帖子渲染出 AsyncState', timeoutMs: 20000 },
+    )
     const asyncStates = await cdp.evaluate(
       "(() => [...document.querySelectorAll('[data-testid=async-state]')].map((n) => n.getAttribute('data-state')))()",
     )
     evidence.asyncStates = asyncStates
     const knownStates = ['loading', 'empty', 'error', 'capability']
-    record('R5a 列表页三态走 ui/AsyncState（有 data-state）',
-      Array.isArray(asyncStates) && asyncStates.length > 0 && asyncStates.every((s) => knownStates.includes(s)),
-      JSON.stringify(asyncStates))
+    const hasRetry = await cdp.evaluate(
+      "(() => { const n = document.querySelector('[data-testid=async-state]'); if (!n) return false; " +
+        "return [...n.querySelectorAll('button')].some((b) => (b.textContent || '').includes('重试')); })()",
+    )
+    evidence.asyncStateRetry = hasRetry
+    record('R5a 失败请求由 ui/AsyncState 渲染 error 态（带重试）',
+      Array.isArray(asyncStates) && asyncStates.length > 0 && asyncStates.every((s) => knownStates.includes(s)) &&
+        asyncStates.includes('error') && hasRetry === true,
+      JSON.stringify(asyncStates) + ' retry=' + String(hasRetry))
 
     // ---------- R6 详情页：作者行 detail / 评论作者 comment ----------
     await cdp.navigate(site.url + '/posts/1')
@@ -300,6 +322,13 @@ async function main() {
 
     const postsSrc = stripComments(readFileSync(join(SRC, 'pages', 'PostsPage.vue'), 'utf8'))
     record('R8a 列表页不再有「昵称 · 赞 N」拼串', !/displayName[^\n]*·[^\n]*赞/.test(postsSrc))
+
+    // R5b：三态出口是**同一个组件**，不是各页各写一段 v-if 文案。
+    // 两页都必须 import 并渲染 AsyncState（源码级，避免"只在列表页接了、详情页还是裸文案"）。
+    const detailSrc = stripComments(readFileSync(join(SRC, 'pages', 'PostDetailPage.vue'), 'utf8'))
+    const usesAsync = (src) => /import\s+AsyncState\s+from/.test(src) && /<AsyncState/.test(src)
+    record('R5b 帖子两页的三态都走 ui/AsyncState', usesAsync(postsSrc) && usesAsync(detailSrc),
+      'posts=' + String(usesAsync(postsSrc)) + ' detail=' + String(usesAsync(detailSrc)))
 
     // 唯一实现：AuthorRow / AsyncState / ActionBar 各只有一份。
     const walk = (dir, out = []) => {
