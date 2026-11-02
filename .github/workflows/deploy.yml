@@ -57,9 +57,12 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # 整条 job 的硬上限。远程拉镜像最多等 15 分钟，健康检查最多 60 秒，
-    # 加上 checkout/探测的开销，25 分钟足够；超过说明卡死了，让它失败而不是挂到 6 小时。
-    timeout-minutes: 25
+    # 整条 job 的硬上限。
+    #
+    # 远程拉镜像现在会**重试**：每轮最多等 15 分钟，共 3 轮（见 Deploy 步骤）。
+    # 3×15=45 分钟是理论最坏值，加上健康检查 60 秒与 checkout/探测开销，
+    # 给 50 分钟。超过说明真卡死了，让它失败而不是挂到 6 小时。
+    timeout-minutes: 50
     # 只在构建成功时自动部署；手动触发不受此限
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -270,8 +273,6 @@ jobs:
           PULL_DONE=/tmp/pr-pull.done
           rm -f "$PULL_LOG" "$PULL_DONE"
 
-          echo "后台拉取 $IMAGE_REF（日志 $PULL_LOG）"
-
           # 把拉取动作写成**独立脚本文件**再 nohup 执行。
           #
           # 为什么不用 `nohup bash -c "... \$? ..."`：那是三层引号嵌套
@@ -293,30 +294,85 @@ jobs:
           } > /tmp/pr-pull.sh
           chmod +x /tmp/pr-pull.sh
 
-          nohup /tmp/pr-pull.sh "$IMAGE_REF" "$PULL_LOG" "$PULL_DONE" > /dev/null 2>&1 &
+          # —— 拉取重试 ——
+          #
+          # 为什么需要重试：这台服务器到 GHCR 的跨境链路耗时**剧烈抖动**。
+          # 实测同一台机器、同一套配置，拉取耗时在 1~15 分钟之间摆动：
+          #   41401415761  1m15s      41399037586  12m27s
+          #   41394941911  2m07s      41403563606  11m03s
+          #   41409116221  13m48s     41406917143  超时失败（15 分钟没拉完）
+          # 失败那次日志里两层已 Pull complete，只剩 `3f9ec6b608d6` 卡在
+          # `Pulling fs layer`。这种失败与代码、配置都无关，单纯是撞上了最慢的一档。
+          #
+          # 为什么重试有效而不是浪费时间：`docker pull` 是**逐层落盘**的，
+          # 已下载完的层在第二次尝试里是 `Already exists`，只补剩下的。
+          # 所以第二轮不是"再花 15 分钟"，而是"接着上次的位置继续"。
+          #
+          # 为什么单纯放宽超时不合适：放宽只是把窗口拉长，撞上更慢的一档照样失败，
+          # 而失败一次的代价是整条部署 job 白跑。重试才是对症的。
+          #
+          # 上限 3 轮 × 15 分钟 = 45 分钟；job 的 timeout-minutes 相应提到 50。
+          #
+          # ⚠ 两个细节，都是"看起来能跑但会误判"的那一类：
+          #
+          # 1. **完成标记必须每轮独立**。超时那一轮的 `docker pull` 并没有被杀，
+          #    它还在后台接着下。如果三轮共用同一个 `$PULL_DONE`，上一轮迟到的
+          #    `printf 0` 会落在下一轮的轮询窗口里，于是下一轮刚起头就"成功"了 ——
+          #    而此时新起的 pull 还没下完，后面的 `docker compose up -d` 会拉不到镜像。
+          #    用 `$PULL_DONE.$attempt` 让每一轮只看自己的标记。
+          #
+          # 2. **重试前掐掉上一轮的拉取进程**。否则两轮 `docker pull` 并发，
+          #    既浪费带宽又让日志互相覆盖（两个进程写同一个 `$PULL_LOG`）。
+          #    `pkill -f` 只按脚本路径匹配，不会误伤别的进程。
+          PULL_OK=0
+          for attempt in 1 2 3; do
+            # 掐掉上一轮残留的拉取进程（第一轮时没有，pkill 返回非零要忽略）
+            pkill -f '/tmp/pr-pull.sh' 2>/dev/null || true
+            sleep 1
 
-          # 最多等 15 分钟（180 × 5s）。超时按失败处理，但会打印日志尾部。
-          for i in $(seq 1 180); do
-            if [ -f "$PULL_DONE" ]; then
-              RC=$(cat "$PULL_DONE")
-              if [ "$RC" != "0" ]; then
-                echo "拉取失败（exit=$RC），日志尾部："
-                tail -30 "$PULL_LOG"
-                exit 1
+            ATTEMPT_LOG="$PULL_LOG.$attempt"
+            ATTEMPT_DONE="$PULL_DONE.$attempt"
+            rm -f "$ATTEMPT_LOG" "$ATTEMPT_DONE"
+
+            echo "第 $attempt/3 轮拉取 $IMAGE_REF（日志 $ATTEMPT_LOG）"
+            nohup /tmp/pr-pull.sh "$IMAGE_REF" "$ATTEMPT_LOG" "$ATTEMPT_DONE" > /dev/null 2>&1 &
+
+            for i in $(seq 1 180); do
+              if [ -f "$ATTEMPT_DONE" ]; then
+                RC=$(cat "$ATTEMPT_DONE")
+                if [ "$RC" = "0" ]; then
+                  echo "拉取完成（第 $attempt 轮，${i}×5s）"
+                  PULL_OK=1
+                  break
+                fi
+                echo "第 $attempt 轮拉取失败（exit=$RC），日志尾部："
+                tail -20 "$ATTEMPT_LOG"
+                break
               fi
-              echo "拉取完成（${i}×5s）"
+              # 每 12 次（1 分钟）打印一次进度，避免日志一片空白
+              if [ $((i % 12)) -eq 0 ]; then
+                echo "  …仍在拉取（第 $attempt 轮，$((i * 5))s），最近一行：$(tail -1 "$ATTEMPT_LOG" 2>/dev/null)"
+              fi
+              sleep 5
+            done
+
+            if [ "$PULL_OK" = "1" ]; then
               break
             fi
-            # 每 12 次（1 分钟）打印一次进度，避免日志一片空白
-            if [ $((i % 12)) -eq 0 ]; then
-              echo "  …仍在拉取（$((i * 5))s），最近一行：$(tail -1 "$PULL_LOG" 2>/dev/null)"
+
+            if [ ! -f "$ATTEMPT_DONE" ]; then
+              echo "第 $attempt 轮超时（15 分钟未完成），日志尾部："
+              tail -20 "$ATTEMPT_LOG"
             fi
-            sleep 5
+
+            if [ "$attempt" != "3" ]; then
+              echo "准备重试 —— 已下载的层会复用，只补剩余部分"
+              sleep 10
+            fi
           done
 
-          if [ ! -f "$PULL_DONE" ]; then
-            echo "拉取超时（15 分钟），日志尾部："
-            tail -30 "$PULL_LOG"
+          if [ "$PULL_OK" != "1" ]; then
+            echo "::error::三轮拉取都没完成，放弃本次部署。镜像 $IMAGE_REF"
             exit 1
           fi
 
