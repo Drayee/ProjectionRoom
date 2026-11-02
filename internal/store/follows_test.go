@@ -381,3 +381,208 @@ func TestBackfillLegacyFollowsFollowsTicket42(t *testing.T) {
 		t.Fatalf("库里应有 3 条关注边，实际 %d", total)
 	}
 }
+
+// ===== 票 #57：can_dm 换门闩 + 存量迁移编排 + 取关后的门闩实效 =====
+//
+// 与上面的 #56 用例的分工：那边验 can_dm **谓词本身**，
+// 这里验谓词**接进私聊发送路径之后**的行为（单向不可发、互关可发、拉黑双向不可发、
+// 解黑恢复可发、单方取关后不可发新消息但历史仍可读），
+// 以及一次性回填 BackfillLegacyFollowsOnce 的编排（登录时触发一次）。
+
+// TestSendDMGatedByMutualFollow 是票 #57 验收第 1 条的私聊侧证据：
+// 发送路径的门闩从 areFriends(accepted) 换成了 can_dm（互关 ∧ 非拉黑）。
+//
+// 四种状态逐一覆盖：单向 → 403；互关 → 201；任一方向拉黑 → 403；解黑 → 恢复可发。
+// 每一条都从**发送端**验（SendDM 返回 ErrMessageNotFriends / ErrMessageBlocked），
+// 而不是只看 CanDM —— 那才是"服务端强制"的落点。
+func TestSendDMGatedByMutualFollow(t *testing.T) {
+	s, alice, bob := followEnv(t)
+	ctx := context.Background()
+
+	// 1) 单向关注：不可发。
+	if _, _, err := s.CreateFollow(ctx, alice.ID, bob.ID); err != nil {
+		t.Fatalf("建关注边失败：%v", err)
+	}
+	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "你好"); !errors.Is(err, ErrMessageNotFriends) {
+		t.Fatalf("单向关注时发私聊应被拒（ErrMessageNotFriends），实际 %v", err)
+	}
+
+	// 2) 互关：可发。
+	if _, _, err := s.CreateFollow(ctx, bob.ID, alice.ID); err != nil {
+		t.Fatalf("建反向边失败：%v", err)
+	}
+	first, err := s.SendDM(ctx, alice.ID, bob.ID, "你好")
+	if err != nil {
+		t.Fatalf("互关后应当可以发私聊：%v", err)
+	}
+	if first.ID <= 0 || first.Body != "你好" {
+		t.Fatalf("落库后的消息形状不对：%+v", first)
+	}
+
+	// 3) 拉黑（任一方向）：双向都不可发。
+	if _, err := s.BlockUser(ctx, bob.ID, alice.ID); err != nil {
+		t.Fatalf("拉黑失败：%v", err)
+	}
+	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "还在吗"); !errors.Is(err, ErrMessageBlocked) {
+		t.Fatalf("拉黑后发送方应收到 ErrMessageBlocked，实际 %v", err)
+	}
+	if _, err := s.SendDM(ctx, bob.ID, alice.ID, "我拉黑了你"); !errors.Is(err, ErrMessageBlocked) {
+		t.Fatalf("拉黑方自己也不该发得出去，实际 %v", err)
+	}
+
+	// 4) 解黑：恢复可发。
+	if err := s.Unblock(ctx, bob.ID, alice.ID); err != nil {
+		t.Fatalf("解除拉黑失败：%v", err)
+	}
+	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "解开了"); err != nil {
+		t.Fatalf("解黑后应当恢复可发：%v", err)
+	}
+}
+
+// TestUnfollowClosesGateButKeepsHistory 是票 #57 验收第 4 条：
+// 取关事务 = 删边 → 失互关即不可发新私聊、**历史只读**；对端的边保留。
+//
+// "历史只读"落成两个断言：ListDM 仍返回旧的几条（读得回来），
+// 而 SendDM 新增一条被拒（写不进去）。
+func TestUnfollowClosesGateButKeepsHistory(t *testing.T) {
+	s, alice, bob := followEnv(t)
+	ctx := context.Background()
+
+	if _, _, err := s.CreateFollow(ctx, alice.ID, bob.ID); err != nil {
+		t.Fatalf("建关注边失败：%v", err)
+	}
+	if _, _, err := s.CreateFollow(ctx, bob.ID, alice.ID); err != nil {
+		t.Fatalf("建反向边失败：%v", err)
+	}
+	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "互关期间的一条"); err != nil {
+		t.Fatalf("互关期间发消息失败：%v", err)
+	}
+
+	// alice 单方取关：只删她这一条边，bob→alice 那条保留。
+	removed, err := s.RemoveFollow(ctx, alice.ID, bob.ID)
+	if err != nil || !removed {
+		t.Fatalf("取关失败：removed=%v err=%v", removed, err)
+	}
+	stillFollowing, err := s.IsFollowing(ctx, bob.ID, alice.ID)
+	if err != nil || !stillFollowing {
+		t.Fatalf("对端的边应当保留：ok=%v err=%v", stillFollowing, err)
+	}
+
+	// 失互关 → 不可发新私聊（两个方向都不可：can_dm 是对称的）。
+	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "取关之后"); !errors.Is(err, ErrMessageNotFriends) {
+		t.Fatalf("取关后发送方应被拒，实际 %v", err)
+	}
+	if _, err := s.SendDM(ctx, bob.ID, alice.ID, "反向也要被拒"); !errors.Is(err, ErrMessageNotFriends) {
+		t.Fatalf("取关后对端也不该发得进来，实际 %v", err)
+	}
+
+	// 历史只读：旧消息仍然读得到。
+	rows, _, err := s.ListDM(ctx, alice.ID, bob.ID, 0, 50)
+	if err != nil {
+		t.Fatalf("读历史失败：%v", err)
+	}
+	if len(rows) != 1 || rows[0].Body != "互关期间的一条" {
+		t.Fatalf("取关后历史应当仍可读，实际 %d 条：%+v", len(rows), rows)
+	}
+
+	// 会话列表也还在（"历史只读"的另一个面）。
+	convs, err := s.ListDMConversations(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("读会话列表失败：%v", err)
+	}
+	if len(convs) != 1 || convs[0].PeerID != bob.ID {
+		t.Fatalf("取关后会话列表应当仍有这一段，实际 %+v", convs)
+	}
+}
+
+// TestBackfillLegacyFollowsOnceRunsOnlyOnce 覆盖一次性编排的半部分：
+// 第二次调用不再碰库（版本键已落），因此不会重复删 pending 行、也不会重复建边。
+//
+// 为什么需要这个编排（而不是直接调 BackfillLegacyFollows）：本仓库的迁移规约是
+// 「只做加法」，而回填要删 pending 行；它不能被夹在每次启动或每次登录里反复跑 ——
+// 于是用 schema_migrations 里的一枚**数据版本键**把它钉成一次性动作。
+//
+// ⚠ 这条用例**必须**跑在独立的 schema 里（DSN 追加 `search_path=<临时> search_path=<临时>`）：
+// 版本键是库级状态，而共享的 public schema 里一旦有任何一个更早的用例
+// （或一次真实的启动回填）落过这枚键，"第一次应当执行"就永远不成立。
+// 这也是"一次性动作"测试的通病：断言的是**全局副作用**，隔离是前提而不是选项。
+func TestBackfillLegacyFollowsOnceRunsOnlyOnce(t *testing.T) {
+	s, alice, _ := requireIsolatedSchemaDB(t)
+	ctx := context.Background()
+
+	carol := seedUser(t, s, "fol-carol")
+	if _, err := s.CreateFriendshipRequest(ctx, carol.ID, alice.ID); err != nil {
+		t.Fatalf("造 pending 请求失败：%v", err)
+	}
+
+	first, ran, err := s.BackfillLegacyFollowsOnce(ctx)
+	if err != nil {
+		t.Fatalf("第一次一次性回填失败：%v", err)
+	}
+	if !ran {
+		t.Fatalf("第一次应当真的执行了回填")
+	}
+	if first.FollowsCreated != 1 || first.RequestsRetired != 1 {
+		t.Fatalf("回填结果不对：%+v", first)
+	}
+
+	// 第二次：不再执行（版本键已落），返回 ran=false。
+	second, ran2, err := s.BackfillLegacyFollowsOnce(ctx)
+	if err != nil {
+		t.Fatalf("第二次调用应当优雅跳过：%v", err)
+	}
+	if ran2 {
+		t.Fatalf("第二次不该再执行回填")
+	}
+	if second != (LegacyFollowBackfill{}) {
+		t.Fatalf("跳过的调用不该报告任何回填动作：%+v", second)
+	}
+
+	// 版本键在库里。
+	var n int64
+	if err := s.DB().WithContext(ctx).Table("schema_migrations").
+		Where("version = ?", legacyFollowsDataVersion).Count(&n).Error; err != nil {
+		t.Fatalf("查询版本键失败：%v", err)
+	}
+	if n != 1 {
+		t.Fatalf("版本键应当只落一行，实际 %d 行", n)
+	}
+
+	// 再手动跑一遍裸回填确认幂等（即使版本键被谁删了也不会双写边）。
+	if out, err := s.BackfillLegacyFollows(ctx); err != nil || out.FollowsCreated != 0 {
+		t.Fatalf("裸回填应当幂等：out=%+v err=%v", out, err)
+	}
+}
+
+// TestCanDMOverridesLegacyAcceptedFriendship 覆盖迁移的**语义**那一半：
+// 存量 accepted 好友被回填成互关之后，私聊门闩才认他们 ——
+// 而在此之前，单凭 friendships 里的 accepted 行已经发不出消息了。
+//
+// 这条用例是"换门闩"的回归锚：如果有人把 SendDM 改回 areFriends(accepted)，
+// 第一段断言会失败（旧行还在，却发得出去）。
+func TestCanDMOverridesLegacyAcceptedFriendship(t *testing.T) {
+	s, alice, bob := followEnv(t)
+	ctx := context.Background()
+
+	// 造一段**旧**好友关系（accepted），但不补关注边。
+	req, err := s.CreateFriendshipRequest(ctx, alice.ID, bob.ID)
+	if err != nil {
+		t.Fatalf("造旧好友请求失败：%v", err)
+	}
+	if _, err := s.AcceptFriendshipRequest(ctx, req.ID, bob.ID); err != nil {
+		t.Fatalf("接受旧好友请求失败：%v", err)
+	}
+
+	// 门闩已经是 can_dm：旧 accepted 行不再构成发消息资格。
+	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "旧好友时代"); !errors.Is(err, ErrMessageNotFriends) {
+		t.Fatalf("仅凭旧 accepted 行不该能发私聊，实际 %v", err)
+	}
+
+	// 回填之后才互关。
+	if _, err := s.BackfillLegacyFollows(ctx); err != nil {
+		t.Fatalf("回填失败：%v", err)
+	}
+	if _, err := s.SendDM(ctx, alice.ID, bob.ID, "迁移之后"); err != nil {
+		t.Fatalf("回填成互关后应当可以发：%v", err)
+	}
+}

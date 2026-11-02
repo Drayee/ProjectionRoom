@@ -458,3 +458,92 @@ func (s *Store) ListFollowers(ctx context.Context, userID int64) ([]int64, error
 	}
 	return ids, nil
 }
+
+// —— can_dm 的语句级实现与一次性回填编排（票 #57）——
+
+// mutualFollowIn 判断 a 与 b 是否**互关**（两条边同时在），跑在调用方给的
+// *gorm.DB 上 —— 这样私聊发送路径（SendDM 的事务）能用同一个事务句柄判定，
+// 不留"先查后写"之间的窗口（与 blockStatusBetweenIn 同一条纪律）。
+//
+// 为什么单独抽出这一小段：store.CanDM 是连接池版（给读路径与档案页用），
+// 而 SendDM 必须在事务里判。两个版本共用**同一个判定语句的形状**，
+// 只是句柄不同 —— 谓词本身仍然只有一处定义（写在这里，CanDM 用同样的 SQL）。
+func mutualFollowIn(ctx context.Context, db *gorm.DB, a, b int64) (bool, error) {
+	var ok bool
+	err := db.WithContext(ctx).Raw(
+		`SELECT (EXISTS (SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?)
+             AND EXISTS (SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?))`,
+		a, b, b, a).Scan(&ok).Error
+	if err != nil {
+		return false, fmt.Errorf("store: 校验互关失败: %w", err)
+	}
+	return ok, nil
+}
+
+// hasBlockBetweenIn 判断 a 与 b 之间是否存在拉黑（任一方向），跑在调用方给的 *gorm.DB 上。
+//
+// 它是 blockStatusBetweenIn 的"只要布尔"版本：SendDM 只需要知道"有没有墙"，
+// 不需要知道是谁拉的 —— 而多返回一个 id 会让调用侧误以为方向有意义。
+func hasBlockBetweenIn(ctx context.Context, db *gorm.DB, a, b int64) (bool, error) {
+	blocked, _, err := blockStatusBetweenIn(ctx, db, a, b)
+	return blocked, err
+}
+
+// legacyFollowsDataVersion 是"存量好友回填关注边"这枚**数据版本键**。
+//
+// 为什么放在 schema_migrations 而不是另开一张表：那里的语义就是
+// "这个库已经走到这一步了"，而一次性数据动作与 DDL 在这个意义上同形
+// （都是"每个库、每个方向、只发生一次"）。复用那张表让启动期
+// schema 校验与"回填做过没有"共享同一个可观测点。
+//
+// 前缀 data/ 把它和 DDL 版本（纯数字序号）区分开：它不是一条 DDL，
+// 不会被 migrate 的"缺哪些版本"逻辑当成待执行的迁移。
+const legacyFollowsDataVersion = "data/legacy-follows-backfill"
+
+// BackfillLegacyFollowsOnce 是一次性回填的**编排**（票 #57）：跑一次、落版本键、以后跳过。
+//
+// 返回 (结果, 是否真的执行了, error)。ran=false 表示"这个库已经做过了"。
+//
+// # 为什么需要这层编排
+//
+// ADR 0001 要求 accepted → 双向 follow、pending → 单向 follow 并终结请求行。
+// 这一步要**删行**，而迁移规约「只做加法」不允许 DDL 里出现 DELETE ——
+// 所以它是一次应用层的数据动作（见 BackfillLegacyFollows 的说明）。
+// 数据动作必须**显式触发一次**、而不是夹在每次启动或每次登录里反复跑：
+// pending 行被删之后回填固然幂等，但每次都去扫一遍 friendships 表是白费，
+// 而且一旦有人在回填后重新造出 pending 行（旧版本后端还在跑），
+// 那行会被悄悄终结 —— 那不是一个"幂等"能解释的行为。
+//
+// # 触发时机
+//
+// 记在自己的**数据版本键**上，与 DDL 迁移同一条思路。启动期由 bootstrap 的
+// bootstrapSchema 调用；对已迁移过的库是一次纯读（一个 SELECT 版本键）。
+//
+// # 为什么不用事务包住整个回填
+//
+// 回填是"逐行 Create + Delete"，本身已经幂等；而把它塞进一个大事务会让
+// 长事务持锁（一个实例刚上线、存量行很多时），且它跨了两张表。
+// 版本键**在回填成功之后**才落 —— 中途失败则下次启动重跑（幂等保证不出双份）。
+func (s *Store) BackfillLegacyFollowsOnce(ctx context.Context) (LegacyFollowBackfill, bool, error) {
+	var n int64
+	if err := s.db.WithContext(ctx).Table(tableSchemaMigrations).
+		Where("version = ?", legacyFollowsDataVersion).Count(&n).Error; err != nil {
+		return LegacyFollowBackfill{}, false, fmt.Errorf("store: 查询回填版本键失败: %w", err)
+	}
+	if n > 0 {
+		return LegacyFollowBackfill{}, false, nil
+	}
+
+	out, err := s.BackfillLegacyFollows(ctx)
+	if err != nil {
+		return out, true, err
+	}
+	// applied_at 有 DEFAULT now()，这里不显式写它：列语义由表决定，
+	// 应用层再写一遍就是第二个 owner（将来改默认值时有两条真源）。
+	if err := s.db.WithContext(ctx).Exec(
+		"INSERT INTO "+tableSchemaMigrations+" (version) VALUES (?) ON CONFLICT DO NOTHING",
+		legacyFollowsDataVersion).Error; err != nil {
+		return out, true, fmt.Errorf("store: 记录回填版本键失败: %w", err)
+	}
+	return out, true, nil
+}
