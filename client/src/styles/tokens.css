@@ -57,6 +57,25 @@
   --gap: 20px;
   --gap-sm: 12px;
 
+  /* ---------- 状态层（票 #43 §3：唯一状态色出口） ----------
+     --surface 是 #150e22。两档提亮按「叠加固定比例白」算，**写入为绝对值**
+     （不用 color-mix：那会让对比度随主题漂移）。组件里不许再手写
+     rgba(180,108,255,.08) 这类 hover 底。 */
+  --state-hover: #20192c; /* surface + 4.5% white */
+  --state-active: #272033; /* surface + 7.5% white */
+  /* 无 surface 底（--bg 之上）的裸链接、裸图标用面纱，避免再发明第三种底色 */
+  --state-veil: rgba(255, 255, 255, 0.06);
+  /* 阴影：只有两级，不许页面自己写 */
+  --elev-1: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --elev-2: 0 10px 28px rgba(0, 0, 0, 0.45);
+  /* 焦点环（把 base.css 里 :focus-visible 的两行字变成 token，全站统一） */
+  --ring: 2px solid var(--accent);
+  --ring-offset: 2px;
+  /* 位移与按压：按尺寸分级（票 #43 §4） */
+  --shift-card: -2px;
+  --press-btn: 0.98;
+  --press-icon: 0.94;
+
   /* ---------- 动效：三档时长 + 统一缓动 ---------- */
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   --dur-micro: 160ms;

@@ -71,7 +71,7 @@ label {
   color: var(--dim);
 }
 
-/* 焦点环：全站统一，键盘可达性的基础。
+/* 焦点环：全站统一，键盘可达性的基础（票 #43 §6：走 --ring 令牌，组件不许自造）。
    值来自 token（票 #62）：组件不许自造焦点环。 */
 :focus-visible {
   outline: var(--ring);
