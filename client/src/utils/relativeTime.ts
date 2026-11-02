@@ -1,106 +1,131 @@
 /**
- * 相对时间六档格式化（**全站唯一源，禁止复制**）。
+ * 相对时间的**唯一真源**（票 #60；词表 "Shared object components" 一节）。
  *
- * 为什么必须是唯一源：站内的"时间"文案本来是散在各页面手写的 —— `MessagesPage.vue` 一份
- * `shortTime`（今天 `HH:mm`，否则 `M/D HH:mm`），admin 三页各一份 `shortTime`，
- * `UserPage` 一份 `raw.slice(0, 10)`，帖子详情直接把 RFC 串原样打出来。四五份实现给出
- * 四五种口径：同一条消息在会话列表里显示"10/29 21:04"，在消息正文里显示
- * "2026-10-29T13:04:00Z"，用户只会以为系统算错了时间。
- * 把口径收进这一份**纯函数**（不 import Vue、不碰 DOM、只吃参数）之后，任何页面要相对时间
- * 都从这里取，谁也不再自己拼。
+ * 六档（词表原文）：刚刚 / N 分钟前 / N 小时前 / N 天前 / 同年 M月D日 / 跨年 YYYY年M月D日。
+ * **超 7 天回绝对日期** —— 那一档不再是相对说法，而是"哪天"。
  *
- * 复制它会造成什么回归（这就是"禁止复制"要防的事）：拷贝一份很容易，但两份代码从此各自演化 ——
- * 有人给副本加了"超过 1 小时显示到秒"，有人给原件加了"未来时间原样透出"，于是同一屏上出现
- * 两种相对时间口径，而且**没有编译期提示能发现这种漂移**：两份都是类型正确的 TS，测试也各测各的。
- * 要改口径就改这里（全站一起变），不要在别处再写一份。
+ * 纪律（与 `utils/avatar.ts` 同族）：
+ *   - 页面里**不许**再写私有 `shortTime` / `timeAgo`。复制边界 = 复制 bug：
+ *     两份实现一旦漂移，同一时刻在帖子页与消息页会显示不同的说法。
+ *   - 本模块是**纯函数**：输入（原始串 + 基准时刻）→ 输出。时钟不归它管
+ *     （时钟归 `composables/useNowTick.ts`，全站单一刻度）。
  *
- * 六档判据（delta = now - 目标时刻，`now` 默认 `Date.now()`）：
- *   1. 非法时间或空串 → 原样透出输入字符串（不抛错、不编一个假时间占位）；
- *   2. delta < 0（未来时间）→ 原样透出输入字符串（服务端时钟可能领先，不做校正）；
- *   3. delta < 1 分钟 → 「刚刚」；
- *   4. delta < 1 小时 → 「N分钟前」；
- *   5. delta < 1 天 → 「N小时前」；
- *   6. delta < 7 天 → 「N天前」；
- *   7. delta ≥ 7 天 → 绝对日期（同一自然年「M月D日」，跨年「YYYY年M月D日」；月/日不补零）。
- *
- * **不做时钟偏差校正**：服务端时间与本地时钟的差不是错误，是事实（用户机器的时钟可能不准，
- * 服务端也可能领先）。加偏移补偿会在"用户改过系统时间"时把整屏时间挪歪 —— 那比显示差几秒更糟。
- * 这里一律以本地 `now` 为准，边界由 `test/script/verify-relativetime.mjs` 表驱动钉住。
+ * 非法时间**原样透出**：不编一个假时间，也不吞掉它。用户看到 "昨天" 就说明后端
+ * 给的就是 "昨天"，界面不该把它悄悄换成当前时间（那是在撒谎）。
  */
+
+/** 一分钟 / 一小时 / 一天的毫秒数。 */
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+/** 相对档的上限：超过 7 天就回绝对日期。 */
+const WEEK = 7 * DAY
+
+/** 相对时间的完整视图（组件与页面都只认这一个形状）。 */
+export interface TimeView {
+  /**
+   * 相对文案（六档）。
+   *
+   * 非法输入时是**原文**（原样透出）；空串也是空串（页面据此显示占位符）。
+   */
+  relative: string
+  /**
+   * 绝对日期：同年 `M月D日`、跨年 `YYYY年M月D日`。
+   *
+   * 相对档里它就是"那天是哪天"（给 title 之外的第二个信息位用）；
+   * 绝对档里它**等于** `relative`。
+   */
+  date: string
+  /** 精确绝对时间 `YYYY-MM-DD HH:mm`（本地时间）。给 title / aria-label。 */
+  full: string
+  /** `<time datetime>` 的值（ISO 8601）；非法时 `null`（此时不写该属性）。 */
+  machine: string | null
+  /** 原始串不是可解析的时间（页面据此决定要不要给 title / 绝对信息）。 */
+  invalid: boolean
+}
+
+const pad = (n: number): string => String(n).padStart(2, '0')
 
 /**
- * 相对时间的刷新节拍（30 秒）。
+ * 绝对日期标签：同年只给月日，跨年才带年份。
  *
- * 相对时间是**会过期**的：页面停在"3分钟前"不动就永远停在"3分钟前"。
- * 页面侧应当每隔这个节拍重算一次（配合 `formatRelativeTime(iso, now)` 的显式 `now` 参数），
- * 而不是各页面自己挑一个刷新间隔 —— 挑不同间隔会让同屏文案在"刚刚/1分钟前"之间来回跳。
+ * 判定看的是**该时刻自己的年份**与基准时刻年份是否相同 —— 不是"距今是否跨年"。
  */
-export const RELATIVE_TIME_TICK_MS = 30_000
-
-/** 一分钟（毫秒）。 */
-const MINUTE_MS = 60_000
-/** 一小时（毫秒）。 */
-const HOUR_MS = 3_600_000
-/** 一天（毫秒）。 */
-const DAY_MS = 86_400_000
-/** 相对档的天数上限：达到 7 天即走绝对日期档。 */
-const RELATIVE_DAYS_LIMIT = 7
-
-/**
- * 解析 ISO 时间串为毫秒时间戳；非法时间（含空串）返回 `null`。
- *
- * 返回 `null` 而不是 `NaN`：调用方要判断的是"这个时间能不能用"，`NaN` 会顺着算术
- * 悄悄流进比较运算里（`NaN < 60000` 恒为 false），把一个坏值变成"看起来有结果"的输出。
- */
-export function parseTimestamp(iso: string): number | null {
-  if (typeof iso !== 'string' || iso.trim() === '') return null
-  const ts = Date.parse(iso)
-  return Number.isFinite(ts) ? ts : null
+function dateLabel(d: Date, now: Date): string {
+  const month = d.getMonth() + 1
+  const day = d.getDate()
+  return d.getFullYear() === now.getFullYear()
+    ? `${month}月${day}日`
+    : `${d.getFullYear()}年${month}月${day}日`
 }
 
 /**
- * 相对时间文案（六档）。
+ * 精确绝对时间（本地时间分量，不做时区换算）。
  *
- * `now` 显式可传：这是**测试的抓手**，也让调用方能用自己的节拍时钟统一驱动；
- * 省略时用 `Date.now()`。
+ * 格式 `YYYY-MM-DD HH:mm`：**不带秒** —— 决策票 #44 原文给的就是这个形状
+ * （"title 与 aria-label 给本地时区的 YYYY-MM-DD HH:mm"）。带秒看着更"精确"，
+ * 但悬停提示是给人核对的，分钟粒度已经够用，而秒会让"绝对时间"看起来像日志。
  */
-export function formatRelativeTime(iso: string, now: number = Date.now()): string {
-  const ts = parseTimestamp(iso)
-  if (ts === null) return iso
+function fullLabel(d: Date): string {
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  )
+}
 
-  const delta = now - ts
-  // 未来时间原样透出：服务端时钟领先不是错误，纠正它会引入更坏的偏差。
-  if (delta < 0) return iso
-  if (delta < MINUTE_MS) return '刚刚'
-  if (delta < HOUR_MS) return `${Math.max(1, Math.floor(delta / MINUTE_MS))}分钟前`
-  if (delta < DAY_MS) return `${Math.max(1, Math.floor(delta / HOUR_MS))}小时前`
-  if (delta < RELATIVE_DAYS_LIMIT * DAY_MS) return `${Math.max(1, Math.floor(delta / DAY_MS))}天前`
+/**
+ * 把一个时间串解成相对时间的完整视图。
+ *
+ * @param raw   原始时间串（RFC3339 之类）。非法值原样透出。
+ * @param nowMs 基准时刻（毫秒）。调用方传"当前时刻"，测试传固定值。
+ *
+ * 档位边界（表驱动用例见 `client/test/relative-time.test.mjs`）：
+ *   - 差 < 60s          → 刚刚
+ *   - 差 < 60min        → N 分钟前
+ *   - 差 < 24h          → N 小时前
+ *   - 差 < 7 天         → N 天前
+ *   - 差 ≥ 7 天         → 绝对日期（同年 M月D日 / 跨年 YYYY年M月D日）
+ *
+ * ⚠ 7 天那一档的边界是 **< 7 天**（决策票 #44 的表原文）：恰好 7 天**已经**
+ * 落进绝对档，"超 7 天回绝对日期"是它的子集表述。用 `<= WEEK` 会让
+ * 恰好 7 天显示成「7 天前」—— 与表不符。
+ *
+ * 未来时刻按"刚刚"处理：客户端与服务端有时钟偏差，把未来显示成"−3 分钟前"是
+ * 没人看得懂的文案，而"刚刚"至少不会误导。
+ */
+export function timeView(raw: string, nowMs: number): TimeView {
+  const text = typeof raw === 'string' ? raw : String(raw ?? '')
+  const d = new Date(text)
+  const now = new Date(nowMs)
 
-  // 绝对日期档：自然年/自然日按**本地时区**判定（getFullYear 等）。
-  const target = new Date(ts)
-  const year = target.getFullYear()
-  const month = target.getMonth() + 1
-  const day = target.getDate()
-  if (year === new Date(now).getFullYear()) {
-    return `${month}月${day}日`
+  if (Number.isNaN(d.getTime())) {
+    // 非法时间原样透出：不给 datetime，也不编绝对时间。
+    return { relative: text, date: text, full: text, machine: null, invalid: true }
   }
-  return `${String(year).padStart(4, '0')}年${month}月${day}日`
-}
 
-/**
- * 绝对时间文案：本地时区的「YYYY-MM-DD HH:mm」（年 4 位、月/日/时/分补零）。
- *
- * 同时用于元素的 `title` 与 `aria-label`：相对文案（「3分钟前」）对屏幕阅读器不友好，
- * 绝对文案才是可朗读、可核对的时刻。非法时间返回空串（此时调用方应退回相对文案）。
- */
-export function formatAbsoluteTime(iso: string): string {
-  const ts = parseTimestamp(iso)
-  if (ts === null) return ''
-  const d = new Date(ts)
-  const y = String(d.getFullYear()).padStart(4, '0')
-  const mo = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  return `${y}-${mo}-${day} ${hh}:${mm}`
+  const elapsed = nowMs - d.getTime()
+  const abs = Math.abs(elapsed)
+
+  let relative: string
+  if (elapsed < 0) {
+    relative = '刚刚'
+  } else if (abs < MINUTE) {
+    relative = '刚刚'
+  } else if (abs < HOUR) {
+    relative = `${Math.floor(abs / MINUTE)} 分钟前`
+  } else if (abs < DAY) {
+    relative = `${Math.floor(abs / HOUR)} 小时前`
+  } else if (abs < WEEK) {
+    relative = `${Math.floor(abs / DAY)} 天前`
+  } else {
+    relative = dateLabel(d, now)
+  }
+
+  return {
+    relative,
+    date: dateLabel(d, now),
+    full: fullLabel(d),
+    machine: d.toISOString(),
+    invalid: false,
+  }
 }

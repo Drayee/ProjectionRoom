@@ -25,12 +25,17 @@
  *  5. **未读数只有一个写入点**（`stores/auth.ts` 的 `setUnread`）。顶栏徽标、会话徽标、
  *     "读完清零"读的是同一个数字；本页读完一屏后写它，并顺手把本地会话行的
  *     `unreadCount` 清零 —— 不等下一次整页加载，否则"读完了徽标还在"。
+ *  6. **时间显示走 `ui/RelativeTime.vue`**（票 #60）。本页原先有一份私有的
+ *     `shortTime()` 副本（今天给时分、更早给月日）—— 那是"复制边界"，
+ *     决策票 #44 明令禁止：相对时间全站只有一个源。现在会话行与气泡的时间
+ *     都是同一个组件，六档口径（刚刚/N 分钟前/…/超 7 天回绝对日期）自然一致。
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import Button from '../components/ui/Button.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
+import RelativeTime from '../components/ui/RelativeTime.vue'
 import UserAvatar from '../components/ui/UserAvatar.vue'
 import * as messagesApi from '../api/messages'
 import { MAX_MESSAGE_BODY } from '../api/messages'
@@ -104,19 +109,6 @@ const draftTooLong = computed(() => draftLength.value > MAX_MESSAGE_BODY)
 const canSend = computed(
   () => activePeer.value !== null && draftLength.value > 0 && !draftTooLong.value && !sending.value,
 )
-
-/** 时间显示：今天只给时分，更早给月日。非法时间原样透出（不编一个假时间）。 */
-function shortTime(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const now = new Date()
-  const sameDay =
-    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  if (sameDay) return `${hh}:${mm}`
-  return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`
-}
 
 /**
  * 把未读数写回两处：本页的会话行 + `stores/auth.ts`（顶栏徽标读它）。
@@ -383,7 +375,7 @@ watch(
                     <span class="conv-main">
                       <span class="conv-top">
                         <strong class="conv-name">{{ c.peer.displayName }}</strong>
-                        <span class="small dim">{{ shortTime(c.lastSentAt) }}</span>
+                        <RelativeTime class="small dim" :value="c.lastSentAt" />
                       </span>
                       <span class="conv-preview dim">{{ c.lastBody }}</span>
                     </span>
@@ -453,7 +445,7 @@ watch(
                       <div class="bubble-wrap">
                         <p class="bubble">{{ m.body }}</p>
                         <p class="small dim bubble-meta">
-                          {{ shortTime(m.createdAt) }}
+                          <RelativeTime :value="m.createdAt" />
                           <span v-if="m.mine">{{ m.readAt ? '· 已读' : '· 未读' }}</span>
                         </p>
                       </div>

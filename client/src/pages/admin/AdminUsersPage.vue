@@ -18,6 +18,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import BrandIcon from '../../components/ui/BrandIcon.vue'
+import RelativeTime from '../../components/ui/RelativeTime.vue'
 import { ADMIN_PAGE_SIZE, useAdminStore } from '../../stores/admin'
 import type { AdminUser } from '../../api/admin'
 
@@ -147,11 +148,10 @@ async function confirmUnbindEmail() {
   if (ok) pending.value = null
 }
 
-/** 时间显示：服务端给的是 RFC3339，这里只做"日期 + 时分"的截断，不重新解析时区。 */
-function shortTime(iso: string): string {
-  if (!iso) return '—'
-  return iso.replace('T', ' ').slice(0, 16)
-}
+/*
+ * 时间显示走 `ui/RelativeTime.vue`（票 #60）。原先的私有 `shortTime()` 直接裁
+ * RFC3339 串的日期与时分（不重解析时区，等于把 UTC 当本地），现在由唯一真源排版。
+ */
 
 function roleText(role: string): string {
   return role === 'admin' ? '管理员' : '普通用户'
@@ -306,7 +306,7 @@ function statusText(status: string): string {
                   <td>
                     <span class="badge" :class="{ banned: u.status === 'banned' }">{{ statusText(u.status) }}</span>
                   </td>
-                  <td class="mono dim">{{ shortTime(u.lastSeenAt) }}</td>
+                  <td class="mono dim"><RelativeTime :value="u.lastSeenAt" /></td>
                   <td class="acts">
                     <button type="button" :disabled="store.busyKey !== ''" @click="askRole(u)">
                       {{ u.role === 'admin' ? '降为普通' : '设为管理员' }}
@@ -339,7 +339,9 @@ function statusText(status: string): string {
                 <span v-else-if="u.emailVerified === false" class="badge">未验证</span>
                 <span v-else class="badge dim">状态未知</span>
               </p>
-              <p class="mono dim card-line">最近活跃 {{ shortTime(u.lastSeenAt) }}</p>
+              <p class="mono dim card-line">
+                最近活跃 <RelativeTime :value="u.lastSeenAt" />
+              </p>
               <div class="card-acts">
                 <button type="button" :disabled="store.busyKey !== ''" @click="askRole(u)">
                   {{ u.role === 'admin' ? '降为普通' : '设为管理员' }}

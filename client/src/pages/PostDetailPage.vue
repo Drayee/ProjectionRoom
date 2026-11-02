@@ -2,6 +2,9 @@
 /**
  * 帖子详情（/posts/:id）。#26 切真：写操作按 401/403/429 分诊，点赞做乐观更新 +
  * 失败回滚，评论可删（仅作者，服务端判）。
+ *
+ * 时间显示走 `ui/RelativeTime.vue`（票 #60）：本页原先是**裸打** `post.createdAt`
+ * （一整串 RFC3339），现在给六档相对时间，悬停有精确绝对时间。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -9,6 +12,7 @@ import BrandIcon from '../components/ui/BrandIcon.vue'
 import Button from '../components/ui/Button.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
+import RelativeTime from '../components/ui/RelativeTime.vue'
 import * as postsApi from '../api/posts'
 import { isCapabilityUnavailable } from '../api/mode'
 import { useApiFailure, ensureLoggedInForWrite } from '../components/features/common/useApiFailure'
@@ -122,7 +126,10 @@ onMounted(load)
       />
       <template v-else-if="post">
         <h1 class="title">{{ post.title }}</h1>
-        <p class="meta dim">{{ post.author.displayName }} · {{ post.createdAt }}</p>
+        <p class="meta dim">
+          {{ post.author.displayName }} ·
+          <RelativeTime :value="post.createdAt" />
+        </p>
         <MarkdownView class="content" :source="post.content" label="帖子正文" />
         <!-- 票 #62 首批替换：裸 button → ui/Button。
              点赞的"取消中"用组件的 loading（内联 spinner + 锁宽，且**不等于 disabled**：
@@ -142,7 +149,10 @@ onMounted(load)
         <section class="comments">
           <h2>评论（{{ comments.length }}）</h2>
           <div v-for="c in comments" :key="c.id" class="cmt">
-            <strong>{{ c.author.displayName }}</strong>
+            <p class="cmt-head">
+              <strong>{{ c.author.displayName }}</strong>
+              <RelativeTime class="dim" :value="c.createdAt" />
+            </p>
             <p>{{ c.content }}</p>
             <!-- 删除按钮只给自己的评论；但**真正能不能删由服务端判**（403），
                  这里的显隐只是少一次注定失败的往返。 -->
@@ -173,8 +183,10 @@ onMounted(load)
 .comments h2 { margin: 0 0 10px; font-size: 15px; }
 .cmt { padding: 8px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
 .cmt p { margin: 4px 0 0; white-space: pre-wrap; }
+.cmt-head { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 13px; }
 /* 删除自己的评论：低调但可点（红色 hover 才显形，避免一排红字抢焦点）。
-   用 xs 档：视觉小（11px 字），命中区仍是 32px 高（票 #43 §6）。 */
+   用 xs 档：视觉小（11px 字），命中区仍是 32px 高（票 #43 §6）。
+   外观（含 hover 变红）交给 ui/Button 的 danger 变体，页面只留间距。 */
 .cmt .del { margin-top: 4px; border-color: transparent; }
 .add { display: flex; gap: 8px; margin-top: 12px; }
 .add button { flex: none; }

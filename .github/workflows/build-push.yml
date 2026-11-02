@@ -7,7 +7,8 @@
 # ⚠ 三个必须做对的点（都踩过）：
 #  1. **Go 版本**必须与 go.mod 一致（1.26），否则 go mod download 直接失败；
 #  2. **前端产物必须先构建**：Dockerfile 的 `COPY client/dist` 在 dist 不存在时会失败，
-#     所以这里先跑 npm ci + npm run build；
+#     所以这里先跑 npm ci + npm run build；而在构建之前还有一道**前端单测**门槛
+#     （`npm --prefix client run test`，用 TEST_NODE_VERSION 那版 Node，见 env 区注释）；
 #  3. 推送镜像要带 sha 标签，部署时才能按提交号精确回滚。
 
 name: Build & Push Docker Image
@@ -33,6 +34,13 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   GO_VERSION: '1.26'
   NODE_VERSION: '20'
+  # 前端单测用的 Node —— **刻意与 NODE_VERSION 分开**。
+  #
+  # client/test/*.test.mjs 直接 import client/src/utils/*.ts，靠的是 Node 自带的
+  # TypeScript 类型剥离（22.6 才有，23.6 起默认开启）。用 20 跑只会得到
+  # "does not provide an export named ..."，与代码本身好坏无关。
+  # 而前端**构建产物**仍按 NODE_VERSION 出 —— "加一道单测门槛"不该顺手改运行时基线。
+  TEST_NODE_VERSION: '22'
 
 # 同一分支的多次 push 只保留最后一次构建。
 #
@@ -68,6 +76,34 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: client/package-lock.json
+
+      # 前端单测门槛（票 #60 接线）。
+      #
+      # 为什么是独立一步而不是塞进 `npm run build`：build 的语义是"产出 dist"，
+      # 把它变成"顺手连单测一起跑"，会让"我只是想打个包"变成跑整套测试 ——
+      # 而这里用的是另一版 Node（见 env.TEST_NODE_VERSION），语义上就是两件事。
+      #
+      # 为什么它必须**先于**构建：单测红的时候没必要再花时间构建、传 artifact、
+      # 推镜像；门槛失守应当在最早的地方红。
+      #
+      # 判据是 step 级红：node --test 有任何一条 fail 就以非 0 退出，
+      # 不需要额外解析输出（也不需要 --passWithNoTests 之类的放宽）。
+      #
+      # 版本由 setup 直接钉在 `TEST_NODE_VERSION`（不用 `with:` 覆盖）：
+      # setup-node 的缓存键是"node 版本 + lock 文件"，覆盖 version 只改前半截，
+      # 与上面的 Setup Node 各持一半缓存。直接 `setup-node@v5` 指向 22 +
+      # `cache: npm`，本步自己的缓存链是完整自洽的。
+      - name: Setup Node (frontend unit tests)
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.TEST_NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Test frontend (node --test, no extra deps)
+        run: |
+          node --version
+          npm --prefix client run test
 
       - name: Build frontend (required by Dockerfile COPY client/dist)
         # ------------------------------------------------------------------
