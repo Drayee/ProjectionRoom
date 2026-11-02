@@ -63,6 +63,8 @@ interface ServerPost {
   likeCount: number
   commentCount: number
   liked: boolean
+  /** 我是否收藏了它（票 #64）。匿名或未收藏时服务端回 false。 */
+  favorited?: boolean
   createdAt: string
   /** 主题串所属板块；普通帖子服务端 omitempty 掉这个键（wayfinder #38）。 */
   animeId?: number
@@ -94,6 +96,7 @@ export function toPost(raw: ServerPost): Post {
     likeCount: raw.likeCount,
     commentCount: raw.commentCount,
     liked: raw.liked ?? false,
+    favorited: raw.favorited ?? false,
     createdAt: raw.createdAt,
   }
   if (typeof raw.animeId === 'number') post.animeId = raw.animeId

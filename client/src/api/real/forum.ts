@@ -53,6 +53,7 @@ interface ServerThreadRow {
   likeCount: number
   commentCount: number
   liked: boolean
+  favorited?: boolean
   createdAt: string
   animeId?: number
   lastReplyAt?: string

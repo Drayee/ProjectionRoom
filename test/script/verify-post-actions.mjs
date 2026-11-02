@@ -28,7 +28,9 @@
  *   P2 乐观更新：点赞那一刻计数立刻变化，且连点只发一次请求（单条在途锁）。
  *   P3 失败回滚可见：把点赞请求打成失败后计数回到原值，并出现轻提示，不是静默。
  *   P4 成功后以服务端为准：返回的计数覆盖本地乐观值。
- *   P5 收藏按钮先占位：存在、带 aria-pressed 与可访问名。
+ *   P5 收藏按钮：存在、带 aria-pressed 与可访问名。
+ *      （票 #64 之前它只是占位；现在数据真接了，但**点击行为**由 verify-favorites.mjs
+ *       验 —— 那里需要两个账号才能判"私人书签"，本脚本只有一账号。）
  */
 import { createServer, request as httpRequest } from "node:http"
 import { existsSync, readFileSync, statSync } from "node:fs"
@@ -251,7 +253,7 @@ async function main() {
     record("P3a 失败后计数回到原值（回滚可见）", afterFail === beforeFail, beforeFail + " -> " + afterFail)
     record("P3b 失败后出现轻提示（不是静默）", toast.length > 0, toast)
 
-    // ---------- P5 收藏按钮先占位 ----------
+    // ---------- P5 收藏按钮（存在性与可访问名；点击行为见 verify-favorites.mjs） ----------
     const fav = await cdp.evaluate(
       "(() => { const b = document.querySelector('.post-card [data-testid=action-bar] [data-action=favorite]'); " +
         "if (!b) return null; return { pressed: b.getAttribute('aria-pressed'), label: b.getAttribute('aria-label') || '', " +
@@ -259,7 +261,7 @@ async function main() {
     )
     evidence.favorite = fav
     record(
-      "P5 收藏按钮存在、带 aria-pressed 与可访问名（占位）",
+      "P5 收藏按钮存在、带 aria-pressed 与可访问名",
       Boolean(fav && fav.pressed !== null && (fav.label.length > 0 || fav.text.length > 0)),
       JSON.stringify(fav),
     )

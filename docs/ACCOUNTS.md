@@ -108,6 +108,15 @@ messages
   read_at      timestamptz NULL
   INDEX (kind, room_id, id DESC) / (kind, recipient_id, read_at)
 
+favorites                                 -- 多态私人书签（wayfinder #48 / 票 #64）
+  user_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE
+  target_type varchar(8) NOT NULL                 -- post | room | anime（带 CHECK）
+  target_id   varchar(16) NOT NULL                -- 文本：放映室主键是房间码
+  created_at  timestamptz NOT NULL DEFAULT now()
+  PRIMARY KEY (user_id, target_type, target_id)   -- 三元组即幂等键
+  INDEX (user_id, target_type, created_at DESC)   -- 列表按收藏时间倒序
+  -- 刻意没有指向 posts / anime / rooms_meta 的外键：对象失效时条目要保留
+
 rooms_meta                                -- 房间元数据；实时状态不入此表
   room_id        varchar(12) PK
   owner_user_id  bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE
@@ -238,6 +247,40 @@ can_dm(A,B) := mutual_follow(A,B) ∧ NOT blocked_either(A,B) —— 唯一的�
 ### 7.4 房间内聊天落库
 `kind=room` 消息随房间信令广播，同时入库；进房时拉最近 50 条；保留 30 天（可配），后台清理协程负责。
 
+### 7.5 私人收藏（wayfinder #48 / 票 #64）
+收藏是**私人书签**，不是公开表态 —— 这是它与点赞的分界线：点赞计入 `posts.like_count`（人人可见），
+收藏**不计任何公开数**，也**没有**公开收藏列表；他人档案里**不渲染**收藏块。
+
+存储是**多态单表** `favorites(user_id, target_type, target_id, created_at)`：
+
+- 主键是**三元组** `(user_id, target_type, target_id)`，于是 `PUT` 天然幂等（双击、重试、网络重放都不漂）；
+- `target_type` 有 `CHECK IN ('post','room','anime')`；
+- `target_id` 是 `varchar(16)` 而**不是** bigint —— 放映室的主键是房间码（`rooms_meta.room_id varchar(12)`），
+  一个多态列装不下"数字 id 或房间码"两种形态；
+- **没有任何外键**指向被收藏对象。这是故意的：对象失效时条目要**保留**并显示失效态，
+  外键的 `ON DELETE` 会替用户把书签删掉 —— 规格明确禁止静默删除。
+  跨表完整性因此由服务层校验：收藏一个不存在的对象返回 404，**不写孤儿行**。
+
+粒度：番剧收藏的是**目录项本身**（＝追番）；番剧板块里的主题串就是帖子，由帖子收藏覆盖，不另计。
+
+失效语义：放映室关闭/未公开、番剧下架、帖子被删 → 条目保留、列表给 `valid:false`（灰显 +「已失效」+ 不可点），
+由用户自行移除。
+
+端点（全部需登录）：
+
+```
+PUT    /api/posts/:id/favorite        DELETE /api/posts/:id/favorite
+PUT    /api/animes/:id/favorite       DELETE /api/animes/:id/favorite
+PUT    /api/rooms/:id/favorite        DELETE /api/rooms/:id/favorite
+GET    /api/favorites?type=post|room|anime&before=&limit=
+```
+
+写端点回 `{targetId, targetType, favorited, created|removed}`（幂等：重复 PUT 时 `created:false`）；
+`GET` 按收藏时间倒序，`before` 传上一页最后一行的 `cursor`（`<unixMicro>:<targetId>`，行值比较分页）。
+
+列表与详情**与 liked 同一批查询**回填 `favorited`（`store.favoritedPostIDs` 是唯一口径，禁 N+1）；
+`Post.Favorited` 是只读列（`gorm:"->"`），**没有** `favorite_count` 字段 —— 想加它之前先想清楚"收藏是私人的"。
+
 ---
 
 ## 8. 管理端
@@ -279,6 +322,11 @@ can_dm(A,B) := mutual_follow(A,B) ∧ NOT blocked_either(A,B) —— 唯一的�
   DELETE /api/blocks/:userId                GET    /api/users/search?q=
   （已退役：GET /api/friends、GET|POST /api/friends/requests、
     POST /api/friends/requests/:id/accept|reject、DELETE /api/friends/:id → 一律 404）
+收藏（票 #64；全部需登录，均为私人数据）
+  PUT    /api/posts/:id/favorite             DELETE /api/posts/:id/favorite
+  PUT    /api/animes/:id/favorite            DELETE /api/animes/:id/favorite
+  PUT    /api/rooms/:id/favorite             DELETE /api/rooms/:id/favorite
+  GET    /api/favorites?type=post|room|anime&before=&limit=
 消息
   GET    /api/messages?peer&before           POST /api/messages/read
 公开房间

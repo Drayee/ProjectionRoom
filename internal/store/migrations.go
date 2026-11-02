@@ -701,4 +701,48 @@ CHECK (follower_id <> followee_id)
 		`CREATE INDEX IF NOT EXISTS follows_follower_idx ON follows (follower_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS follows_followee_idx ON follows (followee_id, created_at DESC)`,
 	}},
+
+	// 0016：多态收藏（favorites）。wayfinder #48 / 票 #64。
+	//
+	// # 为什么是一张多态表
+	//
+	// 收藏在三种对象（帖 / 放映室 / 番剧）上是**同一个**动作语义：私人书签、
+	// 仅自己可见、不计任何公开数。三张表会让「列出我的全部收藏」变成 UNION，
+	// 而那是 /me 收藏区块（票 #65）的主路径。
+	//
+	// # target_id 是 text 而不是 bigint
+	//
+	// 帖子与番剧的主键是 bigint，但**放映室的主键是房间码**（varchar(12)）。
+	// 三种类型共用一个列，只能取装得下房间码的那一种。把房间折成数字做不到 ——
+	// 房间码是用户可见的业务主键，不是自增 id。
+	//
+	// # 没有外键，这是**故意的**
+	//
+	// 决议 #48 §5：对象失效（房间关闭/未公开、番剧下架、帖子被删）时条目
+	// **保留**，列表显示「已失效」，不静默删除。外键（尤其 ON DELETE CASCADE）
+	// 会让这条收藏悄悄消失 —— 而收藏莫名变少比看到已失效更让人困惑。
+	// 代价是跨表完整性由应用层保证：对象不存在就不落行（见 store/favorites.go
+	// 的 AddFavorite）。
+	//
+	// # 没有计数列
+	//
+	// 收藏不计任何公开数（决议 #48 §3）。表上因此没有反范式计数，
+	// 也就没有计数与行数漂移这一类问题。
+	//
+	// # 索引
+	//
+	// favorites_user_type_idx = (user_id, target_type, created_at DESC)
+	// 正好是「我的某类收藏，按收藏时间倒序分页」的查询形态，一次范围扫描。
+	// 主键 (user_id, target_type, target_id) 是幂等的唯一 owner。
+	{version: "0016_favorites", statements: []string{
+		`CREATE TABLE IF NOT EXISTS favorites (
+user_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+target_type varchar(8) NOT NULL,
+target_id   varchar(16) NOT NULL,
+created_at  timestamptz NOT NULL DEFAULT now(),
+PRIMARY KEY (user_id, target_type, target_id),
+CHECK (target_type IN ('post', 'room', 'anime'))
+)`,
+		`CREATE INDEX IF NOT EXISTS favorites_user_type_idx ON favorites (user_id, target_type, created_at DESC)`,
+	}},
 }

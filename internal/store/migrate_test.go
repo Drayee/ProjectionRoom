@@ -78,10 +78,14 @@ func TestMigrateFirstRunAppliesAllThenSecondRunIsNoop(t *testing.T) {
 // 与 30 天清理协程仍属 Not yet specified —— 表在、写入路径不在，这正是
 // 那条注释想表达的边界。`room_snapshots` 与它无关（那是 §9 的快照类表），
 // 继续留在负向名单里。
+//
+// #56 补 `follows`（0015）、#64 补 `favorites`（0016）：两张表都是"关系/书签"类，
+// 没有反范式计数列，也没有外键指向被收藏对象（多态列装不下三个方向的外键）——
+// 结构简单，但**漏掉它们不会让任何用例变红**，这正是这里要显式列出来的理由。
 func TestMigrateCreatesPhaseOneTablesOnly(t *testing.T) {
 	s := requireTestDB(t)
 
-	for _, name := range []string{"schema_migrations", "users", "sessions", "rooms_meta", "admin_audit", "password_resets", "posts", "anime", "friendships", "messages"} {
+	for _, name := range []string{"schema_migrations", "users", "sessions", "rooms_meta", "admin_audit", "password_resets", "posts", "anime", "friendships", "messages", "follows", "favorites"} {
 		if !tableExists(t, s, name) {
 			t.Fatalf("表 %s 应该存在（它已由相应票落地）", name)
 		}

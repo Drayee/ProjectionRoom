@@ -17,6 +17,15 @@ export interface Post {
   likeCount: number
   commentCount: number
   liked: boolean
+  /**
+   * 我是否收藏了它（决议 #48 / 票 #64）。
+   *
+   * **注意这里没有 `favoriteCount`**：收藏是私人书签，不产生任何公开计数 ——
+   * 那是点赞的分工。多一个公开计数会让"私人"立刻变成可被围观的社交信号。
+   *
+   * 字段与 `liked` 同批回填（服务端一次请求带回来，禁 N+1）；匿名视角恒 false。
+   */
+  favorited: boolean
   createdAt: string
   /**
    * 所属板块（wayfinder #38 / #36）：有值 = 这是一条**主题串**，普通帖子没有这个键。

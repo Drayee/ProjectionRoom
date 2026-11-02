@@ -142,6 +142,20 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			"followee_id": {"bigint", 0, false},
 			"created_at":  {"timestamp with time zone", 0, false},
 		},
+		// 0016 新增：多态收藏（wayfinder #48 / 票 #64）。两处刻意"看起来不对"的地方：
+		//   · `target_id` 是 varchar(16) 而不是 bigint —— 放映室的主键是房间码
+		//     （`rooms_meta.room_id varchar(12)`），一个多态列装不下"数字 id 或房间码"
+		//     两种形态，只能统一成文本；
+		//   · 没有任何外键指向 posts / anime / rooms_meta —— 收藏的对象失效
+		//     （帖子被删、番剧下架、放映室关闭）时条目要**保留**并显示失效态，
+		//     外键的 ON DELETE 会替用户把书签删掉，那正是规格明确禁止的行为。
+		// 真正的主键是三元组 `(user_id, target_type, target_id)`，它让 PUT 天然幂等。
+		"favorites": {
+			"user_id":     {"bigint", 0, false},
+			"target_type": {"character varying", 8, false},
+			"target_id":   {"character varying", 16, false},
+			"created_at":  {"timestamp with time zone", 0, false},
+		},
 	}
 
 	for table, want := range expected {

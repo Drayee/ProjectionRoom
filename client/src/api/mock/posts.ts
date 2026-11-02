@@ -8,6 +8,7 @@
 import { HttpError } from '../http'
 import type { Comment, ListPostsInput, ListPostsResult, Post } from '../../types/posts'
 import { MOCK_ANIME_THREADS } from './animeSeed'
+import { isFavorited } from './favoriteStore'
 
 // ---------- Mock 数据 ----------
 
@@ -30,6 +31,7 @@ const MOCK_POSTS: Post[] = [
     likeCount: 23,
     commentCount: 7,
     liked: false,
+    favorited: false,
     createdAt: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
   },
   {
@@ -42,6 +44,7 @@ const MOCK_POSTS: Post[] = [
     likeCount: 41,
     commentCount: 12,
     liked: false,
+    favorited: false,
     createdAt: new Date(Date.now() - 18 * 60 * 1000).toISOString(),
   },
   {
@@ -54,6 +57,7 @@ const MOCK_POSTS: Post[] = [
     likeCount: 9,
     commentCount: 3,
     liked: false,
+    favorited: false,
     createdAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
   },
   {
@@ -66,6 +70,7 @@ const MOCK_POSTS: Post[] = [
     likeCount: 57,
     commentCount: 15,
     liked: false,
+    favorited: false,
     createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
   },
   {
@@ -78,6 +83,7 @@ const MOCK_POSTS: Post[] = [
     likeCount: 18,
     commentCount: 5,
     liked: false,
+    favorited: false,
     createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
   },
   {
@@ -90,6 +96,7 @@ const MOCK_POSTS: Post[] = [
     likeCount: 15,
     commentCount: 8,
     liked: false,
+    favorited: false,
     createdAt: new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString(),
   },
   {
@@ -102,6 +109,7 @@ const MOCK_POSTS: Post[] = [
     likeCount: 32,
     commentCount: 11,
     liked: false,
+    favorited: false,
     createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
   },
 ]
@@ -141,6 +149,7 @@ for (const thread of MOCK_ANIME_THREADS) {
     likeCount: thread.likeCount,
     commentCount: thread.commentCount,
     liked: false,
+    favorited: false,
     createdAt: thread.createdAt,
     animeId: thread.animeId,
     lastReplyAt: thread.lastReplyAt,
@@ -179,8 +188,20 @@ export async function listPosts(input: ListPostsInput = {}): Promise<ListPostsRe
   const { sort = 'latest', page = 1 } = input
   const sorted = sortPosts(allPosts, sort)
   const start = (page - 1) * PAGE_SIZE
-  const items = sorted.slice(start, start + PAGE_SIZE)
+  // 收藏态是**跨对象**的真源（`favoriteStore`），不在 Post 行上存 ——
+  // 与真实现同构：服务端每次列表都现查一次，前端这里也一样现问一次。
+  const items = sorted.slice(start, start + PAGE_SIZE).map(withFavorite)
   return { items, hasMore: start + PAGE_SIZE < sorted.length }
+}
+
+/**
+ * 给一行帖子补上 `favorited`（mock 态的"批量回填"）。
+ *
+ * 真实现里这个字段由服务端在同一个响应里回填（决议 #48：禁 N+1）；
+ * mock 这里等价 —— 一次内存查表，没有额外请求。
+ */
+function withFavorite(post: Post): Post {
+  return { ...post, favorited: isFavorited('post', String(post.id)) }
 }
 
 /** 单篇帖子（主题串也是帖子）。 */
@@ -192,7 +213,7 @@ export async function getPost(id: number): Promise<Post> {
     // 「无法连接服务器」—— 一个会让人去查网络的假象（wayfinder #36 发现）。
     throw new HttpError({ status: 404, code: 'NOT_FOUND', message: '内容不存在' })
   }
-  return { ...post }
+  return withFavorite(post)
 }
 
 /** 创建帖子（标题 + 纯文本正文 + 可选图片数组）。 */
@@ -208,6 +229,7 @@ export async function createPost(input: { title: string; content: string; images
     likeCount: 0,
     commentCount: 0,
     liked: false,
+    favorited: false,
     createdAt: new Date().toISOString(),
   }
   allPosts.unshift(post)
@@ -263,4 +285,14 @@ export async function deleteComment(id: number): Promise<void> {
     }
   }
   throw new Error('评论不存在')
+}
+
+/**
+ * mock 态的标题查表（收藏列表要用它给每一行配标题）。
+ *
+ * 找不到返回 `null` 而不是空串：收藏列表必须能区分"对象没了"（→ 失效态）
+ * 与"对象还在但没标题"（→ 显示占位文案），空串会把两者糊成一样。
+ */
+export function mockPostTitle(id: number): string | null {
+  return allPosts.find((p) => p.id === id)?.title ?? null
 }

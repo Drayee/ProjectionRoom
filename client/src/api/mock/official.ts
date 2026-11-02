@@ -74,3 +74,16 @@ export async function listOfficialRooms(
     official: true,
   }
 }
+
+/**
+ * mock 态的放映室标题查表（收藏列表要用它给每一行配标题）。
+ *
+ * 找不到返回 `null`（→ 失效态）：与帖子那边同一口径。
+ * 注意 mock 的官方房**没有关闭/未公开的概念**，所以这里只能表达"存在/不存在"；
+ * 真实的"房间关了但条目还在"由服务端 `rooms_meta` 的 closed_at 判（见 store/favorites.go）。
+ */
+export function mockRoomTitle(roomId: string): string | null {
+  const room = OFFICIAL_ROOMS.find((r) => r.roomId === roomId)
+  if (!room) return null
+  return room.title === '' ? '未命名房间' : room.title
+}

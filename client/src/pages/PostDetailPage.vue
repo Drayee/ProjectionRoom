@@ -23,6 +23,7 @@ import Button from '../components/ui/Button.vue'
 import MarkdownView from '../components/ui/MarkdownView.vue'
 import * as postsApi from '../api/posts'
 import { useApiFailure, ensureLoggedInForWrite } from '../components/features/common/useApiFailure'
+import { useFavorite } from '../components/features/common/useFavorite'
 import { usePostLike } from '../components/features/common/usePostLike'
 import { useAuthStore } from '../stores/auth'
 import type { Comment, Post } from '../types/posts'
@@ -32,7 +33,11 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const { failure, run } = useApiFailure(() => route.fullPath)
-const { toggle, isBusy, toast, say } = usePostLike()
+const { toggle, isBusy, toast } = usePostLike()
+const { setFavorite, isBusy: isFavBusy, toast: favToast } = useFavorite()
+
+/** 轻提示合成（与列表页同一理由：两个 hook 各有一条，界面上只该有一句）。 */
+const notice = computed(() => toast.value || favToast.value)
 
 const post = ref<Post | null>(null)
 const comments = ref<Comment[]>([])
@@ -79,13 +84,13 @@ async function toggleLike() {
   await toggle(post.value)
 }
 
-/**
- * 收藏：票 #63 只做占位（数据接线在票 #64）。
- *
- * 与列表页同一句提示 —— 两处文案不同会让人以为是两个不同的缺陷。
- */
+/** 收藏（票 #64）：与列表页共用 `useFavorite`，这里只做空值守卫。 */
 function onFavorite() {
-  say('收藏功能还在接（票 #64）')
+  if (!post.value) return
+  const target = post.value
+  void setFavorite('post', String(target.id), !target.favorited, (value) => {
+    target.favorited = value
+  })
 }
 
 async function addComment() {
@@ -149,8 +154,10 @@ onMounted(load)
           <ActionBar
             :liked="post.liked"
             :like-count="post.likeCount"
+            :favorited="post.favorited"
             :comment-count="post.commentCount"
             :like-busy="isBusy(post.id)"
+            :favorite-busy="isFavBusy('post', String(post.id))"
             :show-comment="false"
             @like="toggleLike"
             @favorite="onFavorite"
@@ -184,7 +191,7 @@ onMounted(load)
     </main>
 
     <!-- 轻提示（点赞失败 / 收藏占位）：写操作失败不把整页换成错误态。 -->
-    <p v-if="toast" class="toast" role="status" data-testid="action-toast">{{ toast }}</p>
+    <p v-if="notice" class="toast" role="status" data-testid="action-toast">{{ notice }}</p>
   </div>
 </template>
 

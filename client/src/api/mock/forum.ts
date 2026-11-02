@@ -14,6 +14,7 @@
  */
 import { HttpError } from '../http'
 import { MOCK_ANIMES, MOCK_ANIME_THREADS, type MockAnimeThread } from './animeSeed'
+import { isFavorited } from './favoriteStore'
 import type { Anime, AnimePage } from '../../types/forum'
 import type { ListPostsResult, Post } from '../../types/posts'
 
@@ -35,6 +36,9 @@ function toThreadPost(thread: MockAnimeThread): Post {
     likeCount: thread.likeCount,
     commentCount: thread.commentCount,
     liked: false,
+    // 主题串也是帖子，所以收藏真源同样按 `post` 查（番剧的"追番"是另一回事：
+    // 收藏的是**目录项**，不是某条主题串 —— 决议 #48 §1）。
+    favorited: isFavorited('post', String(thread.id)),
     createdAt: thread.createdAt,
     animeId: thread.animeId,
     lastReplyAt: thread.lastReplyAt,

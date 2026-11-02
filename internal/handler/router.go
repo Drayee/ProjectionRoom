@@ -288,6 +288,11 @@ func NewRouter(
 	// 但关注是**独立**的路由前缀（/api/follows），不与 /api/friends 混用。
 	registerFollowRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
 
+	// 收藏（wayfinder #48 / 票 #64）：多态私人书签，全部需登录。
+	// 排在关注域之后：它是"内容侧"的最后一块，与前面的社交域（好友/私聊/关注）
+	// 分开 —— 收藏不涉及任何人与人之间的关系，只涉及"我"与"一个对象"。
+	registerFavoriteRoutes(api, accountDeps.Store, cfg, accountDeps.Service)
+
 	// 用户级实时通道（wayfinder #31）：/ws/user。票据必填，不属于任何房间。
 	registerUserWSRoute(r, cfg, accountDeps.UserHub, accountDeps, accountDeps.Presence)
 

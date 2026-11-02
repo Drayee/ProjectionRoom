@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,6 +75,14 @@ type Post struct {
 
 	// Liked 同样是查询时算出的**只读**字段（前端 Post.liked 是必填形状）。
 	Liked bool `gorm:"->"`
+
+	// Favorited 是 viewer 是否把这篇收进了私人书签（票 #64）。
+	//
+	// 与 Liked **同一批查询**回填（见 ListPosts / PostByID）：两个布尔读的是
+	// 两张表，但"每个列表页都要知道这两件事"是同一个需求，分两次循环会让
+	// "以后再加一个布尔"变成再加一次全表扫。它**没有对应的公开计数** ——
+	// 收藏是私人书签（决议 #48 §3），所以只有这一个布尔，没有 favorite_count。
+	Favorited bool `gorm:"->"`
 }
 
 // TableName 固定表名（GORM 默认复数化成 "posts"，恰好一致，仍显式声明防漂移）。
@@ -275,8 +284,13 @@ func (s *Store) ListPosts(ctx context.Context, sort ListPostsSort, limit, offset
 		for _, id := range likedIDs {
 			set[id] = struct{}{}
 		}
+		favSet, err := s.favoritedPostIDs(ctx, viewerID, ids)
+		if err != nil {
+			return nil, false, err
+		}
 		for i := range rows {
 			_, rows[i].Liked = set[rows[i].ID]
+			_, rows[i].Favorited = favSet[rows[i].ID]
 		}
 	}
 	return rows, hasMore, nil
@@ -358,11 +372,42 @@ func (s *Store) ListAnimeThreads(ctx context.Context, animeID int64, sort ListAn
 		for _, id := range likedIDs {
 			set[id] = struct{}{}
 		}
+		favSet, err := s.favoritedPostIDs(ctx, viewerID, ids)
+		if err != nil {
+			return nil, false, err
+		}
 		for i := range rows {
 			_, rows[i].Liked = set[rows[i].ID]
+			_, rows[i].Favorited = favSet[rows[i].ID]
 		}
 	}
 	return rows, hasMore, nil
+}
+
+// favoritedPostIDs 是 liked 批查询的收藏版：一次问清"这 N 篇里哪些已收藏"。
+//
+// 抽成一个函数而不是在三处（信息流列表 / 板块主题串 / 详情）各写一遍：
+// 三处的 ids 来源不同，但"读哪张表、用什么口径"必须只有一份 ——
+// 否则改口径时漏掉一处的症状是"列表里亮着、点进详情变灰"。
+func (s *Store) favoritedPostIDs(ctx context.Context, viewerID int64, postIDs []int64) (map[int64]struct{}, error) {
+	out := make(map[int64]struct{}, len(postIDs))
+	if viewerID <= 0 || len(postIDs) == 0 {
+		return out, nil
+	}
+	raw := make([]string, 0, len(postIDs))
+	for _, id := range postIDs {
+		raw = append(raw, strconv.FormatInt(id, 10))
+	}
+	states, err := s.FavoriteStatesFor(ctx, viewerID, FavoritePost, raw)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range postIDs {
+		if states[strconv.FormatInt(id, 10)] {
+			out[id] = struct{}{}
+		}
+	}
+	return out, nil
 }
 
 // CountAnimeThreads 返回某个番剧下的主题串条数（删除前的准入判据）。
@@ -407,6 +452,14 @@ func (s *Store) PostByID(ctx context.Context, id int64, viewerID int64) (*Post, 
 			return nil, fmt.Errorf("store: 查询点赞状态失败: %w", err)
 		}
 		row.Liked = cnt > 0
+
+		// 收藏与点赞同一趟回填（票 #64）：详情页的动作条要同时知道两件事，
+		// 分两次查会让"以后再加一个布尔"变成再加一次往返。
+		favSet, err := s.favoritedPostIDs(ctx, viewerID, []int64{id})
+		if err != nil {
+			return nil, err
+		}
+		_, row.Favorited = favSet[id]
 	}
 	return &row, nil
 }

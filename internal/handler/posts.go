@@ -140,7 +140,12 @@ type postView struct {
 	LikeCount    int            `json:"likeCount"`
 	CommentCount int            `json:"commentCount"`
 	Liked        bool           `json:"liked"`
-	CreatedAt    string         `json:"createdAt"`
+	// Favorited 是"我把这篇收进了私人书签"（票 #64）。
+	//
+	// **没有 favoriteCount**：收藏不计任何公开数（决议 #48 §3）。它与 liked 的
+	// 差别正是这一点 —— 点赞是公开表态（有计数），收藏是私人书签（只有自己知道）。
+	Favorited bool   `json:"favorited"`
+	CreatedAt string `json:"createdAt"`
 
 	// AnimeID 是主题串所属板块（wayfinder #38）。
 	//
@@ -180,6 +185,7 @@ func toPostView(p *store.Post) postView {
 		Images:    images,
 		LikeCount: p.LikeCount, CommentCount: p.CommentCount,
 		Liked:       p.Liked,
+		Favorited:   p.Favorited,
 		CreatedAt:   p.CreatedAt.Format(timeLayout),
 		AnimeID:     p.AnimeID,
 		LastReplyAt: lastReply,

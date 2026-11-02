@@ -28,6 +28,7 @@ import BrandIcon from '../components/ui/BrandIcon.vue'
 import Button from '../components/ui/Button.vue'
 import * as postsApi from '../api/posts'
 import { useApiFailure } from '../components/features/common/useApiFailure'
+import { useFavorite } from '../components/features/common/useFavorite'
 import { usePostLike } from '../components/features/common/usePostLike'
 import { useAuthStore } from '../stores/auth'
 import type { Post } from '../types/posts'
@@ -36,7 +37,17 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const { failure, run } = useApiFailure(() => route.fullPath)
-const { toggle, isBusy, toast, say } = usePostLike()
+const { toggle, isBusy, toast } = usePostLike()
+const { setFavorite, isBusy: isFavBusy, toast: favToast } = useFavorite()
+
+/**
+ * 页面上那条轻提示的文案。
+ *
+ * 点赞与收藏各有一个 `useXxx` 实例，各自持有一条提示 —— 这里合成一条显示：
+ * 同一时刻只该有一句话，两个 `<p>` 会叠在一起互相盖不住。
+ * 优先级给点赞（更常用的那个），但它本来也不会同时出现（在途锁各管各的键）。
+ */
+const notice = computed(() => toast.value || favToast.value)
 
 const posts = ref<Post[]>([])
 const sort = ref<'latest' | 'hot'>('latest')
@@ -144,12 +155,15 @@ function openPost(id: number) {
 }
 
 /**
- * 收藏：本票只做占位（数据接线在票 #64）。
+ * 收藏（票 #64）：乐观更新 + 失败回滚 + 在途锁，与点赞同一套纪律。
  *
- * 但**不能静默**：点了完全没反应与"功能坏了"在用户看来一样，所以给一条轻提示说清楚。
+ * 与点赞的差别只有"作用对象"：点赞直接改 `p` 这个响应式对象，收藏则要按
+ * `(type, targetId)` 定位，所以写回函数自己找那一行改。
  */
-function onFavorite() {
-  say('收藏功能还在接（票 #64）')
+function onFavorite(post: Post) {
+  void setFavorite('post', String(post.id), !post.favorited, (value) => {
+    post.favorited = value
+  })
 }
 
 onMounted(() => {
@@ -260,9 +274,11 @@ onBeforeUnmount(() => {
             :liked="p.liked"
             :like-count="p.likeCount"
             :comment-count="p.commentCount"
+            :favorited="p.favorited"
             :like-busy="isBusy(p.id)"
+            :favorite-busy="isFavBusy('post', String(p.id))"
             @like="toggle(p)"
-            @favorite="onFavorite"
+            @favorite="onFavorite(p)"
             @comment="openPost(p.id)"
           />
         </article>
@@ -274,7 +290,7 @@ onBeforeUnmount(() => {
     </main>
 
     <!-- 轻提示（点赞失败 / 收藏占位）：写操作的失败绝不把整页换成错误态。 -->
-    <p v-if="toast" class="toast" role="status" data-testid="action-toast">{{ toast }}</p>
+    <p v-if="notice" class="toast" role="status" data-testid="action-toast">{{ notice }}</p>
   </div>
 </template>
 
