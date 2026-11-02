@@ -1,0 +1,157 @@
+/**
+ * 路由过渡壳的样式（票 #76）。
+ *
+ * 真源：票 #45 的决议（方向性位移 + 三处共享元素）与
+ * `docs/notes/2026-10-30-route-transition-navigation-principles.md` §1/§2。
+ *
+ * # 三条硬约束
+ *
+ *   1. **只动 transform 与 opacity**（票 #13 的动效预算）。
+ *      不动 width/height/top/left —— 那会让页面在过渡中重排，
+ *      长列表页会看到内容跳一下。
+ *   2. **位移 12px**：是「方向提示」而不是「页面搬家」。
+ *      顶栏常驻而内容整屏横推会出现「导航栏不动、内容整体平移」的错位感。
+ *   3. **过渡不等数据**：新页先挂载并渲染骨架，240ms 走完就结束。
+ *      数据到了只填内容，**不许**延长或重播过渡。
+ *
+ * # 位移量的唯一真源是 TypeScript
+ *
+ * `--route-shift` 由 `App.vue` 从决策器给的 `shiftPx` 写进来
+ * （`utils/routeTransition.ts` 的 `TRANSITION_SHIFT_PX`）。
+ * 本文件只说「用这个位移量」，不自己写死 12px ——
+ * 两处各写一个 12，改了一处忘了另一处，症状是「位移变成了 24px」
+ * 或者「决策器说 12、界面动 0」，都很难一眼看出。
+ *
+ * # 与 tokens.css 的关系
+ *
+ * 时长取 `--dur-comp`（240ms），与决策器里的 `TRANSITION_DURATION_MS` 同值。
+ * 缓动取 `--ease`。
+ *
+ * # reduced-motion 的双侧纪律
+ *
+ * CSS 侧：`tokens.css` 里那条全局 `transition: none !important`
+ * 已经把本文件的所有过渡判死（降级后换页是瞬时的）。
+ * JS 侧：`composables/useRouteTransition.ts` 用 `matchMedia` 自己判一次，
+ * 决策落成 `instant` → 过渡名 `page-none` → **连 class 都不加**，
+ * 于是连「淡入 0ms」这层残余都没有。两侧都在，缺一侧就是回归（票 #45 决议）。
+ */
+
+/* ---------- 位移量的来源（由 App.vue 写入） ----------
+   兜底值 12px 与 TRANSITION_SHIFT_PX 同值：万一 var 没写进来，
+   位移仍是正确的大小（而不是 0 —— 位移 0 会让"方向感"整个消失）。 */
+.route-stage {
+  --route-shift: 12px;
+}
+
+/* ---------- 叠放策略 ----------
+   新旧两页**同时在场**（默认 mode，不是 out-in）：
+   票 #45 的决议是「新页从 12px 归零，旧页向左淡出」——两者**同时**发生，
+   串行（out-in）会把一次换页拉成 480ms，还会在中间留一帧空白。
+
+   两页同时在场就必须让旧页**脱离文档流**，否则它们会竖着叠成两屏
+   （新页被推到首屏之外）。旧页因此绝对定位在舞台左上角、宽与舞台同宽。
+
+   层级：新页在上（z-index 1），旧页在下（z-index 0）——
+   与原型预览一致（原型里新页 DOM 在后、盖在旧页上）。
+   旧页同时还在淡出，于是它是"正在消散的旧内容"，新页是"正在成形的当前内容"。 */
+
+.page-forward-leave-active,
+.page-back-leave-active,
+.page-lateral-leave-active {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 0;
+}
+
+.page-forward-enter-active,
+.page-back-enter-active,
+.page-lateral-enter-active {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---------- 前进：新页从右 12px 归零，旧页向左 −12px 淡出 ---------- */
+
+.page-forward-enter-active,
+.page-forward-leave-active {
+  transition:
+    transform var(--dur-comp) var(--ease),
+    opacity var(--dur-comp) var(--ease);
+}
+
+.page-forward-enter-from {
+  transform: translateX(var(--route-shift));
+  opacity: 0;
+}
+
+.page-forward-enter-to {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.page-forward-leave-from {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.page-forward-leave-to {
+  transform: translateX(calc(-1 * var(--route-shift)));
+  opacity: 0;
+}
+
+/* ---------- 后退：新页从左 −12px 归零，旧页向右 +12px 淡出 ---------- */
+
+.page-back-enter-active,
+.page-back-leave-active {
+  transition:
+    transform var(--dur-comp) var(--ease),
+    opacity var(--dur-comp) var(--ease);
+}
+
+.page-back-enter-from {
+  transform: translateX(calc(-1 * var(--route-shift)));
+  opacity: 0;
+}
+
+.page-back-enter-to {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.page-back-leave-from {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.page-back-leave-to {
+  transform: translateX(var(--route-shift));
+  opacity: 0;
+}
+
+/* ---------- 同级切分区：纯交叉淡入，无位移 ----------
+   分区之间没有父子关系，硬造方向会误导（票 #45 决议②）。
+   这里**不写 transform**：同级的"无位移"必须是真的无位移，
+   写一条 translateX(0) 会让"只淡入不横移"这条判据无法测。 */
+
+.page-lateral-enter-active,
+.page-lateral-leave-active {
+  transition: opacity var(--dur-comp) var(--ease);
+}
+
+.page-lateral-enter-from,
+.page-lateral-leave-to {
+  opacity: 0;
+}
+
+.page-lateral-enter-to,
+.page-lateral-leave-from {
+  opacity: 1;
+}
+
+/* ---------- page-none：刻意**不定义任何规则** ----------
+   none / exempt / instant 三种决策都落在这里，于是换页是瞬时的：
+   放映室整页硬替换、reduced-motion 判死、首屏进入、同路由复用。
+   写一条 "0ms" 的淡入看着无害，但会让「放映室进出零动画」这条判据
+   在真机上变成「有一个 0ms 的 opacity 变化」——判据必须能测出来。 */
