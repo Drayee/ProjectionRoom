@@ -3,8 +3,9 @@
  * UserAvatar —— 全站唯一的头像组件（票 #61，契约见 #44 决议 + GLOSSARY「Shared object components」）。
  *
  * ## 它是什么
- * 一个「首字母 + 稳定色」的圆形块：**不上传图片、不加载图片**（像素头像覆盖是票 #74 的事，
- * 届时它是本组件内部的**可选覆盖**，字母头永远兜底 —— 契约不破）。
+ * 一个「首字母 + 稳定色」的圆形块，上面可以**盖一张像素头像**（票 #74 / 决议 #54 §4）。
+ * 像素头像只是**可选覆盖**，字母头永远兜底 —— 这是本组件最重要的性质：
+ * 任何调用方都不需要判断"有没有头像"，也不需要处理加载失败。
  *
  * ## 为什么必须有这个组件（不是"再写一个 span"）
  * 站内的头像字母块散在五处，每处自己算色：
@@ -20,6 +21,19 @@
  * 「页面里再写私有 `avatarOf` 视为回归」）。本组件**不含任何取色逻辑**，
  * 只负责把 `avatarOf()` 的结果渲染成可点/不可点的圆块。
  *
+ * ## 三态回落（票 #74，决议 #54 §4）
+ * 像素头像有三种"没有"的情形，**一律**回落到字母头：
+ *   1. `avatarUrl` 为空 —— 从未设置、被管理员重置、或账号已注销（服务端置空）；
+ *   2. 图片加载失败（对象被删、网络抖动、CSP 拦截）；
+ *   3. 加载失败**之后**，本次会话内不再重试这个 URL。
+ *
+ * 第 3 条是必须的：列表页有几十个头像，其中一个 404 时浏览器会**每次重渲染都重试**
+ * —— 症状是列表里那一格反复闪一下破图。记进模块级集合后它只失败一次。
+ *
+ * 覆盖层本身（`<img>` + `object-fit: cover` + 失败记忆）在 `ui/AvatarImage.vue`，
+ * 失败集合在 `utils/avatarImage.ts` —— `/me` 与 `/user/:id` 的两处大头像
+ * 用的是同一个覆盖层组件，所以那条纪律只有一份实现。
+ *
  * ## 分层（票 #44 §0）
  * `ui/` = 纯展示：不读 store、不 import 路由模块，props 进 / 事件出。
  * 所以「这是不是我本人」这件事**由调用方判断**（传 `self`），组件自己不读登录态。
@@ -27,6 +41,8 @@
  * ## 无障碍
  * - 装饰性（`interactive=false`）：`aria-hidden="true"`，读屏跳过。
  * - 可交互：整体是 `<RouterLink>`，`aria-label="查看 <displayName> 的档案"`。
+ * - 像素头像是**装饰**（`alt=""` + `aria-hidden`）：名字已经由 aria-label 给出，
+ *   再读一遍文件名或"头像"只会制造噪音。
  * - hover / focus-visible 有可感知反馈（与 Button 的 hover 语言同款）。
  *
  * ## 尺寸
@@ -35,6 +51,7 @@
  */
 import { computed } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
+import AvatarImage from './AvatarImage.vue'
 import { avatarOf } from '../../utils/avatar'
 
 /** 尺寸档位（#44 决议：xs | sm | md | lg）。 */
@@ -42,8 +59,13 @@ export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg'
 
 const props = withDefaults(
   defineProps<{
-    /** 人：只要 id 与昵称（色板与首字母由 id 决定，昵称决定字母）。 */
-    user: { id: number; displayName: string }
+    /**
+     * 人：id + 昵称（决定字母与色板），可选 `avatarUrl`（像素头像覆盖层）。
+     *
+     * `avatarUrl` 刻意是可选的：调用方拿到的数据里可能没有这个字段
+     *（旧接口、mock 数据、注销账号）。缺了就是字母头 —— 不需要调用方补默认值。
+     */
+    user: { id: number; displayName: string; avatarUrl?: string | null }
     /** 尺寸档位。 */
     size?: AvatarSize
     /**
@@ -102,6 +124,19 @@ const FONT_PX: Record<AvatarSize, number> = { xs: 11, sm: 12, md: 14, lg: 18 }
 const sizePx = computed(() => SIZE_PX[props.size])
 const fontPx = computed(() => FONT_PX[props.size])
 
+/**
+ * 圆块的样式。
+ *
+ * 底色**始终**是字母头的颜色（哪怕有像素头像）：图片还没解码完的那一瞬间
+ * 与图片失败之后，用户看到的都应该是那个有辨识度的色块，而不是一片空白。
+ */
+const boxStyle = computed(() => ({
+  background: derived.value.avatarColor,
+  width: sizePx.value + 'px',
+  height: sizePx.value + 'px',
+  fontSize: fontPx.value + 'px',
+}))
+
 /** 无障碍名：可点时告诉读屏"这是谁的档案"。 */
 const label = computed(() => `查看 ${props.user.displayName || '用户'} 的档案`)
 
@@ -123,17 +158,17 @@ const target = computed(() => {
     class="avatar"
     :to="target"
     :aria-label="label"
-    :style="{ background: derived.avatarColor, width: sizePx + 'px', height: sizePx + 'px', fontSize: fontPx + 'px' }"
+    :style="boxStyle"
   >
+    <!-- 字母头先渲染（它是兜底），像素头像绝对定位盖在上面。
+         顺序有讲究：反过来（先图后字母）会在图片解码前露出色块再被图盖住，
+         那一下闪烁在长列表里非常刺眼。 -->
     <span class="char" aria-hidden="true">{{ derived.avatarChar }}</span>
+    <AvatarImage :url="props.user.avatarUrl" />
   </RouterLink>
-  <span
-    v-else
-    class="avatar"
-    aria-hidden="true"
-    :style="{ background: derived.avatarColor, width: sizePx + 'px', height: sizePx + 'px', fontSize: fontPx + 'px' }"
-  >
+  <span v-else class="avatar" aria-hidden="true" :style="boxStyle">
     <span class="char" aria-hidden="true">{{ derived.avatarChar }}</span>
+    <AvatarImage :url="props.user.avatarUrl" />
   </span>
 </template>
 
@@ -143,8 +178,11 @@ const target = computed(() => {
  *
  * 颜色来自 `avatarOf()`（内联 background），这里只管形状与排版 —— 组件里
  * **不写状态色**（票 #43 的状态令牌纪律：禁手写 `rgba(...)` 状态色）。
+ *
+ * `position: relative` 是为了让像素头像能绝对定位盖住字母（见 .pic）。
  */
 .avatar {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -179,6 +217,9 @@ const target = computed(() => {
   display: block;
   transform: translateY(0.02em);
 }
+
+/* 像素头像覆盖层的样式在 `ui/AvatarImage.vue`（父级只需 position: relative +
+   overflow: hidden，本组件已有）。 */
 
 /**
  * 降级：`prefers-reduced-motion: reduce` 下取消位移与缩放，只留颜色变化。

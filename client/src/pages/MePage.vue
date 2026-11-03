@@ -41,6 +41,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncState from '../components/ui/AsyncState.vue'
+import AvatarImage from '../components/ui/AvatarImage.vue'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import Button from '../components/ui/Button.vue'
 import RelativeTime from '../components/ui/RelativeTime.vue'
@@ -87,7 +88,12 @@ const notice = ref('')
 const errorText = ref('')
 const fieldError = ref('')
 
-/** 头像与昵称的显示数据（与 `/user/:id` 同一份派生源）。 */
+/**
+ * 头像与昵称的显示数据（与 `/user/:id` 同一份派生源）。
+ *
+ * `avatarUrl` 跟着 `...p` 一起过来（票 #74）：它是服务端事实，
+ * 而 `avatarChar` / `avatarColor` 是这里派生的显示层兜底。
+ */
 const me = computed(() => {
   const p = auth.profile
   if (!p) return null
@@ -388,6 +394,7 @@ watch(tab, async () => {
             <div class="card-head">
               <span v-if="me" class="avatar-lg" :style="{ background: me.avatarColor }" aria-hidden="true">
                 {{ me.avatarChar }}
+                <AvatarImage :url="me.avatarUrl" />
               </span>
               <div class="who">
                 <h2 id="me-profile-head" class="name-row">
@@ -550,6 +557,10 @@ watch(tab, async () => {
   gap: 12px;
 }
 .avatar-lg {
+  /* position + overflow 是像素头像覆盖层（`ui/AvatarImage.vue`）的前提：
+     它绝对定位盖在字母上，父级不裁剪就会溢出圆外。 */
+  position: relative;
+  overflow: hidden;
   width: 56px;
   height: 56px;
   border-radius: 50%;

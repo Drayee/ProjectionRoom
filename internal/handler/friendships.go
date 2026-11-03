@@ -211,6 +211,8 @@ type searchHitView struct {
 	UserID      int64  `json:"userId"`
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
+	// AvatarURL 是命中者的像素头像（票 #74）；nil = 没有。
+	AvatarURL *string `json:"avatarUrl,omitempty"`
 	// 下面四个是**关注域**的事实（票 #58）。
 	//
 	// 好友页的按钮真正要看的是单向关注边的方向 —— "关注 / 已关注 / 回关 /
@@ -239,7 +241,9 @@ type blockedEntryView struct {
 	UserID      int64  `json:"userId"`
 	DisplayName string `json:"displayName"`
 	Username    string `json:"username"`
-	BlockedAt   string `json:"blockedAt"`
+	// AvatarURL 是黑名单行的头像（票 #74）；nil = 没有。
+	AvatarURL *string `json:"avatarUrl,omitempty"`
+	BlockedAt string  `json:"blockedAt"`
 }
 
 // targetRequest 是「对某个人做一件事」的请求体（拉黑用它）。
@@ -342,6 +346,7 @@ func (h *friendshipHandler) searchUsers(c *gin.Context) {
 			UserID:      hits[i].ID,
 			Username:    hits[i].Username,
 			DisplayName: hits[i].DisplayName,
+			AvatarURL:   hits[i].AvatarURL,
 			Following:   fs.Following,
 			FollowedBy:  fs.FollowedBy,
 			Mutual:      fs.Mutual(),
@@ -383,6 +388,7 @@ func (h *friendshipHandler) listBlocked(c *gin.Context) {
 			UserID:      rows[i].BlockedID,
 			DisplayName: rows[i].DisplayName,
 			Username:    rows[i].Username,
+			AvatarURL:   rows[i].AvatarURL,
 			BlockedAt:   rows[i].BlockedAt.Format(timeLayout),
 		})
 	}

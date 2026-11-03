@@ -251,6 +251,85 @@ func (c *Client) keyFromURL(u string) string {
 // Enabled 报告对象存储是否可用。
 func (c *Client) Enabled() bool { return c != nil }
 
+// OwnsURL 判断一个 URL 是不是**本桶里一个形态合法的对象**（票 #74）。
+//
+// # 为什么需要它
+//
+// `PATCH /api/me {avatarUrl}` 接受客户端传回来的 URL。若只判"非空 + 长度"，
+// 攻击者可以把自己的头像设成任意第三方地址：于是**每一个看到他的用户**都会
+// 向那个地址发一次 GET（带 Referer、带真实 IP）。那是拿我们的页面做
+// 无痕追踪像素，也是混合内容（https 页面嵌 http 图）的来源。
+// 决议 #54 §8 明确否决了"外链直填"，这条方法是那条决议的执行点。
+//
+// # 判据为什么是"前缀 + key 形状"而不是"去桶里查一下存在"
+//
+// 查存在要一次网络往返，而这个校验在**每一次改资料**的路径上；更重要的是
+// 它判的是**权限**（这个 URL 是不是我们发的），不是**状态**（对象还在不在）。
+// 对象被删掉的情况由显示层的 onerror 回落处理（决议 #54 §4），不需要在这里拦。
+// 反过来，如果在这里查存在，管理员重置头像时"先置空再删对象"就会因为
+// 顺序而失败 —— 那是把两件独立的事绑死了。
+//
+// # key 形状
+//
+// 本包自己生成的 key 是 `<yyyy>/<mm>/<32 位小写 hex><ext>`（见 newObjectKey）。
+// 校验它而不是只校验前缀，是因为前缀之外还可能是
+// `<base>/<bucket>/../../other-bucket/x`（穿越到别的桶）或
+// `<base>/<bucket>/`（空 key，删/读都无意义）。只认自己会生成的那种形状，
+// 就把"任意字符串"收缩成"我们真的产出过的那一类"。
+func (c *Client) OwnsURL(u string) bool {
+	if c == nil {
+		return false
+	}
+	u = strings.TrimSpace(u)
+	if u == "" {
+		return false
+	}
+	// 前缀必须**恰好**是 publicURL("")（即 base + "/" + bucket + "/"），
+	// 不能只是"包含 /bucket/" —— 那会让 https://evil.com/x/pr-files/... 通过。
+	prefix := c.publicURL("")
+	if !strings.HasPrefix(u, prefix) {
+		return false
+	}
+	return isObjectKey(u[len(prefix):])
+}
+
+// isObjectKey 判断 key 是否为本包 newObjectKey 会产出的形状。
+//
+// 独立成函数（而不是内联在 OwnsURL 里）是为了让它能被单测直接覆盖：
+// 穿越、绝对路径、大小写、多余斜杠这些变体都在这一个函数上判。
+func isObjectKey(key string) bool {
+	parts := strings.Split(key, "/")
+	if len(parts) != 3 {
+		return false
+	}
+	year, month, name := parts[0], parts[1], parts[2]
+	if len(year) != 4 || len(month) != 2 {
+		return false
+	}
+	for _, r := range year + month {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	if len(stem) != 32 {
+		return false
+	}
+	for _, r := range stem {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	// 扩展名必须是我们会生成的四个之一（allowedImageTypes 的值集）。
+	for _, want := range allowedImageTypes {
+		if ext == want {
+			return true
+		}
+	}
+	return false
+}
+
 // newObjectKey 生成对象 key：<yyyy>/<mm>/<random>.<ext>
 //
 // 为什么要按年月分目录：桶里文件多了以后，控制台与 mc 列目录会变得很慢；

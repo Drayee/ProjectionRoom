@@ -47,6 +47,8 @@ interface ServerPublicProfile {
   id: number
   username: string
   displayName: string
+  /** `*string` + omitempty：没有像素头像时这个键**不存在**（票 #74）。 */
+  avatarUrl?: string
   role: string
   createdAt: string
 }
@@ -65,6 +67,8 @@ interface ServerProfile {
   emailVerified: boolean
   role: string
   status: string
+  /** `*string` + omitempty：没有像素头像时这个键**不存在**（票 #74）。 */
+  avatarUrl?: string
   createdAt: string
 }
 
@@ -93,13 +97,18 @@ export async function getPublicProfile(userId: number): Promise<PublicProfile> {
         message: '服务端返回了空的用户档案',
       })
     }
-    return {
+    const profile: PublicProfile = {
       id: body.id,
       username: body.username,
       displayName: body.displayName,
       role: body.role,
       createdAt: body.createdAt,
     }
+    // 只有真有值才带上这个键：`avatarUrl: undefined` 与"没有这个键"在
+    // 类型上是同一件事，但显式赋值会让 `JSON.stringify` 之外的判据
+    //（比如 `'avatarUrl' in profile`）出现两种答案。
+    if (typeof body.avatarUrl === 'string' && body.avatarUrl !== '') profile.avatarUrl = body.avatarUrl
+    return profile
   } catch (err) {
     throw toUsersError(err)
   }
@@ -126,7 +135,7 @@ export async function updateDisplayName(displayName: string): Promise<MyProfile>
         message: '服务端没有返回更新后的档案',
       })
     }
-    return {
+    const profile: MyProfile = {
       id: raw.id,
       username: raw.username,
       displayName: raw.displayName,
@@ -136,6 +145,8 @@ export async function updateDisplayName(displayName: string): Promise<MyProfile>
       status: raw.status,
       createdAt: raw.createdAt,
     }
+    if (typeof raw.avatarUrl === 'string' && raw.avatarUrl !== '') profile.avatarUrl = raw.avatarUrl
+    return profile
   } catch (err) {
     throw toUsersError(err)
   }

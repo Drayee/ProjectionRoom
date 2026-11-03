@@ -69,6 +69,8 @@ type followView struct {
 	UserID int64 `json:"userId"`
 	// DisplayName 是对方的显示名（免去前端再查一次档案）。
 	DisplayName string `json:"displayName"`
+	// AvatarURL 是对方的像素头像（票 #74）；nil = 没有，显示层回落字母头。
+	AvatarURL *string `json:"avatarUrl,omitempty"`
 	// Following 是"我关注了对方"。
 	Following bool `json:"following"`
 	// FollowedBy 是"对方关注了我"（= 我是对方的粉丝）。
@@ -98,6 +100,8 @@ type followListEntryView struct {
 	UserID      int64  `json:"userId"`
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
+	// AvatarURL 是名单行的头像（票 #74）；nil = 没有。
+	AvatarURL *string `json:"avatarUrl,omitempty"`
 	// Following 是"我关注了 TA"。
 	Following bool `json:"following"`
 	// FollowedBy 是"TA 关注了我"。
@@ -416,6 +420,7 @@ func (h *followHandler) list(c *gin.Context) {
 			UserID:      e.UserID,
 			Username:    e.Username,
 			DisplayName: e.DisplayName,
+			AvatarURL:   e.AvatarURL,
 			Following:   e.Following,
 			FollowedBy:  e.FollowedBy,
 			Mutual:      e.Mutual(),
@@ -510,6 +515,7 @@ func (h *followHandler) viewOf(c *gin.Context, actorID int64, peer *store.User) 
 	return followView{
 		UserID:         peer.ID,
 		DisplayName:    peer.DisplayName,
+		AvatarURL:      peer.AvatarURL,
 		Following:      st.Following,
 		FollowedBy:     st.FollowedBy,
 		Mutual:         st.Mutual(),

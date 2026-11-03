@@ -73,6 +73,8 @@ type Message struct {
 
 	// SenderName 是查询时 JOIN users 带出的显示名（只读，同 posts.AuthorName）。
 	SenderName string `gorm:"column:sender_name;->"`
+	// SenderAvatarURL 是发件人的像素头像（票 #74）；nil = 没有。
+	SenderAvatarURL *string `gorm:"column:sender_avatar_url;->"`
 }
 
 // TableName 见 User.TableName 的说明。
@@ -202,7 +204,8 @@ func (s *Store) ListDM(ctx context.Context, viewerID, peerID, before int64, limi
 
 	tx := s.db.WithContext(ctx).
 		Table("messages AS m").
-		Select("m.*, u.display_name AS sender_name").
+		Select("m.*, "+maskedDisplayNameSQL("u")+" AS sender_name, "+
+			maskedAvatarSQL("u")+" AS sender_avatar_url").
 		Joins("JOIN users u ON u.id = m.sender_id").
 		Where("m.kind = ?", MessageKindDM).
 		Where(`(m.sender_id = ? AND m.recipient_id = ?) OR (m.sender_id = ? AND m.recipient_id = ?)`,
@@ -297,6 +300,7 @@ WITH mine AS (
 )
 SELECT l.peer_id,
        CASE WHEN u.deletion_requested_at IS NULL THEN u.display_name ELSE '已注销用户' END AS peer_name,
+       CASE WHEN u.deletion_requested_at IS NULL THEN u.avatar_url ELSE NULL END AS peer_avatar_url,
        l.id           AS last_id,
        l.sender_id    AS last_sender_id,
        l.body         AS last_body,
@@ -317,11 +321,13 @@ SELECT l.peer_id,
 //
 // 它没有 TableName：GORM 的 Raw().Scan() 按列名回填，不参与任何 Create/Update。
 type DMConversation struct {
-	PeerID      int64     `gorm:"column:peer_id"`
-	PeerName    string    `gorm:"column:peer_name"`
-	LastID      int64     `gorm:"column:last_id"`
-	LastSender  int64     `gorm:"column:last_sender_id"`
-	LastBody    string    `gorm:"column:last_body"`
-	LastSentAt  time.Time `gorm:"column:last_created_at"`
-	UnreadCount int64     `gorm:"column:unread"`
+	PeerID   int64  `gorm:"column:peer_id"`
+	PeerName string `gorm:"column:peer_name"`
+	// PeerAvatarURL 是对方头像（票 #74）；nil = 没有（含注销后置空）。
+	PeerAvatarURL *string   `gorm:"column:peer_avatar_url"`
+	LastID        int64     `gorm:"column:last_id"`
+	LastSender    int64     `gorm:"column:last_sender_id"`
+	LastBody      string    `gorm:"column:last_body"`
+	LastSentAt    time.Time `gorm:"column:last_created_at"`
+	UnreadCount   int64     `gorm:"column:unread"`
 }

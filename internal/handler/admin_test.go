@@ -324,6 +324,18 @@ func (s *fakeAdminStore) UpdateDisplayName(_ context.Context, id int64, displayN
 	return nil
 }
 
+// UpdateAvatarURL 是 #74 加的。nil = 清除。
+func (s *fakeAdminStore) UpdateAvatarURL(_ context.Context, id int64, avatarURL *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.AvatarURL = avatarURL
+	return nil
+}
+
 func (s *fakeAdminStore) BumpTokenVersion(ctx context.Context, id int64) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -954,6 +966,11 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 		// 直接沿用。不填会让构造器拒绝，于是本文件的每条用例都因为
 		// "少填一个测试参数"变红 —— 那不是它们要测的东西。
 		DeletionGrace: cfg.Auth.DeletionGrace,
+		// 头像对象存储（票 #74）：默认给一个可用的内存替身，这样
+		// "改头像"这条路径在本文件里是**通的**（而不是每条用例都撞 503）。
+		// 要测"未配置存储"的那条用例自己造不带 Avatar 的 env
+		//（见 avatar_handler_test.go 的 newAvatarEnvWithoutBackend）。
+		Avatar: newFakeAvatarBackend(),
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败: %v", err)

@@ -70,3 +70,20 @@ func maskedDisplayNameSQL(alias string) string {
 
 // DeletedUserDisplayName 是注销账号的公开署名（决议 #51 §5 / GLOSSARY「Deleted user display」）。
 const DeletedUserDisplayName = "已注销用户"
+
+// maskedAvatarSQL 返回"头像 URL，注销后置空"的 SQL 表达式（票 #74）。
+//
+// # 为什么要遮
+//
+// 与署名同一个理由：注销账号对外完全不可见（决议 #51 §5）。署名叫「已注销用户」
+// 却还顶着他本人的照片，等于一半隐藏一半暴露 —— 照片比名字更能指认一个人。
+// 置空之后显示层回落到字母头（决议 #54 §4 的三态之一），界面上不出现破图。
+//
+// # 为什么返回 NULL 而不是空串
+//
+// 与 `avatar_url` 列自身的"没有"表示一致（迁移 0019：NULL = 没有像素头像）。
+// 前端两条路都是 `?? ”` 再判空，但库里多一种"空串"表示会让
+// "清理注销数据"的语句要同时处理两个值。
+func maskedAvatarSQL(alias string) string {
+	return `CASE WHEN ` + alias + `.deletion_requested_at IS NULL THEN ` + alias + `.avatar_url ELSE NULL END`
+}

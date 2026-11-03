@@ -46,6 +46,10 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			// NULL = 不在冷静期；非 NULL 时对外完全不可见、本人仍能登录撤销，
 			// 到期由后台清扫真删（`PurgeExpiredDeletions`）。
 			"deletion_requested_at": {"timestamp with time zone", 0, true},
+			// 0019（决议 #54 §5 / 票 #74）：像素头像的 URL（"覆盖层"）。
+			// 可空是语义的一部分 —— NULL = 从未设置 / 被管理员重置 / 注销后置空，
+			// 三种情况显示层都回落字母头（决议 #54 §4）。
+			"avatar_url": {"character varying", 512, true},
 		},
 		"sessions": {
 			"id":         {"bigint", 0, false},

@@ -25,6 +25,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
+import AvatarImage from '../components/ui/AvatarImage.vue'
 import BrandIcon from '../components/ui/BrandIcon.vue'
 import CapabilityNotice from '../components/ui/CapabilityNotice.vue'
 import RelativeTime from '../components/ui/RelativeTime.vue'
@@ -84,6 +85,9 @@ const view = computed<(PublicProfile & { avatarChar: string; avatarColor: string
           displayName: auth.profile.displayName,
           role: auth.profile.role,
           createdAt: auth.profile.createdAt,
+          // 像素头像（票 #74）：本人视角也要带上，否则自己的档案页
+          // 与别人看到的你长得不一样 —— 那种"只有我看不到"的缺陷最难自查。
+          avatarUrl: auth.profile.avatarUrl,
         }
       : null
     : publicProfile.value
@@ -346,7 +350,10 @@ watch(
 
       <template v-else-if="view">
         <header class="hero">
-          <span class="avatar-lg" :style="{ background: view.avatarColor }" aria-hidden="true">{{ view.avatarChar }}</span>
+          <span class="avatar-lg" :style="{ background: view.avatarColor }" aria-hidden="true">
+            {{ view.avatarChar }}
+            <AvatarImage :url="view.avatarUrl" />
+          </span>
           <div class="who">
             <div class="name-row">
               <h1 class="title">{{ view.displayName }}</h1>
@@ -498,6 +505,10 @@ watch(
   width: 100%;
 }
 .avatar-lg {
+  /* position + overflow 是像素头像覆盖层（`ui/AvatarImage.vue`）的前提：
+     它绝对定位盖在字母上，父级不裁剪就会溢出圆外。 */
+  position: relative;
+  overflow: hidden;
   flex: none;
   width: 76px;
   height: 76px;

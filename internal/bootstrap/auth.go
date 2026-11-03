@@ -9,6 +9,7 @@ import (
 	"ProjectionRoom/internal/service"
 	"ProjectionRoom/internal/service/auth"
 	"ProjectionRoom/internal/service/mail"
+	"ProjectionRoom/internal/storage"
 )
 
 // —— 账号能力的装配（存储适配器 / 签发器 / 票据表 / 邮件通道 / 账号用例）——
@@ -49,17 +50,21 @@ func NewTicketStore(cfg *config.Config) *auth.TicketStore {
 
 // NewAccountService 构造账号用例（账号能力关闭时返回 nil）。
 //
-// mailer 可以为 nil（= 邮件能力未配置）。这里必须显式判空再塞进接口：
-// 把一个**类型化 nil**（(*mail.Mailer)(nil)）装进接口值，得到的接口**不等于 nil** ——
-// 那会让 service 侧的 `s.mail == nil` 判断失效，于是"邮件能力未配置"退化成
-// "每封邮件都投递失败"，503 永远不出现。这是 Go 里最容易静默出错的一处，
-// 所以转换只在这一个地方发生。
+// mailer 与 fileStore 都可以为 nil（= 邮件能力 / 对象存储未配置）。这里必须显式
+// 判空再塞进接口：把一个**类型化 nil**（(*mail.Mailer)(nil)、(*storage.Client)(nil)）
+// 装进接口值，得到的接口**不等于 nil** —— 那会让 service 侧的 `s.mail == nil` /
+// `s.avatar == nil` 判断失效，于是"能力未配置"退化成"每次调用都失败"，503 永远不出现。
+// 这是 Go 里最容易静默出错的一处，所以转换只在这一个地方发生。
+//
+// fileStore 是票 #74 的头像后端：它的两个方法（OwnsURL / Remove）就是
+// service.AvatarBackend 的全部要求 —— service 不认识 S3 SDK，换实现只动 storage 包。
 func NewAccountService(
 	cfg *config.Config,
 	st *service.AccountStoreAdapter,
 	signer *auth.Signer,
 	tickets *auth.TicketStore,
 	mailer *mail.Mailer,
+	fileStore *storage.Client,
 ) (*service.AccountService, error) {
 	if cfg == nil {
 		return nil, errConfigMissing
@@ -103,6 +108,9 @@ func NewAccountService(
 	}
 	if mailer != nil {
 		opts.Mail = mailer
+	}
+	if fileStore != nil {
+		opts.Avatar = fileStore
 	}
 	return service.NewAccountService(st, signer, tickets, opts)
 }

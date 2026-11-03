@@ -26,9 +26,10 @@
  *   DELETE /api/comments/:id                       → 204
  *
  * ⚠ 两处**形状适配**（服务端字段名与前端类型不一致，转换只发生在这里）：
- *   - 服务端 `author: {id, displayName}`，前端 `author` 还要 `avatarChar` / `avatarColor`。
- *     那两个是纯 UI 派生（首字母 + 名字哈希取色，逻辑与 `ui/AppHeader.vue` 一致）——
+ *   - 服务端 `author: {id, displayName, avatarUrl?}`，前端 `author` 还要
+ *     `avatarChar` / `avatarColor`。那两个是纯 UI 派生（首字母 + 名字哈希取色）——
  *     **后端契约不掺显示层**，派生放在这一层做。
+ *     `avatarUrl` 反过来是服务端事实（票 #74），所以它直接透传，不派生。
  *   - 服务端 `coverUrl`，帖子域对应的是 `images: string[]`（数组）。
  */
 import { requestJSON, query, type AuthedFetch } from '../http'
@@ -58,7 +59,7 @@ interface ServerPost {
   title: string
   content: string
   authorId: number
-  author: { id: number; displayName: string }
+  author: { id: number; displayName: string; avatarUrl?: string | null }
   images: string[]
   likeCount: number
   commentCount: number
@@ -76,7 +77,7 @@ interface ServerComment {
   id: number
   postId: number
   authorId: number
-  author: { id: number; displayName: string }
+  author: { id: number; displayName: string; avatarUrl?: string | null }
   content: string
   createdAt: string
 }

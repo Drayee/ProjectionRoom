@@ -200,7 +200,8 @@ Terms locked by [账号设置：并入档案还是保持独立流](https://githu
 
 ### Not doing
 
-- 改用户名（公开且被搜索引用）；头像上传（地图 Out of scope）；注销立即硬删选项。
+- 改用户名（公开且被搜索引用）；注销立即硬删选项。
+- ~~头像上传（地图 Out of scope）~~ —— **已落地**（票 #74 覆盖层、票 #75 裁剪器），见上节「Real avatar」。
 
 
 ## Following feed（关注流）
@@ -245,4 +246,4 @@ Terms locked by [真头像上传：存储、审核与字母头兜底](https://gi
 
 ### Doc debt
 
-`docs/ACCOUNTS.md` 的非目标「头像/图片上传」一句随实现票改写（决策已翻转）。
+~~`docs/ACCOUNTS.md` 的非目标「头像/图片上传」一句随实现票改写（决策已翻转）。~~ 已在票 #74 改完（§7.9 / §7.10）。

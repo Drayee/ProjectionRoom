@@ -69,7 +69,7 @@ func InitializeApp(cfg *config.Config) (*service.Server, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
-	accountService, err := bootstrap.NewAccountService(cfg, accountStoreAdapter, signer, ticketStore, mailer)
+	accountService, err := bootstrap.NewAccountService(cfg, accountStoreAdapter, signer, ticketStore, mailer, client)
 	if err != nil {
 		cleanup4()
 		cleanup3()

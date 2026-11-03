@@ -219,6 +219,56 @@ func (s *Store) UpdateDisplayName(ctx context.Context, id int64, displayName str
 	return nil
 }
 
+// UpdateAvatarURL 改像素头像 URL（票 #74 的 PATCH /api/me）。
+//
+// # 为什么参数是 *string 而不是 string
+//
+// `nil` = **清除**（回落到字母头），非 nil = 设成这个值。用 string 的话
+// ""（清除）与"没传"（不改）就分不开了 —— 而 PATCH 的语义正是"只改传了的字段"。
+// 与 Email / BannedReason 用指针同一口径：指针的 nil 判据才是"有没有这一件事"。
+//
+// # 为什么这里不做 URL 形态校验
+//
+// "必须是本桶的合法 key 形态"这条判据需要知道桶名与对外前缀，而那是
+// storage 客户端的事实，不是 store 的事实。放在这里就得把桶名抄进 store 包，
+// 而抄一份的后果是"改部署配置后两边不一致"。所以校验在 service 层
+// （`storage.Client.OwnsURL`），本层只做长度护栏 —— 与 UpdateDisplayName
+// 只复核"非空 + 长度"、把清洗留给 service 是同一条分工。
+//
+// # 为什么清除时不要求旧值存在
+//
+// 幂等：对一个从来没有头像的账号再清一次是正常动作（前端两个标签页各点一次），
+// 让它报错只会逼调用方先读一次。RowsAffected==0 仍然判 ErrNotFound ——
+// 那是"这个 id 不存在"，与"本来就没有头像"是两件事。
+func (s *Store) UpdateAvatarURL(ctx context.Context, id int64, avatarURL *string) error {
+	if id <= 0 {
+		return errors.New("store: UpdateAvatarURL 需要有效的 user_id")
+	}
+	if avatarURL != nil {
+		trimmed := strings.TrimSpace(*avatarURL)
+		if trimmed == "" {
+			// 空串等价于 nil（"没有"只有一种表示）。归一化在这里做，
+			// 免得库里出现 '' 与 NULL 两种"没有"。
+			avatarURL = nil
+		} else {
+			if len(trimmed) > maxAvatarURLLen {
+				return fmt.Errorf("store: avatar_url 超过 %d 个字符", maxAvatarURLLen)
+			}
+			avatarURL = &trimmed
+		}
+	}
+
+	res := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", id).
+		Update("avatar_url", avatarURL)
+	if res.Error != nil {
+		return fmt.Errorf("store: 改头像失败: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetUserStatus 改账号状态（active / banned）并维护 banned_reason。
 //
 // 语义细节：

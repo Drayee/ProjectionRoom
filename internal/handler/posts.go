@@ -130,9 +130,14 @@ type postHandler struct {
 // postAuthorView 是响应里的作者形状。**没有 avatarChar / avatarColor**：
 // 那是纯 UI 派生（首字母 + 名字哈希取色，客户端已有逻辑），后端契约不掺显示层
 // （映射放在 #26 的 real 适配层做）。
+//
+// **有 avatarUrl**（票 #74）：与上面那两个不同，它不是派生值，而是库里
+// `users.avatar_url` 的事实。可空 —— nil 表示"没有像素头像"，
+// 显示层回落字母头（决议 #54 §4）。
 type postAuthorView struct {
-	ID          int64  `json:"id"`
-	DisplayName string `json:"displayName"`
+	ID          int64   `json:"id"`
+	DisplayName string  `json:"displayName"`
+	AvatarURL   *string `json:"avatarUrl,omitempty"`
 }
 
 type postView struct {
@@ -186,7 +191,7 @@ func toPostView(p *store.Post) postView {
 		Title:     p.Title,
 		Content:   p.Content,
 		AuthorID:  p.AuthorID,
-		Author:    postAuthorView{ID: p.AuthorID, DisplayName: p.AuthorName},
+		Author:    postAuthorView{ID: p.AuthorID, DisplayName: p.AuthorName, AvatarURL: p.AuthorAvatarURL},
 		Images:    images,
 		LikeCount: p.LikeCount, CommentCount: p.CommentCount,
 		Liked:       p.Liked,
@@ -485,7 +490,10 @@ func (h *postHandler) addComment(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, commentView{
 		ID: row.ID, PostID: row.PostID, AuthorID: row.AuthorID,
-		Author:  postAuthorView{ID: row.AuthorID, DisplayName: row.AuthorName},
+		// 头像取**认证中间件带进来的 actor**（票 #74）：这是"刚发出去的那一条"，
+		// 没有经过任何列表查询，所以 `row` 上没有 avatar 列可读；而 actor 是
+		// 中间件按 token 从库里读出来的，它的 AvatarURL 就是当前事实。
+		Author:  postAuthorView{ID: row.AuthorID, DisplayName: row.AuthorName, AvatarURL: actor.AvatarURL},
 		Content: row.Content, CreatedAt: row.CreatedAt.Format(timeLayout),
 	})
 }
@@ -521,7 +529,7 @@ func (h *postHandler) listComments(c *gin.Context) {
 		r := &rows[i]
 		items = append(items, commentView{
 			ID: r.ID, PostID: r.PostID, AuthorID: r.AuthorID,
-			Author:    postAuthorView{ID: r.AuthorID, DisplayName: r.AuthorName},
+			Author:    postAuthorView{ID: r.AuthorID, DisplayName: r.AuthorName, AvatarURL: r.AuthorAvatarURL},
 			Content:   r.Content,
 			CreatedAt: r.CreatedAt.Format(timeLayout),
 		})

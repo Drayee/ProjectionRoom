@@ -64,6 +64,8 @@ interface ServerMessage {
   kind: string
   senderId: number
   senderName: string
+  /** 发件人像素头像（票 #74）：缺省/空 = 回落字母头。 */
+  senderAvatarUrl?: string | null
   recipientId?: number
   body: string
   createdAt: string
@@ -74,6 +76,8 @@ interface ServerMessage {
 interface ServerConversation {
   peerId: number
   peerName: string
+  /** 对方像素头像（票 #74）：缺省/空 = 回落字母头。 */
+  peerAvatarUrl?: string | null
   lastId: number
   lastSenderId: number
   lastBody: string
@@ -81,15 +85,17 @@ interface ServerConversation {
   unreadCount: number
 }
 
-function toPerson(id: number, displayName: string): PersonRef {
-  return { id, displayName: displayName || '未知用户', ...avatarOf(id, displayName) }
+function toPerson(id: number, displayName: string, avatarUrl?: string | null): PersonRef {
+  const person: PersonRef = { id, displayName: displayName || '未知用户', ...avatarOf(id, displayName) }
+  if (typeof avatarUrl === 'string' && avatarUrl !== '') person.avatarUrl = avatarUrl
+  return person
 }
 
 function toMessage(raw: ServerMessage): DirectMessage {
   return {
     id: raw.id,
     senderId: raw.senderId,
-    sender: toPerson(raw.senderId, raw.senderName),
+    sender: toPerson(raw.senderId, raw.senderName, raw.senderAvatarUrl),
     body: raw.body,
     createdAt: raw.createdAt,
     readAt: raw.readAt ?? '',
@@ -99,7 +105,7 @@ function toMessage(raw: ServerMessage): DirectMessage {
 
 function toConversation(raw: ServerConversation): ConversationEntry {
   return {
-    peer: toPerson(raw.peerId, raw.peerName),
+    peer: toPerson(raw.peerId, raw.peerName, raw.peerAvatarUrl),
     lastId: raw.lastId,
     lastSenderId: raw.lastSenderId,
     lastBody: raw.lastBody,

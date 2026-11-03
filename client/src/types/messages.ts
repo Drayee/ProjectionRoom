@@ -22,6 +22,8 @@ export interface PersonRef {
   displayName: string
   avatarChar: string
   avatarColor: string
+  /** 像素头像（票 #74）：缺省/空 = 回落字母头。服务端给，适配层只透传。 */
+  avatarUrl?: string | null
 }
 
 /**

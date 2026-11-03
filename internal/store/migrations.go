@@ -795,4 +795,29 @@ CHECK (target_type IN ('post', 'room', 'anime'))
 	{version: "0018_deletion_requested", statements: []string{
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at timestamptz NULL`,
 	}},
+
+	// 0019（决议 #54 §5 / 票 #74）：像素头像的公开 URL。
+	//
+	// # 为什么存 URL 而不是存对象 key
+	//
+	// 决议 #54 §6 定的是「URL 即版本」：每次上传换一个新随机 key，PATCH 直接替换
+	// 整条 URL，于是长缓存（`immutable, max-age=1y`）天然安全。存 URL 让
+	// "这一行指向哪张图"是一个可以直接读出来的事实，不需要在读取时再拼
+	// 前缀（前缀来自配置，改配置会让历史数据全部指向错误地址）。
+	//
+	// # 为什么可空、无默认值
+	//
+	// NULL = 从未设置 / 被管理员重置 / 注销清零，三种情况在显示层是同一件事：
+	// 回落到字母头（决议 #54 §4 的三态回落）。给 DEFAULT '' 会让"空串"与
+	// "NULL"变成两个都必须处理的状态，而它们没有语义差别。
+	//
+	// # 为什么是 varchar(512)
+	//
+	// 公开 URL = PublicBaseURL + "/" + bucket + "/" + `<yyyy>/<mm>/<32hex>.<ext>`。
+	// 域名与桶名都在部署侧，512 足够容纳一个很长的域名 + 一个 4 段路径，
+	// 同时仍然是一个有限长度的列（不是 text）—— 写入前服务端还会再做一次
+	// 「必须指向本桶」的形态校验（见 storage.Client.OwnsURL）。
+	{version: "0019_avatar_url", statements: []string{
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url varchar(512) NULL`,
+	}},
 }

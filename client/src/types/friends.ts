@@ -27,6 +27,13 @@ export interface PersonRef {
   displayName: string
   avatarChar: string
   avatarColor: string
+  /**
+   * 像素头像（票 #74）。缺省/空 = 回落字母头 —— **这是可选覆盖层，不是头像本身**。
+   *
+   * 与 `avatarChar` / `avatarColor` 的来源相反：那两个是前端派生，
+   * 这个由服务端给（`users.avatar_url`），适配层只透传不加工。
+   */
+  avatarUrl?: string | null
 }
 
 /**

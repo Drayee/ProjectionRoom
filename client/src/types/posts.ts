@@ -11,7 +11,7 @@ export interface Post {
   /** 纯文本正文，不包含任何 HTML（前端用 `{{ }}` + `white-space: pre-wrap` 渲染）。 */
   content: string
   authorId: number
-  author: { id: number; displayName: string; avatarChar: string; avatarColor: string }
+  author: PostAuthor
   /** 结构化图片列表（前端各自 `<img>` 渲染，绝不拼 HTML）。 */
   images: string[]
   likeCount: number
@@ -46,9 +46,29 @@ export interface Comment {
   id: number
   postId: number
   authorId: number
-  author: { id: number; displayName: string; avatarChar: string; avatarColor: string }
+  author: PostAuthor
   content: string
   createdAt: string
+}
+
+/**
+ * 帖子/评论里的作者形状。
+ *
+ * `avatarChar` / `avatarColor` 是**前端派生**的（`utils/avatar.ts` 的 `avatarOf`），
+ * 服务端只回 `{id, displayName, avatarUrl?}`，real 适配层补上那两个派生值
+ *（见 `api/real/posts.ts` 的 `toPost`）。所以这四个字段的"来源"是两种，
+ * 类型上放在一起是因为**渲染时它们就是一个整体**。
+ *
+ * `avatarUrl` 是票 #74 加的**可选覆盖层**：有值 = 显示像素头像，
+ * 缺省/空 = 回落字母头（`avatarChar` + `avatarColor`）。三态归一的判据在
+ * `UserAvatar` 里，调用方不需要判。
+ */
+export interface PostAuthor {
+  id: number
+  displayName: string
+  avatarChar: string
+  avatarColor: string
+  avatarUrl?: string | null
 }
 
 /** 帖子列表入参（排序 + 页码）。 */

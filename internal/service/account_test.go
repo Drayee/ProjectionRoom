@@ -246,6 +246,18 @@ func (f *fakeStore) UpdateDisplayName(_ context.Context, id int64, displayName s
 	return nil
 }
 
+// UpdateAvatarURL 是 #74 加的（头像覆盖层）。nil = 清除，与真 store 同义。
+func (f *fakeStore) UpdateAvatarURL(_ context.Context, id int64, avatarURL *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.AvatarURL = avatarURL
+	return nil
+}
+
 func (f *fakeStore) BumpTokenVersion(_ context.Context, id int64) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

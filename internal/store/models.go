@@ -69,6 +69,11 @@ const (
 	// maxEmailLen 与 DDL 的 varchar(254) 一致（RFC 5321 对邮件地址长度上限的规定值）。
 	maxEmailLen     = 254
 	tokenHashHexLen = 64 // sha256 的十六进制长度 = sessions.token_hash char(64)
+	// maxAvatarURLLen 与 DDL 的 varchar(512) 一致（迁移 0019）。
+	//
+	// 512 是"域名 + 桶名 + 4 段 key"的宽松上限；真正的合法性判据不是长度，
+	// 而是 storage.Client.OwnsURL 的形态校验（必须是本桶的对象）。
+	maxAvatarURLLen = 512
 )
 
 // User 对应 users 表（ACCOUNTS §4）。
@@ -102,9 +107,18 @@ type User struct {
 	// 与 Status 分成两列的理由见 migrations.go 的 0018 注释：注销是用户自己的决定、
 	// 封禁是平台的处置，混进同一个列会让审计分不清两者，而冷静期内 status 必须是 active。
 	DeletionRequestedAt *time.Time `gorm:"column:deletion_requested_at"`
-	CreatedAt           time.Time  `gorm:"column:created_at"`
-	UpdatedAt           time.Time  `gorm:"column:updated_at"`
-	LastSeenAt          time.Time  `gorm:"column:last_seen_at"`
+	// AvatarURL 是像素头像的公开 URL（票 #74 / 决议 #54 §5）；nil = 没有像素头像。
+	//
+	// **它是"覆盖层"而不是"头像本身"**（决议 #54 §4）：字母头（首字母 + 名字哈希
+	// 取色）永远由前端的 `avatarOf()` 派生，这一列只决定"要不要盖一张图上去"。
+	// 所以三态 —— 从未设置、图片 onerror、被管理员重置 —— 都回落到字母头，
+	// 界面上不出现破图。显示层的这条纪律不在这里实现，但没有这一列就无从谈起。
+	//
+	// 指针而非空串：与 Email / BannedReason 同一口径，"没有"只有一种表示。
+	AvatarURL  *string   `gorm:"column:avatar_url"`
+	CreatedAt  time.Time `gorm:"column:created_at"`
+	UpdatedAt  time.Time `gorm:"column:updated_at"`
+	LastSeenAt time.Time `gorm:"column:last_seen_at"`
 }
 
 // TableName 固定表名：GORM 默认会把 RoomMeta 复数化成 room_metas，

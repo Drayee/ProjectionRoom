@@ -32,6 +32,11 @@ interface MockPerson {
   role: 'user' | 'admin'
   /** 加入时间（RFC3339）。 */
   createdAt: string
+  /**
+   * 像素头像（票 #74）。缺省 = 字母头 —— mock 里**默认一个都没有**，
+   * 因为真实现里绝大多数账号也没有；演示时由真机脚本给本人塞一个。
+   */
+  avatarUrl?: string
 }
 
 /**
@@ -78,24 +83,28 @@ export async function getPublicProfile(userId: number): Promise<PublicProfile> {
   // 也应看到新名字，而不是目录里的旧值。
   const me = useAuthStore().profile
   if (me && me.id === userId) {
-    return {
+    const self: PublicProfile = {
       id: me.id,
       username: me.username,
       displayName: me.displayName,
       role: me.role,
       createdAt: me.createdAt,
     }
+    if (typeof me.avatarUrl === 'string' && me.avatarUrl !== '') self.avatarUrl = me.avatarUrl
+    return self
   }
 
   const person = PEOPLE.find((p) => p.id === userId)
   if (!person) throw notFound()
-  return {
+  const profile: PublicProfile = {
     id: person.id,
     username: person.username,
     displayName: person.displayName,
     role: person.role,
     createdAt: person.createdAt,
   }
+  if (typeof person.avatarUrl === 'string' && person.avatarUrl !== '') profile.avatarUrl = person.avatarUrl
+  return profile
 }
 
 /** `PATCH /api/me` 的 mock：清洗 → 回落 → 限长 → 返回权威档案。 */
@@ -116,7 +125,7 @@ export async function updateDisplayName(displayName: string): Promise<MyProfile>
   const row = PEOPLE.find((p) => p.id === me.id)
   if (row) row.displayName = cleaned
 
-  return {
+  const updated: MyProfile = {
     id: me.id,
     username: me.username,
     displayName: cleaned,
@@ -126,6 +135,9 @@ export async function updateDisplayName(displayName: string): Promise<MyProfile>
     status: me.status,
     createdAt: me.createdAt,
   }
+  // 改昵称不该动头像（票 #74 的三态设计：PATCH 里没传 avatarUrl = 不改它）。
+  if (typeof me.avatarUrl === 'string' && me.avatarUrl !== '') updated.avatarUrl = me.avatarUrl
+  return updated
 }
 
 /**

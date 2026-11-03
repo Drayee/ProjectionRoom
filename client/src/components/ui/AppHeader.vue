@@ -60,7 +60,8 @@ async function doLogout(): Promise<void> {
  */
 const avatarUser = computed(() => {
   const p = auth.profile
-  return { id: p?.id ?? 0, displayName: p?.displayName || p?.username || '?' }
+  // avatarUrl 是像素头像的**覆盖层**（票 #74）：有值才盖图，没有就是字母头。
+  return { id: p?.id ?? 0, displayName: p?.displayName || p?.username || '?', avatarUrl: p?.avatarUrl ?? '' }
 })
 
 /** 登录/注册链接带上当前路径，登录后回到原处。 */

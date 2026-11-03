@@ -40,6 +40,7 @@ function fetcher(): AuthedFetch {
 interface ServerFollowRelation {
   userId: number
   displayName: string
+  avatarUrl?: string | null
   following: boolean
   followedBy: boolean
   mutual: boolean
@@ -63,7 +64,7 @@ function toFollowsError(err: unknown): Error {
 
 /** 服务端响应 → 前端形状（服务端契约里没有显示层字段，这里也不加）。 */
 function toRelation(raw: ServerFollowRelation): FollowRelation {
-  return {
+  const relation: FollowRelation = {
     userId: raw.userId,
     displayName: raw.displayName || '未知用户',
     following: raw.following === true,
@@ -73,6 +74,10 @@ function toRelation(raw: ServerFollowRelation): FollowRelation {
     followerCount: raw.followerCount ?? 0,
     followingCount: raw.followingCount ?? 0,
   }
+  // 只有真有值才带上这个键（票 #74）：显式赋 `undefined` 会让
+  // `'avatarUrl' in relation` 与"没有这个键"给出两个答案。
+  if (typeof raw.avatarUrl === 'string' && raw.avatarUrl !== '') relation.avatarUrl = raw.avatarUrl
+  return relation
 }
 
 /** 查我与某人的关系。 */
@@ -135,6 +140,7 @@ interface ServerFollowListEntry {
   userId: number
   username: string
   displayName: string
+  avatarUrl?: string | null
   following: boolean
   followedBy: boolean
   mutual: boolean
@@ -143,7 +149,7 @@ interface ServerFollowListEntry {
 
 /** 名单方向 → 服务端的 `?tab=` 值（只有三个，黑名单不在这里）。 */
 function toListEntry(raw: ServerFollowListEntry): FollowListEntry {
-  return {
+  const entry: FollowListEntry = {
     userId: raw.userId,
     username: raw.username ?? '',
     displayName: raw.displayName || '未知用户',
@@ -152,6 +158,8 @@ function toListEntry(raw: ServerFollowListEntry): FollowListEntry {
     mutual: raw.mutual === true,
     canDm: raw.canDm === true,
   }
+  if (typeof raw.avatarUrl === 'string' && raw.avatarUrl !== '') entry.avatarUrl = raw.avatarUrl
+  return entry
 }
 
 /**

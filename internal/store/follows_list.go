@@ -55,6 +55,8 @@ type FollowListEntry struct {
 	Username string
 	// DisplayName 是昵称。
 	DisplayName string
+	// AvatarURL 是像素头像（票 #74）；nil = 没有，显示层回落字母头。
+	AvatarURL *string
 	// Following 是"我关注了 TA"。
 	Following bool
 	// FollowedBy 是"TA 关注了我"。
@@ -109,7 +111,7 @@ func (s *Store) ListFollowList(ctx context.Context, userID int64, tab FollowList
 	}
 
 	db := s.db.WithContext(ctx).Table("follows AS f").
-		Select(`p.id AS user_id, p.username, p.display_name,
+		Select(`p.id AS user_id, p.username, p.display_name, `+maskedAvatarSQL("p")+` AS avatar_url,
 			EXISTS (SELECT 1 FROM follows x WHERE x.follower_id = ? AND x.followee_id = p.id) AS following,
 			EXISTS (SELECT 1 FROM follows y WHERE y.follower_id = p.id AND y.followee_id = ?) AS followed_by,
 			f.created_at AS since`, userID, userID).
@@ -125,7 +127,7 @@ func (s *Store) ListFollowList(ctx context.Context, userID int64, tab FollowList
 	case FollowListFollowers:
 		// 粉丝：f 应当是"TA→我"，所以 join 与 where 都要换方向。
 		db = s.db.WithContext(ctx).Table("follows AS f").
-			Select(`p.id AS user_id, p.username, p.display_name,
+			Select(`p.id AS user_id, p.username, p.display_name, `+maskedAvatarSQL("p")+` AS avatar_url,
 				EXISTS (SELECT 1 FROM follows x WHERE x.follower_id = ? AND x.followee_id = p.id) AS following,
 				EXISTS (SELECT 1 FROM follows y WHERE y.follower_id = p.id AND y.followee_id = ?) AS followed_by,
 				f.created_at AS since`, userID, userID).

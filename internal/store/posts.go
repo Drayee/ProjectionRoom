@@ -80,6 +80,14 @@ type Post struct {
 	//（N 次单查更糟）。`gorm:"->"` 让它只读，Create/Update 不会试图写这一列。
 	AuthorName string `gorm:"column:author_name;->"`
 
+	// AuthorAvatarURL 同样是 JOIN 产物：作者的像素头像（票 #74）；NULL = 没有。
+	//
+	// 与 AuthorName 一起取出而不是让前端另打一发：列表里每一行都要头像，
+	// 分开取就是 N 次请求，而那个 N 恰好等于"这一页有几条"。
+	// 注销账号这里恒为 NULL（`maskedAvatarSQL` 遮掉了）—— 照片比名字更能
+	// 指认一个人，署名脱敏了却还留着照片等于只遮了一半。
+	AuthorAvatarURL *string `gorm:"column:author_avatar_url;->"`
+
 	// Liked 同样是查询时算出的**只读**字段（前端 Post.liked 是必填形状）。
 	Liked bool `gorm:"->"`
 
@@ -103,6 +111,8 @@ type PostComment struct {
 	Content    string    `gorm:"column:content"`
 	CreatedAt  time.Time `gorm:"column:created_at"`
 	AuthorName string    `gorm:"column:author_name;->"`
+	// AuthorAvatarURL 见 Post.AuthorAvatarURL（票 #74）。
+	AuthorAvatarURL *string `gorm:"column:author_avatar_url;->"`
 }
 
 func (PostComment) TableName() string { return "post_comments" }
@@ -269,7 +279,8 @@ func (s *Store) ListPosts(ctx context.Context, sort ListPostsSort, limit, offset
 
 	db := s.db.WithContext(ctx).
 		Table("posts AS p").
-		Select("p.*, " + maskedDisplayNameSQL("u") + " AS author_name").
+		Select("p.*, " + maskedDisplayNameSQL("u") + " AS author_name, " +
+			maskedAvatarSQL("u") + " AS author_avatar_url").
 		Joins("JOIN users u ON u.id = p.author_id").
 		Order(order + ", p.id DESC")
 
@@ -352,7 +363,8 @@ func (s *Store) ListAnimeThreads(ctx context.Context, animeID int64, sort ListAn
 	var rows []Post
 	err := s.db.WithContext(ctx).
 		Table("posts AS p").
-		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name").
+		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name, "+
+			maskedAvatarSQL("u")+" AS author_avatar_url").
 		Joins("JOIN users u ON u.id = p.author_id").
 		Where("p.anime_id = ?", animeID).
 		Order(order + ", p.id DESC").
@@ -428,7 +440,8 @@ func (s *Store) ListPostsByAuthor(ctx context.Context, authorID int64, limit, of
 
 	db := s.db.WithContext(ctx).
 		Table("posts AS p").
-		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name").
+		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name, "+
+			maskedAvatarSQL("u")+" AS author_avatar_url").
 		Joins("JOIN users u ON u.id = p.author_id").
 		Where("p.author_id = ?", authorID).
 		Order("p.created_at DESC, p.id DESC")
@@ -534,7 +547,8 @@ func (s *Store) PostByID(ctx context.Context, id int64, viewerID int64) (*Post, 
 	var row Post
 	err := s.db.WithContext(ctx).
 		Table("posts AS p").
-		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name").
+		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name, "+
+			maskedAvatarSQL("u")+" AS author_avatar_url").
 		Joins("JOIN users u ON u.id = p.author_id").
 		Where("p.id = ?", id).
 		Take(&row).Error
@@ -635,7 +649,8 @@ func (s *Store) ListPostComments(ctx context.Context, postID int64, limit, offse
 	var rows []PostComment
 	err := s.db.WithContext(ctx).
 		Table("post_comments AS c").
-		Select("c.*, "+maskedDisplayNameSQL("u")+" AS author_name").
+		Select("c.*, "+maskedDisplayNameSQL("u")+" AS author_name, "+
+			maskedAvatarSQL("u")+" AS author_avatar_url").
 		Joins("JOIN users u ON u.id = c.author_id").
 		Where("c.post_id = ?", postID).
 		Order("c.created_at ASC, c.id ASC").

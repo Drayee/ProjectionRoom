@@ -127,6 +127,10 @@ function readStoredProfile(): AuthProfile | null {
     // 老缓存里没有这个键（它是 #30 加的）：缺就保持 false，界面据此说"服务端未返回"。
     // 绝不把"缓存里没有"当成"未读数已知且为 0"。
     unreadKnown: value.unreadKnown === true,
+    // 头像地址（#74）：可空且**缺就不写键**。写成 `avatarUrl: undefined` 会让
+    // `'avatarUrl' in profile` 与"从没有过头像"给出两个不同答案，而覆盖层
+    // 正是按"有地址才渲染图片"来判断的。
+    ...(typeof value.avatarUrl === 'string' && value.avatarUrl !== '' ? { avatarUrl: value.avatarUrl } : {}),
   }
 }
 

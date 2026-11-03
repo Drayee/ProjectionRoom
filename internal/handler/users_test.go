@@ -32,6 +32,10 @@ import (
 //
 // 与 service.PublicProfile 的结构体标签逐字对应；少一个（例如 email）会在这里
 // 立刻红，而不是等到某天有人从档案接口里读到别人的邮箱。
+// ⚠ avatarUrl（票 #74）**不在这里**：它带 `omitempty`，没有像素头像时整个键
+// 不出现（那正是"没有头像"的正确表达 —— 前端判 `avatarUrl != null` 决定要不要
+// 渲染 <img>）。把它列进"必须出现"的白名单会让每个没设头像的账号的档案
+// 都红一条。它的出现/缺席由 avatar_handler_test.go 单独判。
 var publicProfileKeys = []string{
 	"id",
 	"username",

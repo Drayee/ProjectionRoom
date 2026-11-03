@@ -92,6 +92,11 @@ func (a *AccountStoreAdapter) UpdateDisplayName(ctx context.Context, id int64, d
 	return a.store.UpdateDisplayName(ctx, id, displayName)
 }
 
+// UpdateAvatarURL 改像素头像（票 #74）；nil = 清除。
+func (a *AccountStoreAdapter) UpdateAvatarURL(ctx context.Context, id int64, avatarURL *string) error {
+	return a.store.UpdateAvatarURL(ctx, id, avatarURL)
+}
+
 func (a *AccountStoreAdapter) SetPasswordHash(ctx context.Context, id int64, hash string) error {
 	return a.store.SetPasswordHash(ctx, id, hash)
 }

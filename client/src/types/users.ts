@@ -23,6 +23,16 @@ export interface PublicProfile {
    * 决定"能不能点某个按钮"—— 那必须由服务端 `RequireAdmin` 回答。
    */
   role: string
+  /**
+   * 像素头像的 URL（票 #74 / 决议 #54 §5）。
+   *
+   * **与 avatarChar / avatarColor 不同，这个字段是服务端事实**（库里那一列），
+   * 不是显示层派生 —— 所以它属于这个契约，而那两个不属于。
+   *
+   * 可选：服务端用 `omitempty`，没有头像时整个键不出现。缺省/空串/null
+   * 三种"没有"在 `UserAvatar` 里统一回落字母头，调用方不需要判。
+   */
+  avatarUrl?: string | null
   /** 加入时间（RFC3339 字符串）。空串 = 服务端没返回，界面显示「服务端未返回」。 */
   createdAt: string
 }
@@ -43,6 +53,8 @@ export interface MyProfile {
   role: string
   /** active | banned。 */
   status: string
+  /** 像素头像 URL（票 #74）；没有时缺省/空串，显示层回落字母头。 */
+  avatarUrl?: string | null
   createdAt: string
 }
 

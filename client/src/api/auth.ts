@@ -41,6 +41,14 @@ export interface AuthUser {
    */
   createdAt: string
   /**
+   * 像素头像地址（票 #74）。空/缺省 = 没有像素头像，显示层回落字母头。
+   *
+   * **可选**的理由与 `emailVerified` 相同：服务端 `*string` + omitempty，
+   * 没有头像时这个键**不存在**。写成必填会让"没设置过"与"字段没返回"
+   * 在类型层面被抹平 —— 而前者是常态（绝大多数账号没有像素头像）。
+   */
+  avatarUrl?: string | null
+  /**
    * 未读私聊数（wayfinder #31 把它挂在 `/me` 上，#30 消费）。
    *
    * **可选**的理由与 `emailVerified` 相同：服务端在 Store 缺失（账号能力关闭 /
@@ -221,6 +229,11 @@ function normalizeUser(raw: unknown): AuthUser {
   // 注销起点同理：只有服务端真的给了字符串才带上。
   if (typeof user.deletionRequestedAt === 'string' && user.deletionRequestedAt !== '') {
     normalized.deletionRequestedAt = user.deletionRequestedAt
+  }
+  // 像素头像（票 #74）：服务端 `*string` + omitempty，没有头像时键不存在。
+  // 归一成"有值才带"，于是 `profile.avatarUrl === undefined` 是**唯一**的"没有"表示。
+  if (typeof user.avatarUrl === 'string' && user.avatarUrl !== '') {
+    normalized.avatarUrl = user.avatarUrl
   }
   return normalized
 }

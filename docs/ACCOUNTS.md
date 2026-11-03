@@ -20,7 +20,7 @@
 
 ### 非目标（本期明确不做）
 - 邮箱验证与找回密码（只留字段）；TLS（部署决定，见 §11 风险）。
-- 头像/图片上传（用内置图标集，避免引入对象存储与外链直出风险）。
+- ~~头像/图片上传（用内置图标集，避免引入对象存储与外链直出风险）~~ —— **已落地**：对象存储（MinIO / S3 兼容）是 `internal/storage` 的唯一职责，`POST /api/uploads` 早已可用；头像见 §7.9（票 #74 覆盖层）与 §7.10（票 #75 裁剪器与审核）。
 - 多实例水平扩展（因此不需要 Redis / 消息队列；在线态与人数都在单实例内存里）。
 - 房间历史录像、消息全文搜索、端到端加密私聊。
 
@@ -69,6 +69,7 @@ users
   token_version int         NOT NULL DEFAULT 1   -- +1 即让该用户全部 access token 立即失效
   banned_reason text NULL
   deletion_requested_at timestamptz NULL         -- 票 #73：非空 = 在注销冷静期里（可空无默认值）
+  avatar_url    varchar(512) NULL                 -- 票 #74：像素头像的**覆盖层**地址，NULL = 只用字母头
   created_at / updated_at / last_seen_at
 
 sessions                                  -- refresh token（不透明随机串，库里只存 sha256）
@@ -501,6 +502,78 @@ GET /api/users/:id/rooms?limit&offset   → { items: { roomId, title, createdAt,
 **验收**：`test/script/verify-account-deletion.mjs`（真后端；14 条判据 + 可选 `--purge`）。
 `--purge` 要求实例把 `PR_DELETION_GRACE` 压到分钟级、`PR_DELETION_SWEEP_INTERVAL=1s`，
 且"行真被删了"的证据是**同名账号能重新注册**，只看 404 分不清"标记着"与"删了"。
+
+### 7.9 头像覆盖层（票 #74；决议 #54）
+
+**头像只是覆盖层，不是身份的另一份真源。** `utils/avatar.ts` 的 `avatarOf()`
+（首字母 + 名字哈希取色）始终是本体，`avatar_url` 有值才盖上去 —— 所以"没有头像"
+与"头像加载失败"在界面上是同一件事：回到那个有辨识度的色块 + 字母。
+
+**降级三态**（缺一条就会看到破图或白圈）：
+
+| 情形 | 行为 |
+| :--- | :--- |
+| `avatarUrl` 为空 / `null` | 不渲染 `<img>`，只有字母头 |
+| 图片解码失败（`onerror`） | 把该 URL 记进 `utils/avatarImage.ts` 的模块级 `failedAvatarUrls`，组件改回字母头 |
+| 本次会话里已经失败过 | 直接不渲染 `<img>`，**不再重试** |
+
+那个 Set **必须是 `reactive()`**：`has()` 是在 computed 里被读的，普通 `Set`
+加进去不触发重渲染 —— 症状是"失败后永远空白"，且只在真机上才看得见。
+刷新页面清空（新会话值得再试一次）。
+
+**数据**：`users.avatar_url varchar(512) NULL`（迁移 `0019_avatar_url`，
+`ADD COLUMN IF NOT EXISTS`）。**可空且无默认值**是语义的一部分：NULL 同时表示
+"从没设置过 / 被管理端重置 / 注销清零"。**没有新表、没有新开关域。**
+
+**零新端点**：上传走现成的 `POST /api/uploads`（拿 `{url}`，201），再
+`PATCH /api/me {avatarUrl}`。那个 `PATCH` 的**三态**是这张票最容易写错的地方：
+
+| 请求体 | 含义 |
+| :--- | :--- |
+| 没有 `avatarUrl` 这个键 | 不改头像（只改昵称） |
+| `"avatarUrl": null` | 清除 |
+| `"avatarUrl": "<url>"` | 设置为该地址 |
+
+实现必须**先 `c.GetRawData()` 解成 `map[string]json.RawMessage` 判键**、再解结构体：
+`ShouldBindJSON` 会把 body 读走，反过来的顺序会让"键缺席"与"null"不可分辨。
+两个字段都没给 → 400（不是静默成功）。**头像先落库、昵称后落库**：两者都可能失败，
+更可能失败的那个先做，就不会留下"昵称改了头像没改"的半成功。返回体是 `{"user": …}`。
+
+**URL 即版本**：每次上传都是新随机 key，换头像就是换 URL，旧值直接替换；
+**同 key 覆盖明确否决**（浏览器缓存会把旧图当新图显示）。旧对象走
+`AsyncJobSink.SubmitJob` 异步删（I4），**删失败只记日志**——事实上传已经成功，
+因为一次存储抖动就让用户重传是错的。**同 URL 再设一次是幂等的**，不会去删它自己。
+
+**只验不重编码**（go.mod 零图像依赖，决议 #54 §1）。安全因此全落在
+"这个地址是不是本桶的合法对象"上，而不是"图片内容是否安全"：
+
+- `storage.OwnsURL(u)`：前缀必须**恰好**是 `publicURL("")`（**不是**"包含 `/bucket/`"——
+  否则 `https://evil.com/x/pr-files/...` 会通过），余下交给
+- `isObjectKey(key)`：3 段、年 4 位数字、月 2 位数字、stem **恰好** 32 位小写 hex、
+  扩展名命中 `allowedImageTypes`（JPEG/PNG/GIF/WebP，**显式禁 SVG** —— SVG 是 XML，
+  可内嵌 `<script>`，同源托管即存储型 XSS）。
+- 判的是**权限**不是**状态**：查对象是否存在要一次网络往返，而且"先置空再删对象"
+  的顺序会让它必然失败。
+- `PublicBaseURL` 带不带尾斜杠都要通过（运维很容易写成 `https://cdn.example.com/`，
+  不 TrimSuffix 会导致"自己发的 URL 全被判非法"）。
+
+**未配 `PR_STORAGE_*`** 时带值 `PATCH` 回 **503**（`CodeAuthUnavailable`，
+不是 400 —— 请求本身没错，是部署没开）；设置区据此改用 `CapabilityNotice`，
+而不是让用户点了没反应。探测走 `api/avatar.ts` 的 `probeAvatarUpload()`，
+**判据是状态码不是响应体**：那条路由只注册了 POST，空请求在已注册时会于解析
+multipart 之前返回 400（不碰存储、不写任何东西）。
+
+**显示层**：`ui/AvatarImage.vue` 一层 `<img>`，`object-fit: cover` 是"服务端不重编码"
+的执行点（非方图不会拉伸变形）；`alt=""` + `aria-hidden="true"`（装饰性，无障碍名
+由外层容器给）。**容器必须自带 `position: relative; overflow: hidden`** ——
+覆盖层是 `position: absolute; inset: 0`，漏了圆角裁剪会让它溢出圆外。
+
+**入口只在 `/me?tab=settings`**（`MeAvatarBlock.vue`）；顶栏与别人看到的档案页
+**不加**编辑态 —— 顶栏头像的落点是 `/me`，管理动作集中在一处（票 #69 的纪律）。
+
+**验收**：`test/script/verify-avatar-overlay.mjs`（15 条，**不需要后端**，
+mock 域 + 自起静态服务器即可：空态 / 有值态 / onerror 回落 / 会话内不重试 /
+切分区再回来 / 本人视角 / 四处源码级）。裁剪器与频控、人机验证、管理端重置见 §7.10。
 
 ## 8. 管理端
 

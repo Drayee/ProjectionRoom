@@ -8,7 +8,8 @@
  *   2. **退出所有设备** —— 接既有的 `api.auth.logoutAll`；
  *   3. **账号只读信息** —— 注册时间（RelativeTime absolute 形）/ 角色 / 邮箱 / 邮箱验证态。
  *
- * 换绑邮箱（#72）与注销（#73）已接进本块；头像（#74/#75）仍是独立票。
+ * 换绑邮箱（#72）与注销（#73）已接进本块；头像拆在 `MeAvatarBlock.vue`
+ *（#74 入口占位、#75 裁剪器）—— 那个块自带一套状态机，塞进来会让本文件失控。
  *
  * ## 两条改密门为什么并存
  *
@@ -34,6 +35,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import Button from '../../ui/Button.vue'
 import RelativeTime from '../../ui/RelativeTime.vue'
+import MeAvatarBlock from './MeAvatarBlock.vue'
 import { toHttpError, NETWORK_MESSAGE } from '../../../api/http'
 import { createIdempotencySlot } from '../../../utils/idempotency'
 import { useAuthStore } from '../../../stores/auth'
@@ -403,6 +405,9 @@ watch(
 
 <template>
   <div class="settings">
+    <!-- ---------- 头像（票 #74 入口 / #75 裁剪器） ---------- -->
+    <MeAvatarBlock />
+
     <!-- ---------- 改密码 ---------- -->
     <section class="card" aria-labelledby="me-password-head">
       <h2 id="me-password-head" class="sect-title">改密码</h2>

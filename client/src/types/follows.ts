@@ -28,6 +28,8 @@ export interface FollowRelation {
   userId: number
   /** 对方的显示名。 */
   displayName: string
+  /** 对方的像素头像（票 #74）：缺省/空 = 回落字母头。 */
+  avatarUrl?: string | null
   /** 我关注了对方。 */
   following: boolean
   /** 对方关注了我。 */
@@ -81,6 +83,8 @@ export interface FollowListEntry {
   userId: number
   username: string
   displayName: string
+  /** 像素头像（票 #74）：缺省/空 = 回落字母头。 */
+  avatarUrl?: string | null
   following: boolean
   followedBy: boolean
   mutual: boolean

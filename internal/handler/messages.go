@@ -129,6 +129,8 @@ type messageView struct {
 	Kind       string `json:"kind"`
 	SenderID   int64  `json:"senderId"`
 	SenderName string `json:"senderName"`
+	// SenderAvatarURL 是发件人头像（票 #74）；nil = 没有（含注销后置空）。
+	SenderAvatarURL *string `json:"senderAvatarUrl,omitempty"`
 	// RecipientID 对私聊是必填；用指针是因为 `kind=room` 时它必须缺席
 	// （omitempty 对 0 值有效，而 0 是"没有收件人"的合法表示）。
 	RecipientID *int64 `json:"recipientId,omitempty"`
@@ -145,26 +147,29 @@ func toMessageView(m *store.Message) messageView {
 		readAt = m.ReadAt.Format(timeLayout)
 	}
 	return messageView{
-		ID:          m.ID,
-		Kind:        m.Kind,
-		SenderID:    m.SenderID,
-		SenderName:  m.SenderName,
-		RecipientID: m.RecipientID,
-		Body:        m.Body,
-		CreatedAt:   m.CreatedAt.Format(timeLayout),
-		ReadAt:      readAt,
+		ID:              m.ID,
+		Kind:            m.Kind,
+		SenderID:        m.SenderID,
+		SenderName:      m.SenderName,
+		SenderAvatarURL: m.SenderAvatarURL,
+		RecipientID:     m.RecipientID,
+		Body:            m.Body,
+		CreatedAt:       m.CreatedAt.Format(timeLayout),
+		ReadAt:          readAt,
 	}
 }
 
 // conversationView 是会话列表的一行。
 type conversationView struct {
-	PeerID      int64  `json:"peerId"`
-	PeerName    string `json:"peerName"`
-	LastID      int64  `json:"lastId"`
-	LastSender  int64  `json:"lastSenderId"`
-	LastBody    string `json:"lastBody"`
-	LastSentAt  string `json:"lastSentAt"`
-	UnreadCount int64  `json:"unreadCount"`
+	PeerID   int64  `json:"peerId"`
+	PeerName string `json:"peerName"`
+	// PeerAvatarURL 是对方头像（票 #74）；nil = 没有。
+	PeerAvatarURL *string `json:"peerAvatarUrl,omitempty"`
+	LastID        int64   `json:"lastId"`
+	LastSender    int64   `json:"lastSenderId"`
+	LastBody      string  `json:"lastBody"`
+	LastSentAt    string  `json:"lastSentAt"`
+	UnreadCount   int64   `json:"unreadCount"`
 }
 
 // list 是 `GET /api/messages?peer=<userId>&before=<id>`（§7.2 的冻结契约）。
@@ -220,13 +225,14 @@ func (h *messageHandler) conversations(c *gin.Context) {
 	items := make([]conversationView, 0, len(rows))
 	for _, r := range rows {
 		items = append(items, conversationView{
-			PeerID:      r.PeerID,
-			PeerName:    r.PeerName,
-			LastID:      r.LastID,
-			LastSender:  r.LastSender,
-			LastBody:    r.LastBody,
-			LastSentAt:  r.LastSentAt.Format(timeLayout),
-			UnreadCount: r.UnreadCount,
+			PeerID:        r.PeerID,
+			PeerName:      r.PeerName,
+			PeerAvatarURL: r.PeerAvatarURL,
+			LastID:        r.LastID,
+			LastSender:    r.LastSender,
+			LastBody:      r.LastBody,
+			LastSentAt:    r.LastSentAt.Format(timeLayout),
+			UnreadCount:   r.UnreadCount,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})

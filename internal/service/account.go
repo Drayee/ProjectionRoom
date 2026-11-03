@@ -247,6 +247,11 @@ type AccountStore interface {
 	// 走一遍 CreateUser 的整行校验（口令哈希非空、邮箱形状、建号不能带验证时间）
 	// 会让"只想改个名字"被一堆与它无关的规则挡住。
 	UpdateDisplayName(ctx context.Context, id int64, displayName string) error
+	// UpdateAvatarURL 改像素头像（票 #74）；nil = 清除。
+	//
+	// 与 UpdateDisplayName 并列：同样是"改我自己的一列"，同样不做内容清洗
+	//（URL 形态校验需要桶名，那是 storage 的事实，见 AvatarBackend）。
+	UpdateAvatarURL(ctx context.Context, id int64, avatarURL *string) error
 	// SetPasswordHash 直接换口令哈希（OTP 改密路径用；链接令牌那条走
 	// ConsumePasswordReset，它在同一个事务里连撤销会话一起做）。
 	SetPasswordHash(ctx context.Context, id int64, hash string) error
@@ -365,6 +370,14 @@ type AccountService struct {
 	// 成为可能，而那正是这个功能最不能出的错。
 	deletionGrace time.Duration
 
+	// avatar 是头像对象存储的窄出口（票 #74）；**nil = 对象存储未配置**。
+	//
+	// nil 时 `UpdateMyAvatarURL` 一律回 ErrAvatarUnavailable（503）：
+	// 没配 PR_STORAGE_* 的部署里 `POST /api/uploads` 根本不存在，
+	// 前端也拿不到本桶的 URL，所以"设头像"这条路径应当以同样的理由拒绝 ——
+	// 而不是把任意外链写进库（决议 #54 §8 明确否决了外链直填）。
+	avatar AvatarBackend
+
 	// hashing 是并发口令哈希闸门（容量见 DefaultHashingConcurrency）。
 	hashing chan struct{}
 
@@ -407,6 +420,14 @@ type AccountOptions struct {
 	//
 	// ⚠ 它废掉"证明邮箱归属"这件事。装配层会拒绝"开着它且 SMTP 已配置"的组合。
 	OTPDevEcho bool
+
+	// Avatar 是头像对象存储的窄出口（票 #74）；**可以为 nil**（= 未配置）。
+	//
+	// 与 Mail 同一条约定：能力缺失不是启动错误，只让相关端点回 503。
+	// 之所以要它而不是让 handler 自己判：改头像的**领域规则**（旧对象异步删、
+	// 新 URL 必须属于本桶）在 service 里，把这些规则的一半留在 handler 会让
+	// "管理端重置"（票 #75）与"本人换头像"两条路各写一份。
+	Avatar AvatarBackend
 
 	// DeletionGrace 是注销冷静期长度（票 #73）；<= 0 报错。
 	//
@@ -468,10 +489,13 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 	}
 
 	return &AccountService{
-		store:          st,
-		signer:         signer,
-		ticket:         tickets,
-		mail:           opts.Mail,
+		store:  st,
+		signer: signer,
+		ticket: tickets,
+		mail:   opts.Mail,
+		// avatar 是对象存储的窄出口（票 #74）。nil = 未配置，此时改头像
+		// 返回 ErrAvatarUnavailable（→ 503），而不是静默写一个死链进库。
+		avatar:         opts.Avatar,
 		bcryptCost:     cost,
 		refreshTTL:     opts.RefreshTTL,
 		emailVerifyTTL: opts.EmailVerifyTTL,
@@ -507,6 +531,12 @@ type Profile struct {
 	Status        string     `json:"status"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	LastSeenAt    *time.Time `json:"lastSeenAt,omitempty"`
+	// AvatarURL 是像素头像的公开 URL（票 #74）；nil = 没有，显示层回落字母头。
+	//
+	// 它出现在**本人**档案里，也出现在**公开**档案里（PublicProfile）——
+	// 与 DeletionRequestedAt 相反：头像是要给别人看的，注销状态不是。
+	AvatarURL *string `json:"avatarUrl,omitempty"`
+
 	// DeletionRequestedAt 是注销冷静期的起点（票 #73）；nil = 不在冷静期。
 	//
 	// 它出现在**本人**的档案里（Profile），**不出现在**公开档案（PublicProfile）：
@@ -528,6 +558,7 @@ func ProfileOf(u *store.User) Profile {
 		EmailVerified:       u.Email != nil && u.EmailVerifiedAt != nil,
 		Role:                u.Role,
 		Status:              u.Status,
+		AvatarURL:           u.AvatarURL,
 		DeletionRequestedAt: u.DeletionRequestedAt,
 		CreatedAt:           u.CreatedAt,
 	}
@@ -958,7 +989,12 @@ type PublicProfile struct {
 	ID          int64  `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
-	Role        string `json:"role"`
+	// AvatarURL 是像素头像（票 #74）；nil = 没有，显示层回落字母头。
+	//
+	// 与 avatarChar/avatarColor 不同，**这个字段是服务端事实**（库里那一列），
+	// 不是显示层派生。所以它可以出现在公开契约里；色板仍然只有一个源（前端）。
+	AvatarURL *string `json:"avatarUrl,omitempty"`
+	Role      string  `json:"role"`
 	// CreatedAt 是加入时间（RFC3339）。用字符串而不是 time.Time：
 	// 公开档案是纯展示页，前端只需要能格式化，不需要时区语义。
 	CreatedAt string `json:"createdAt"`
@@ -977,6 +1013,7 @@ func PublicProfileOf(u *store.User) PublicProfile {
 		ID:          u.ID,
 		Username:    u.Username,
 		DisplayName: u.DisplayName,
+		AvatarURL:   u.AvatarURL,
 		Role:        u.Role,
 		CreatedAt:   u.CreatedAt.UTC().Format(time.RFC3339),
 	}

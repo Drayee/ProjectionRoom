@@ -16,6 +16,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -43,6 +44,12 @@ const maxDisplayNamePatchRunes = 4 * service.MaxDisplayNameLen
 // （设置页只有这一个可编辑字段），后者是"整个请求有问题"。
 const CodeDisplayNameInvalid = "DISPLAY_NAME_INVALID"
 
+// CodeAvatarURLInvalid 是"这个头像地址不是我们发的"（票 #74）。
+//
+// 与 DISPLAY_NAME_INVALID 分开：一个是名字内容不合规、一个是地址来源不可信，
+// 前端要给的下一步不同（改名 vs 重新走上传）。
+const CodeAvatarURLInvalid = "AVATAR_URL_INVALID"
+
 // UserProfileService 是本文件需要的账号能力（wayfinder #33）。
 //
 // 为什么单独声明一个窄接口而不是直接用 AccountService：本文件只需要两个方法，
@@ -53,6 +60,8 @@ const CodeDisplayNameInvalid = "DISPLAY_NAME_INVALID"
 type UserProfileService interface {
 	PublicProfile(ctx context.Context, userID int64) (service.PublicProfile, error)
 	UpdateMyDisplayName(ctx context.Context, userID int64, displayName string) (service.Profile, error)
+	// UpdateMyAvatarURL 改像素头像（票 #74）；nil = 清除。
+	UpdateMyAvatarURL(ctx context.Context, userID int64, avatarURL *string) (service.Profile, error)
 }
 
 // registerUserProfileRoutes 注册公开档案与本人资料路由。
@@ -150,6 +159,28 @@ func (h *userProfileHandler) publicProfile(c *gin.Context) {
 // 指针的**nil 判据**才是"用户有没有传这个字段"的唯一答案。
 type patchMeRequest struct {
 	DisplayName *string `json:"displayName"`
+	// AvatarURL 是像素头像（票 #74）。**指针同样是刻意的**，但这里有三态：
+	//
+	//	字段缺席      → nil，且 "avatarUrl" 不在原始 JSON 里 → 这次不改头像
+	//	"avatarUrl": null → 指针为 nil，但键在 → **清除**（回落字母头）
+	//	"avatarUrl": "..." → 设成这个 URL（必须属于本桶）
+	//
+	// 所以判"有没有传这个字段"不能只看指针 nil，必须看原始 JSON 里有没有这个键
+	//（见 patchMe 里的 avatarURLPresent）。这是 #37 那个「无条件传 &req.CoverURL
+	// 使『没传』变成『清空封面』」的坑的正面版本：那时是分不出，
+	// 这里是**必须分开**——"没传"与"清空"在 PATCH 语义下是两件事。
+	AvatarURL *string `json:"avatarUrl"`
+}
+
+// avatarURLPresent 判原始 JSON 里有没有 avatarUrl 这个键。
+//
+// 用 map 再解一次而不是给 AvatarURL 换一个包装类型（如 **string）：
+// 双重指针在 JSON 上确实能区分三种情况，但它在 Go 侧读起来是 `**string`，
+// 而本文件已经因为"指针的 nil 判据"被坑过一次 —— 让它显式一点更安全。
+// 代价是多一次小对象解析（请求体只有几十字节）。
+func avatarURLPresent(raw map[string]json.RawMessage) bool {
+	_, ok := raw["avatarUrl"]
+	return ok
 }
 
 // patchMe 是 `PATCH /api/me`（改自己的昵称，必须登录）。
@@ -173,31 +204,67 @@ func (h *userProfileHandler) patchMe(c *gin.Context) {
 		return
 	}
 
-	var req patchMeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	// 先拿原始字节再解两次：一次解成 map 只为判"有没有 avatarUrl 这个键"
+	//（三态需要，见 patchMeRequest 的说明），一次解成结构体。
+	//
+	// 顺序不能反：ShouldBindJSON 会把 body 读走，之后 GetRawData 拿不到东西。
+	raw, err := c.GetRawData()
+	if err != nil {
 		adminBadRequest(c, "请求体不是合法 JSON")
 		return
 	}
-	if req.DisplayName == nil {
-		adminBadRequest(c, "至少要指定 displayName")
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		adminBadRequest(c, "请求体不是合法 JSON")
+		return
+	}
+	var req patchMeRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		adminBadRequest(c, "请求体不是合法 JSON")
 		return
 	}
 
-	// 长度预检（清洗**之前**，见 maxDisplayNamePatchRunes 的说明）。
-	// 超长直接 400：清洗会先把零宽/Bidi 去掉，所以这里给的是"清洗后仍可能合法"
-	// 的宽松上限，只挡住明显失控的 body。
-	if len([]rune(*req.DisplayName)) > maxDisplayNamePatchRunes {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
-			"error": "昵称太长",
-			"code":  CodeDisplayNameInvalid,
-		})
+	wantsName := req.DisplayName != nil
+	wantsAvatar := avatarURLPresent(keys)
+	if !wantsName && !wantsAvatar {
+		adminBadRequest(c, "至少要指定 displayName 或 avatarUrl")
 		return
 	}
 
-	p, err := h.svc.UpdateMyDisplayName(c.Request.Context(), actor.ID, *req.DisplayName)
-	if err != nil {
-		h.writeProfileError(c, err)
-		return
+	// 两个字段可以同时改（一次请求改两样），但**各自独立校验、独立落库**：
+	// 头像校验失败时昵称也不该生效 —— 半成功比全失败更难解释。
+	//
+	// 所以昵称先只做**预检**（长度），真正的写入放到两个字段都校验完之后。
+	if wantsName {
+		// 长度预检（清洗**之前**，见 maxDisplayNamePatchRunes 的说明）。
+		// 超长直接 400：清洗会先把零宽/Bidi 去掉，所以这里给的是"清洗后仍可能合法"
+		// 的宽松上限，只挡住明显失控的 body。
+		if len([]rune(*req.DisplayName)) > maxDisplayNamePatchRunes {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "昵称太长",
+				"code":  CodeDisplayNameInvalid,
+			})
+			return
+		}
+	}
+
+	// 头像先落（它有两个额外的领域闸门：本桶校验与"存储没配"）。
+	// 先跑它是有意的：它是**更可能失败**的那一半，先失败就不会留下
+	// "昵称改了、头像没改"的半成功。
+	var p service.Profile
+	if wantsAvatar {
+		p, err = h.svc.UpdateMyAvatarURL(c.Request.Context(), actor.ID, req.AvatarURL)
+		if err != nil {
+			h.writeProfileError(c, err)
+			return
+		}
+	}
+	if wantsName {
+		p, err = h.svc.UpdateMyDisplayName(c.Request.Context(), actor.ID, *req.DisplayName)
+		if err != nil {
+			h.writeProfileError(c, err)
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"user": p})
 }
@@ -224,6 +291,13 @@ func (h *userProfileHandler) writeProfileError(c *gin.Context, err error) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "当前账号不允许执行该操作", "code": CodeForbidden})
 	case errors.Is(err, service.ErrBadDisplayName):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": CodeDisplayNameInvalid})
+	case errors.Is(err, service.ErrAvatarURLInvalid):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": CodeAvatarURLInvalid})
+	case errors.Is(err, service.ErrAvatarUnavailable):
+		// 503 而不是 400：请求本身没错，是这个部署没开对象存储
+		//（PR_STORAGE_ENDPOINT 为空 → /api/uploads 也不注册）。前端据此显示
+		// CapabilityNotice，而不是让用户反复重试一个永远失败的动作。
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error(), "code": CodeAuthUnavailable})
 	default:
 		writeAccountError(c, err)
 	}

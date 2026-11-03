@@ -237,6 +237,12 @@ type UserSearchHit struct {
 	ID          int64  `gorm:"column:id;primaryKey"`
 	Username    string `gorm:"column:username"`
 	DisplayName string `gorm:"column:display_name"`
+	// AvatarURL 是像素头像（票 #74）；nil = 没有。
+	//
+	// 搜索结果行也显示头像：它是「找朋友」唯一的结果列表，行首空着会与
+	// 好友页其它名单（都带头像）长得不一样，而"同一个人在不同列表里
+	// 有的带头像有的不带"看起来像数据丢了。
+	AvatarURL *string `gorm:"column:avatar_url"`
 }
 
 // TableName 走 users（本类型只是 users 的一个只读投影，不建表）。
@@ -302,10 +308,12 @@ func (s *Store) SearchUsers(ctx context.Context, keyword string, excludeID int64
 // RequesterID 并误判方向，而那种误判没有编译期保护。
 type BlockedRow struct {
 	// BlockedID 是**被拉黑方**的 user id。
-	BlockedID   int64     `gorm:"column:blocked_id"`
-	DisplayName string    `gorm:"column:display_name"`
-	Username    string    `gorm:"column:username"`
-	BlockedAt   time.Time `gorm:"column:blocked_at"`
+	BlockedID   int64  `gorm:"column:blocked_id"`
+	DisplayName string `gorm:"column:display_name"`
+	Username    string `gorm:"column:username"`
+	// AvatarURL 是像素头像（票 #74）；nil = 没有。
+	AvatarURL *string   `gorm:"column:avatar_url"`
+	BlockedAt time.Time `gorm:"column:blocked_at"`
 }
 
 // ListBlocked 返回 actor 拉黑的全部人（只列 blocked_by_id = actor，有向语义，#39）。
@@ -323,7 +331,8 @@ func (s *Store) ListBlocked(ctx context.Context, actorID int64) ([]BlockedRow, e
 	err := s.db.WithContext(ctx).
 		Table("friendships AS f").
 		Select(`CASE WHEN f.requester_id = ? THEN f.addressee_id ELSE f.requester_id END AS blocked_id,
-		        u.display_name, u.username, f.updated_at AS blocked_at`, actorID).
+		        u.display_name, u.username, `+maskedAvatarSQL("u")+` AS avatar_url,
+		        f.updated_at AS blocked_at`, actorID).
 		Joins("JOIN users u ON u.id = CASE WHEN f.requester_id = ? THEN f.addressee_id ELSE f.requester_id END", actorID).
 		Where("f.status = ? AND f.blocked_by_id = ?", FriendshipBlocked, actorID).
 		Order("f.updated_at DESC, f.id DESC").

@@ -46,6 +46,7 @@ interface ServerSearchHit {
   userId: number
   username: string
   displayName: string
+  avatarUrl?: string | null
   following?: boolean
   followedBy?: boolean
   mutual?: boolean
@@ -59,6 +60,7 @@ interface ServerBlockedEntry {
   userId: number
   displayName: string
   username: string
+  avatarUrl?: string | null
   blockedAt: string
 }
 
@@ -70,8 +72,10 @@ interface ServerBlockView {
   status: string
 }
 
-function toPerson(userId: number, displayName: string) {
-  return { id: userId, displayName: displayName || '未知用户', ...avatarOf(userId, displayName) }
+function toPerson(userId: number, displayName: string, avatarUrl?: string | null) {
+  const person = { id: userId, displayName: displayName || '未知用户', ...avatarOf(userId, displayName) }
+  // 像素头像只是覆盖层（票 #74）：有值才带上，没值让 UserAvatar 回落字母头。
+  return typeof avatarUrl === 'string' && avatarUrl !== '' ? { ...person, avatarUrl } : person
 }
 
 /**
@@ -95,9 +99,7 @@ export async function searchUsers(keyword: string): Promise<SearchHit[]> {
       `/api/users/search${query({ q: keyword })}`,
     )
     return (body?.items ?? []).map((raw) => ({
-      id: raw.userId,
-      displayName: raw.displayName || '未知用户',
-      ...avatarOf(raw.userId, raw.displayName),
+      ...toPerson(raw.userId, raw.displayName, raw.avatarUrl),
       following: raw.following === true,
       followedBy: raw.followedBy === true,
       mutual: raw.mutual === true,
@@ -129,7 +131,7 @@ export async function listBlocked(): Promise<BlockedEntry[]> {
   try {
     const body = await requestJSON<{ items: ServerBlockedEntry[] }>(fetcher(), '/api/blocks')
     return (body?.items ?? []).map((raw) => ({
-      user: toPerson(raw.userId, raw.displayName),
+      user: toPerson(raw.userId, raw.displayName, raw.avatarUrl),
     }))
   } catch (err) {
     throw toCapabilityUnavailable('friends', err)
