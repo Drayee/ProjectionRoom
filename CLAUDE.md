@@ -53,7 +53,7 @@
 - **protobuf 是唯一真源**：`proto/projection_room.proto` → 生成 `internal/pb/*.go` 与 `client/src/gen/*.ts`（`scripts/gen-proto.ps1`）。
 - **WS 信封**：1 字节类型前缀 + protobuf 体；room 信令走 `/ws?roomId=<码>&clientId=<id>[&ticket=<票据>]`。
   - **无 `ticket` = 游客**（观众免登录进房是产品决定，别加拦截）；带票据则绑定账号；票据单次使用 + 30s 过期。
-  - **Origin 白名单**：`PR_ALLOWED_ORIGINS` 是**唯一**判据（不再"同源隐式放行"；DNS rebinding 曾据此绕过）。默认值覆盖两种**本机**入口：开发态 `5173` 与单端口态 `8888`（后者是 `go run ./cmd` 的默认形态，漏了它会让默认部署开箱即坏：页面能开、`/ws` 一律 403）。**公网/隧道部署必须显式加域名**。
+  - **Origin 白名单**：`PR_ALLOWED_ORIGINS` 是**唯一**判据（不再"同源隐式放行"；DNS rebinding 曾据此绕过）。默认值覆盖两种**本机**入口：开发态 `5173` 与单端口态 `8888`（后者是 `go run ./cmd` 的默认形态，漏了它会让默认部署开箱即坏：页面能开、`/ws` 一律 403）。**公网/隧道部署必须显式加域名**。**启动期会校验 `PR_PUBLIC_BASE_URL` 的 host 被白名单覆盖**（`internal/config/origin_check.go` 的 `publicBaseURLAllowed`，判据与 `internal/handler` 的 `checkOrigin` 同源：含 `://` 时比 `scheme://host`、否则比 `host[:port]`，支持 `path.Match` 通配，大小写不敏感）——不覆盖就拒绝启动，并把**该补的那一项原文** `scheme://host` 打进报错，用户照抄即可。为什么要在启动期拦：2026-11-02 线上换域名 `yachiyocat.top` 时漏配这一项，症状是**页面照常打开**（静态资源不判来源）但 `/ws` 与 `/ws/user` 一律 403、实时通道无限重连，浏览器控制台只有一行 403 handshake —— 症状与真因之间隔了整条 nginx + 白名单链路，而它在启动期就可判定。
 - **DataChannel**：negotiated id=0，1 字节 kind 前缀（`0x01` 控制/`0x02` init/`0x03` 媒体/`0x04` tail）+ 7 字节媒体头；64 KiB 分片 + `bufferedAmount` 背压。
 - **房间码**：`^[A-Z0-9]{4,12}$`；建房**必须登录**且响应下发一次性 **`hostToken`**（主播断线宽限期内接回主播位必须携带）。
 - **主播宽限期**：`PR_ROOM_HOST_GRACE`（默认 60s）内房间保留，宽限期内**永不回收**；客户端用同一房间码自动重建。
@@ -121,7 +121,7 @@ powershell -File scripts/run-local.ps1         # 读 .env.local 起服务（默�
 powershell -File scripts/run-local.ps1 -Port 8090   # 换端口（自动补 Origin 白名单）
 ```
 
-⚠️ **`PR_ALLOWED_ORIGINS` 在换端口时必须跟着改**：`run-local.ps1` 会自动补，但手工起实例时忘了它就是"页面能开、`/ws` 一律 403"（默认白名单只含 5173 与 8888）。
+⚠️ **`PR_ALLOWED_ORIGINS` 在换端口时必须跟着改**：`run-local.ps1` 会自动补，但手工起实例时忘了它就是"页面能开、`/ws` 一律 403"（默认白名单只含 5173 与 8888）。现在这种漏配会在**启动期**被 `publicBaseURLAllowed` 拦下并直接给出该补的那一项，不必再等到页面上发现。
 
 ⚠️ **两个坑**：① 测试库与生产库是**两个库**，DSN 的 `dbname` 必须含 `_test`（用例里有护栏）；② **`internal/store` 的真库用例会 TRUNCATE 表**，所以任何手工 fixture（如验收用的管理员账号）在跑过它们之后就不在了——需要重新注册并提权（`UPDATE users SET role='admin' WHERE username='…'`）。
 ⚠️ **测试实例收尾必须停进程**：曾有一个后台实例直连测试库、绕过了用例的跨进程隔离锁，导致 store 用例随机红。
