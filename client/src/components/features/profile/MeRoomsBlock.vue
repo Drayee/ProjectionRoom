@@ -138,7 +138,7 @@ onBeforeUnmount(() => {
       "
       :hint="
         state === 'empty'
-          ? '在公开房间页开一间房，它会出现在这里 —— 私密与已关闭的房也都在这一页。'
+          ? '在首页的「作为主播创建房间」卡片里开一间房，它会出现在这里 —— 私密与已关闭的房也都在这一页。'
           : state === 'error'
             ? errorText
             : undefined
@@ -147,7 +147,9 @@ onBeforeUnmount(() => {
       icon="video"
       @retry="retry"
     >
-      <RouterLink v-if="state === 'empty'" class="cta" :to="{ name: 'public-rooms' }">
+      <!-- 落点是**首页**而不是 public-rooms：公开房间页只有列表，历来没有建房按钮
+           （这条链接曾指向那里，点过去找不到入口 —— 用户报「无法建房间」的一部分）。 -->
+      <RouterLink v-if="state === 'empty'" class="cta" :to="{ name: 'home' }">
         去开一间房
       </RouterLink>
     </AsyncState>
