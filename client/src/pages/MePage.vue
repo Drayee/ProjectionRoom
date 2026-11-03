@@ -392,7 +392,13 @@ watch(tab, async () => {
         <section v-if="tab === 'overview'" class="sect" aria-labelledby="me-profile-head">
           <div class="card">
             <div class="card-head">
-              <span v-if="me" class="avatar-lg" :style="{ background: me.avatarColor }" aria-hidden="true">
+              <span
+                v-if="me"
+                class="avatar-lg"
+                :style="{ background: me.avatarColor }"
+                aria-hidden="true"
+                :data-shared="`avatar:${me.id}`"
+              >
                 {{ me.avatarChar }}
                 <AvatarImage :url="me.avatarUrl" />
               </span>

@@ -150,6 +150,19 @@ const target = computed(() => {
   if (props.self && hasMeRoute.value) return { name: 'me' }
   return { name: 'user', params: { id: String(props.user.id) } }
 })
+
+/**
+ * 共享元素契约（票 #78）：`data-shared="avatar:<userId>"`。
+ *
+ * 对端是档案页（`/user/:id` 与 `/me`）名片区那枚大头像 —— 两端都写同一个值，
+ * 匹配**只按这个值**，不写死"列表→档案"的页对：从 `/me` 的帖子块、从论坛主题行、
+ * 从私信会话点头像，走的都是同一条规则。
+ *
+ * 为什么给每个头像都带（包括 `interactive=false` 的装饰性头像）：装饰性头像自己点不动，
+ * 但它所在的那一行可能是链接 —— 值得让"点这一行进档案页"也接上同一个元素。
+ * 至于会不会真的飞，由决策器与两端存在性说了算（见 `utils/sharedElement.ts`）。
+ */
+const sharedId = computed(() => `avatar:${props.user.id}`)
 </script>
 
 <template>
@@ -159,6 +172,7 @@ const target = computed(() => {
     :to="target"
     :aria-label="label"
     :style="boxStyle"
+    :data-shared="sharedId"
   >
     <!-- 字母头先渲染（它是兜底），像素头像绝对定位盖在上面。
          顺序有讲究：反过来（先图后字母）会在图片解码前露出色块再被图盖住，
@@ -166,7 +180,7 @@ const target = computed(() => {
     <span class="char" aria-hidden="true">{{ derived.avatarChar }}</span>
     <AvatarImage :url="props.user.avatarUrl" />
   </RouterLink>
-  <span v-else class="avatar" aria-hidden="true" :style="boxStyle">
+  <span v-else class="avatar" aria-hidden="true" :style="boxStyle" :data-shared="sharedId">
     <span class="char" aria-hidden="true">{{ derived.avatarChar }}</span>
     <AvatarImage :url="props.user.avatarUrl" />
   </span>

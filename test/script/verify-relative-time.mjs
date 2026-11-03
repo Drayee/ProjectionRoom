@@ -356,6 +356,10 @@ async function main() {
     const box = await page.evaluate(`(() => {
       const el = document.querySelector('time.relative-time')
       if (!el) return null
+      // 必须先滚进视口再取坐标：列表首卡现在带封面图（票 #78 的 mock 夹具），
+      // 第一个 <time> 可能落在首屏之下 —— 直接用视口外坐标做 elementFromPoint
+      // 命中 null，判据会以"悬停没命中"的形式假红，与 title 无关。
+      el.scrollIntoView({ block: 'center', inline: 'nearest' })
       const r = el.getBoundingClientRect()
       return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height }
     })()`)

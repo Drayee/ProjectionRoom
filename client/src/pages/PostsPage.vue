@@ -375,7 +375,16 @@ onBeforeUnmount(() => {
 
           <!-- 唯一的导航区：封面 + 标题 + 摘要。动作条刻意在它**外面**。 -->
           <RouterLink class="card-link" :to="{ name: 'post-detail', params: { id: String(p.id) } }">
-            <img v-if="p.images.length" class="cover" :src="p.images[0]" :alt="`${p.title} 封面`" loading="lazy" />
+            <!-- data-shared（票 #78）：对端是详情页头图。匹配只按这个值，
+                 不写死"列表→详情"的页对 —— 从 /me 的帖子块点进来走同一条规则。 -->
+            <img
+              v-if="p.images.length"
+              class="cover"
+              :src="p.images[0]"
+              :alt="`${p.title} 封面`"
+              loading="lazy"
+              :data-shared="`post-cover:${p.id}`"
+            />
             <h2 class="card-title">{{ p.title }}</h2>
             <p v-if="p.content" class="excerpt dim">{{ excerpt(p.content) }}</p>
           </RouterLink>

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" role="img" aria-label="示例封面">
+  <!--
+    mock 域用的示例封面（票 #78）。
+
+    为什么它必须先有：mock 帖子此前 `images: []`，于是**卡片封面这条渲染路径
+    在 mock 域里从来没被走过** —— 帖封面→详情的共享元素也就无从演示与验收。
+    放进 `public/` 而不是远程图床：生产 CSP 是 `img-src 'self' data:`，
+    远程图会被拦；同源文件在 mock 与真机脚本里都成立。
+
+    画成 16:9：详情页头图是 16:9 + object-fit: cover，卡片封面是窄条，
+    同一张图在两种比例下都要好看 —— 这正是 `object-fit: cover` 的意义。
+  -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#121026"/>
+      <stop offset="0.55" stop-color="#1d2b4d"/>
+      <stop offset="1" stop-color="#2a3f63"/>
+    </linearGradient>
+    <radialGradient id="moon" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fdf6d8"/>
+      <stop offset="0.72" stop-color="#f5e6a8"/>
+      <stop offset="1" stop-color="#f5e6a8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="hill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1a2b"/>
+      <stop offset="1" stop-color="#060b14"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#sky)"/>
+
+  <!-- 星点：固定坐标，不用随机，保证每次渲染一样 -->
+  <g fill="#e8f0ff" opacity="0.75">
+    <circle cx="180" cy="140" r="2.6"/><circle cx="320" cy="240" r="1.8"/>
+    <circle cx="520" cy="110" r="2.2"/><circle cx="700" cy="200" r="1.6"/>
+    <circle cx="900" cy="120" r="2.4"/><circle cx="1080" cy="230" r="1.8"/>
+    <circle cx="1260" cy="150" r="2.6"/><circle cx="1420" cy="260" r="2"/>
+    <circle cx="260" cy="380" r="1.5"/><circle cx="1180" cy="390" r="1.7"/>
+    <circle cx="1460" cy="470" r="1.4"/><circle cx="620" cy="330" r="1.5"/>
+  </g>
+
+  <circle cx="1180" cy="300" r="190" fill="url(#moon)" opacity="0.55"/>
+  <circle cx="1180" cy="300" r="96" fill="#fdf6d8" opacity="0.92"/>
+
+  <path d="M0 660 L240 560 L460 640 L700 540 L960 630 L1200 545 L1440 640 L1600 590 L1600 900 L0 900 Z" fill="url(#hill)"/>
+  <path d="M0 740 L260 690 L520 750 L820 680 L1120 760 L1400 700 L1600 745 L1600 900 L0 900 Z" fill="#04070d" opacity="0.85"/>
+
+  <!-- 一轮银幕光：暗示"一起看" -->
+  <path d="M300 250 L1300 250 L1420 560 L180 560 Z" fill="#7fb6ff" opacity="0.10"/>
+  <path d="M300 250 L1300 250 L1420 560 L180 560 Z" fill="none" stroke="#9fd0ff" stroke-opacity="0.25" stroke-width="3"/>
+</svg>

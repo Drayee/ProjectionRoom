@@ -80,7 +80,10 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="room">
-    <header class="room-head">
+    <!-- 标题区带 `data-shared="room:<码>"`（票 #78）：与房间卡是同一对。
+         本页路由是 `meta.exempt`（整页硬替换、零过渡），于是决策恒为 exempt、
+         共享元素判死 —— 这条接线存在，但**永远不会飞**，这正是「豁免优先」的执行点。 -->
+    <header class="room-head" :data-shared="`room:${code}`">
       <div class="left">
         <span class="label dim">房间码</span>
         <!--

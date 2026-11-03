@@ -7,6 +7,7 @@ import { tipDirective } from './directives/tip'
 import { useAuthStore } from './stores/auth'
 import { useRoutePageMeta } from './composables/useRoutePageMeta'
 import { installRouteTransitionGuard } from './composables/useRouteTransition'
+import { installSharedElementMorph } from './composables/useSharedElement'
 import { installRouteLoadWatch } from './utils/routeLoadState'
 import './styles/tokens.css'
 import './styles/base.css'
@@ -24,6 +25,13 @@ app.use(createPinia())
  * 但那样会让"守卫根本没生效"与"首屏不触发"两种情况在真机上看不出区别）。
  */
 installRouteTransitionGuard(router)
+/**
+ * 共享元素接线（票 #78）同样必须在 `app.use(router)` 之前。
+ *
+ * 它要抢在页面被任何过渡 class 动过之前量离开页的矩形 —— 那时 DOM 还是干净的旧页面。
+ * 顺序无所谓（两个 `beforeEach` 互不读写对方的状态）：一个写决策，一个量矩形。
+ */
+installSharedElementMorph(router)
 app.use(router)
 // 全局提示指令（v-tip）：必须在 mount 之前注册；图层本体在 App.vue（全局唯一一份）。
 app.directive('tip', tipDirective)

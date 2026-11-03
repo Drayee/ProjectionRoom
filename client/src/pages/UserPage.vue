@@ -350,7 +350,12 @@ watch(
 
       <template v-else-if="view">
         <header class="hero">
-          <span class="avatar-lg" :style="{ background: view.avatarColor }" aria-hidden="true">
+          <span
+            class="avatar-lg"
+            :style="{ background: view.avatarColor }"
+            aria-hidden="true"
+            :data-shared="`avatar:${view.id}`"
+          >
             {{ view.avatarChar }}
             <AvatarImage :url="view.avatarUrl" />
           </span>

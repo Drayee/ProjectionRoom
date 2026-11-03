@@ -15,6 +15,13 @@
  *
  * 官方标识只看数据里的 `isOfficial`（#35 让服务端在普通列表里也返回它），
  * 不用"出现在官方页 = 官方"反推 —— 那样一旦列表筛选写错，界面会跟着一起错。
+ *
+ * ## 共享元素（票 #78）：`data-shared="room:<roomId>"`
+ *
+ * 对端是房页标题区。**卡→房这条实际上永远不飞**：放映室路由是 `meta.exempt`
+ * （决议 #45：整页硬替换、零过渡），决策恒为 `exempt`，共享元素随之判死。
+ * 那为什么还写？因为**豁免优先**这条规则要有一个执行点证明它真的生效 ——
+ * 属性在这里、接线在那里、判死由决策决定，而不是靠"这处忘了写"。
  */
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
@@ -33,7 +40,7 @@ const status = computed(() => {
 
 <template>
   <li class="card">
-    <div class="head">
+    <div class="head" :data-shared="`room:${room.roomId}`">
       <BrandIcon name="video" decorative :size="15" />
       <span class="name">{{ room.title || '未命名房间' }}</span>
       <!-- 运营标识：官方区与公开列表都显示（同一个 isOfficial 来源）。 -->

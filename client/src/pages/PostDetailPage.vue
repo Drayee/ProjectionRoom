@@ -138,6 +138,16 @@ onMounted(load)
       />
 
       <template v-else-if="post">
+        <!-- 头图（票 #78）：与列表卡封面是同一张图。两端都写 `data-shared="post-cover:<id>"`，
+             匹配只按这个值 —— 所以从 `/me` 的帖子块点进来也一样能飞。
+             它是**新增**的展示位（详情页此前没有封面图）：没有封面就不渲染，不留空框。 -->
+        <img
+          v-if="post.images.length"
+          class="hero-cover"
+          :src="post.images[0]"
+          :alt="`${post.title} 封面`"
+          :data-shared="`post-cover:${post.id}`"
+        />
         <h1 class="title">{{ post.title }}</h1>
         <!-- 正文头：作者是主角，用 detail 档（头像 md、昵称 15px、时间另起一行）。 -->
         <AuthorRow
@@ -199,6 +209,18 @@ onMounted(load)
 .page { min-height: 100vh; display: flex; flex-direction: column; position: relative; }
 .body { flex: 1; width: min(760px, 100%); margin: 0 auto; padding: 32px 20px 64px; display: flex; flex-direction: column; gap: 14px; }
 .title { margin: 0; font-family: var(--font-glitch); font-size: clamp(26px, 5vw, 38px); }
+/* 头图（票 #78）：与列表卡封面**同样的圆角与边框**，这是 morph 两端唯一需要对齐的东西
+   （决议 #45 §3 第 4 条：只共享外观契约，不共享组件实例）。裁切用 object-fit: cover ——
+   卡片封面是窄条、这里是宽幅，同一张图要在两种比例下都不变形。 */
+.hero-cover {
+  display: block;
+  width: 100%;
+  margin: 0;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
 .content { margin: 0; }
 /* 动作行：外观交给 ui/ActionBar 与 ui/Button，页面只管排布。
    注意 hover 与选中态由组件负责，页面不再重写状态色。 */

@@ -21,6 +21,16 @@ const MOCK_USERS = [
   { id: 5, displayName: '喵喵', avatarChar: '喵', avatarColor: '#f5c76a' },
 ]
 
+/**
+ * 帖子的示例封面（票 #78）。
+ *
+ * 同源 SVG，不是远程图床：生产 CSP 是 `img-src 'self' data:`，远程图会被拦。
+ * 有了它，`images` 非空的渲染路径才在 mock 域里跑得到 —— 帖封面→详情的
+ * 共享元素（`data-shared="post-cover:<id>"`）也就有了可演示、可验收的样本。
+ * 只给前两条，其余保持空数组：列表里"有封面"与"没封面"两种卡片要同时在。
+ */
+const COVER = '/demo/cover.svg'
+
 const MOCK_POSTS: Post[] = [
   {
     id: 1,
@@ -28,7 +38,7 @@ const MOCK_POSTS: Post[] = [
     content: '今晚 8 点一起补《葬送的芙莉莲》第 4 集，房间码 MOON04，来的人发个爪。\n同步看番真的快乐，弹幕节奏拉满。',
     authorId: 1,
     author: MOCK_USERS[0],
-    images: [],
+    images: [COVER],
     likeCount: 23,
     commentCount: 7,
     liked: false,
@@ -41,7 +51,7 @@ const MOCK_POSTS: Post[] = [
     content: '把「一起看」的卡顿换父逻辑又调了一版，现在切主播放器基本无感了。\n来来回回测了好多轮，终于找到稳定的阈值。',
     authorId: 2,
     author: MOCK_USERS[1],
-    images: [],
+    images: [COVER],
     likeCount: 41,
     commentCount: 12,
     liked: false,
