@@ -8,7 +8,7 @@
  *   2. **退出所有设备** —— 接既有的 `api.auth.logoutAll`；
  *   3. **账号只读信息** —— 注册时间（RelativeTime absolute 形）/ 角色 / 邮箱 / 邮箱验证态。
  *
- * 换绑邮箱（#72）与注销（#73）不在这里，各自是独立票。
+ * 换绑邮箱（#72）与注销（#73）已接进本块；头像（#74/#75）仍是独立票。
  *
  * ## 两条改密门为什么并存
  *
@@ -284,6 +284,89 @@ async function doKickAll(): Promise<void> {
   }
 }
 
+// ---------- 注销账号（票 #73） ----------
+//
+// 两道前置条件，缺一不可：
+//
+//   1. **当前密码** —— 与改密同一条理由：注销是不可逆方向的第一步，
+//      只劫持到会话不足以注销别人的账号；
+//   2. **勾选「我已知晓…」** —— 纯前端条件（决议 #51 §5）。刻意**不**进请求体：
+//      传到服务端只会变成第二个可以伪造的字段，服务端该判的是"是不是你"。
+//
+// 两者都满足才出现"确认注销"按钮，且点它之后还要过一条**页内确认条**
+// （与 #71 的「退出所有设备」同一个样板，不用 window.confirm —— 它在真机
+// 脚本里既不可读也不可点）。
+
+const deletingPassword = ref('')
+const deletingAck = ref(false)
+const deletingBusy = ref(false)
+const deletingError = ref('')
+const deletingNotice = ref('')
+/** 页内确认条：第一次点"确认注销"先展开它，第二次才真的发请求。 */
+const confirmingDelete = ref(false)
+const deleteSlot = createIdempotencySlot()
+
+/** 两道前置条件都满足才允许点"确认注销"。 */
+const canRequestDeletion = computed(
+  () => deletingPassword.value.trim() !== '' && deletingAck.value,
+)
+
+/** 已经在冷静期里就不该再出现发起入口（横幅在 /me 顶部负责撤销）。 */
+const alreadyPending = computed(() => (auth.profile?.deletionRequestedAt ?? '') !== '')
+
+function askDelete(): void {
+  deletingError.value = ''
+  deletingNotice.value = ''
+  confirmingDelete.value = true
+}
+
+function cancelDelete(): void {
+  confirmingDelete.value = false
+}
+
+async function doRequestDeletion(): Promise<void> {
+  if (deletingBusy.value) return
+  deletingBusy.value = true
+  deletingError.value = ''
+  deletingNotice.value = ''
+  try {
+    const state = await auth.requestAccountDeletion({
+      currentPassword: deletingPassword.value,
+      // 幂等键：注销不可逆，一次"网络超时后重发"如果真跑两遍会撞上
+      // 服务端的"不延期"语义 —— 那倒不危险，但拿同一个成功响应更干净。
+      idempotencyKey: deleteSlot.for({ password: deletingPassword.value }),
+    })
+    // 清掉密码（它已经用完了）与勾选，但**保留**成功提示 ——
+    // 否则用户看不出发生了什么（横幅在页面顶部，设置区滚下去看不见）。
+    deletingPassword.value = ''
+    deletingAck.value = false
+    confirmingDelete.value = false
+    deleteSlot.reset()
+    deletingNotice.value =
+      state.deadline === null
+        ? '已提交注销申请。在冷静期内你可以随时在页面顶部撤销。'
+        : '已提交注销申请。在到期之前，你可以随时在页面顶部撤销。'
+  } catch (err) {
+    const e = toHttpError(err)
+    if (e.status === 401) {
+      deletingError.value = '登录状态已失效，请重新登录后再试'
+      return
+    }
+    if (e.status === 403) {
+      deletingError.value = `${e.message}（被封禁的账号不能注销；如有疑问请联系管理员）`
+      return
+    }
+    if (e.code === 'PASSWORD_MISMATCH') {
+      // 错密码要定位到输入框，而不是整页一条报错 —— 用户要采取的动作是"改这一栏"。
+      deletingError.value = '当前密码不对，请重新输入'
+      return
+    }
+    deletingError.value = e.offline ? NETWORK_MESSAGE : e.message
+  } finally {
+    deletingBusy.value = false
+  }
+}
+
 // ---------- 只读信息 ----------
 
 const me = computed(() => auth.profile)
@@ -307,6 +390,11 @@ watch(
     notice.value = ''
     errorText.value = ''
     kickError.value = ''
+    deletingPassword.value = ''
+    deletingAck.value = false
+    deletingError.value = ''
+    deletingNotice.value = ''
+    confirmingDelete.value = false
     resetFieldErrors()
     clearForm()
   },
@@ -481,10 +569,80 @@ watch(
       </form>
     </section>
 
+    <!-- ---------- 注销账号（票 #73） ---------- -->
+    <section class="card danger-card" aria-labelledby="me-deletion-head">
+      <h2 id="me-deletion-head" class="sect-title">注销账号</h2>
+
+      <!-- 已在冷静期：这里只说明"去哪撤销"，不再给发起入口。
+           横幅在 /me 顶部（跨分区常驻），所以这里不重复一遍撤销按钮。 -->
+      <template v-if="alreadyPending">
+        <p class="dim small" data-testid="deletion-pending-note">
+          这个账号已在注销冷静期里。页面顶部有一条横幅，可以在那里撤销。
+        </p>
+      </template>
+
+      <template v-else>
+        <p class="dim small">
+          注销后，你的帖子、私聊、关注关系与放映室会在冷静期结束时被<strong>永久删除</strong>，无法恢复。
+          在冷静期结束之前，你可以随时撤销。
+        </p>
+
+        <form class="form" @submit.prevent="askDelete">
+          <div class="field">
+            <label for="me-delete-password">当前密码</label>
+            <input
+              id="me-delete-password"
+              v-model="deletingPassword"
+              type="password"
+              autocomplete="current-password"
+              data-testid="deletion-password"
+            />
+          </div>
+
+          <label class="ack">
+            <input v-model="deletingAck" type="checkbox" data-testid="deletion-ack" />
+            <span>我已知晓：冷静期结束后，这个账号的数据将被永久删除。</span>
+          </label>
+
+          <!-- 页内确认条（第一次点按钮先展开它）。 -->
+          <div v-if="confirmingDelete" class="confirm" role="alertdialog" aria-labelledby="me-delete-confirm-text">
+            <p id="me-delete-confirm-text" class="confirm-text">
+              确定要注销这个账号吗？你会立刻从社区里消失，数据将在冷静期结束后被永久删除。
+            </p>
+            <div class="confirm-acts">
+              <Button variant="danger" :loading="deletingBusy" data-testid="deletion-confirm" @click="doRequestDeletion">
+                确定注销
+              </Button>
+              <Button variant="ghost" :disabled="deletingBusy" data-testid="deletion-confirm-cancel" @click="cancelDelete">
+                再想想
+              </Button>
+            </div>
+          </div>
+          <div v-else class="actions">
+            <Button
+              type="submit"
+              variant="danger"
+              :disabled="!canRequestDeletion"
+              data-testid="deletion-start"
+            >
+              注销账号
+            </Button>
+          </div>
+        </form>
+
+        <p v-if="!canRequestDeletion" class="dim small" data-testid="deletion-hint">
+          需要先填写当前密码并勾选上面的确认项。
+        </p>
+      </template>
+
+      <p v-if="deletingError" class="alert" role="alert" data-testid="deletion-request-error">{{ deletingError }}</p>
+      <p v-if="deletingNotice" class="ok" role="status" data-testid="deletion-request-notice">{{ deletingNotice }}</p>
+    </section>
+
     <!-- ---------- 只读信息 ---------- -->
     <section class="card" aria-labelledby="me-readonly-head">
       <h2 id="me-readonly-head" class="sect-title">账号信息</h2>
-      <p class="dim small">这些字段不能在这里改：用户名固定（改用户名不在计划里），邮箱请用上面的「换绑邮箱」，注销账号是单独的票。</p>
+      <p class="dim small">这些字段不能在这里改：用户名固定（改用户名不在计划里），邮箱请用上面的「换绑邮箱」，注销账号请用上面的「注销账号」。</p>
       <dl class="kv" data-testid="account-readonly">
         <dt>用户名</dt>
         <dd class="mono">{{ me?.username || '—' }}</dd>
@@ -605,6 +763,32 @@ watch(
 .alert {
   margin: 0;
   font-size: 13px;
+  color: var(--danger);
+}
+.ack {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.ack input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+/*
+ * 危险区（票 #73）。
+ *
+ * 只用边框与标题着色，不做整块红底：这一页里"危险"的东西有两处
+ * （退出所有设备、注销账号），整块红底会让真正更严重的那个失去区分度。
+ * 红边框足以让它在滚动时被认出来。
+ */
+.danger-card {
+  border-color: var(--danger);
+}
+.danger-card .sect-title {
   color: var(--danger);
 }
 .small {

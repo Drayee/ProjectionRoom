@@ -100,6 +100,42 @@ func (s *fakeAdminStore) auditsOf(action string) []store.AdminAudit {
 
 // —— service.AccountStore ——
 
+// —— 注销冷静期（票 #73）：只动 deletion_requested_at 一列 ——
+//
+// 幂等且不延期这一条必须在假实现里也成立：真实语义就是"第二次发起返回原起点"。
+// 假实现若每次都覆盖，用它的用例就测不出 service 层有没有把它搞错。
+
+// RequestAccountDeletion 与真 store 同语义：幂等、不延期、不存在的账号 ErrNotFound。
+func (s *fakeAdminStore) RequestAccountDeletion(_ context.Context, userID int64, at time.Time) (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.users[userID]
+	if !ok {
+		return time.Time{}, store.ErrNotFound
+	}
+	if u.DeletionRequestedAt != nil {
+		return *u.DeletionRequestedAt, nil
+	}
+	stamp := at
+	u.DeletionRequestedAt = &stamp
+	return stamp, nil
+}
+
+// CancelAccountDeletion 与真 store 同语义：没有待执行的注销时回 ErrDeletionNotRequested。
+func (s *fakeAdminStore) CancelAccountDeletion(_ context.Context, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.users[userID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if u.DeletionRequestedAt == nil {
+		return store.ErrDeletionNotRequested
+	}
+	u.DeletionRequestedAt = nil
+	return nil
+}
+
 func (s *fakeAdminStore) CreateUser(ctx context.Context, u *store.User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -914,6 +950,10 @@ func newAdminEnv(t *testing.T, mutate func(*config.Config)) *adminEnv {
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
 		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
+		// 注销冷静期（票 #73）：config.Default() 已给好生产默认值（30 天），
+		// 直接沿用。不填会让构造器拒绝，于是本文件的每条用例都因为
+		// "少填一个测试参数"变红 —— 那不是它们要测的东西。
+		DeletionGrace: cfg.Auth.DeletionGrace,
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败: %v", err)

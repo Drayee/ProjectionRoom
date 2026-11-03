@@ -771,4 +771,28 @@ CHECK (target_type IN ('post', 'room', 'anime'))
 	{version: "0017_followers_seen", statements: []string{
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS followers_seen_at timestamptz NULL`,
 	}},
+
+	// 0018：注销的冷静期起点（wayfinder #51 / 票 #73）。
+	//
+	// # 为什么只有一列，没有 deleted_at / is_deleted
+	//
+	// 注销是**两阶段**的：先记下"从哪一刻起进入冷静期"，到期再由后台清扫真删。
+	// 一个 `deletion_requested_at` 同时回答三件事 —— 是否在冷静期（非 NULL）、
+	// 什么时候到期（+ 30 天）、撤销时清哪个值。再加一个 `deleted_at` 会造出
+	// "两个列都非空"这种没有语义的中间态，而没有任何用例能覆盖它。
+	//
+	// # 为什么不改 status
+	//
+	// `status` 的取值是 active / banned，语义是"这个账号被平台怎么处置了"。
+	// 注销是**用户自己**的决定，混进同一个列会让审计分不清"被封"与"自己要走"，
+	// 而且冷静期内用户仍须能登录（否则撤销不了），所以 status 必须保持 active。
+	// 对外隐藏靠的是各查询里的 `deletion_requested_at IS NULL` 谓词
+	//（与 status='active' 一起构成"可见账号"的唯一真源，见 store/visibility.go）。
+	//
+	// # 可空是语义的一部分
+	//
+	// NULL = 从未申请注销。用 DEFAULT now() 会让每个新账号一出生就在冷静期里。
+	{version: "0018_deletion_requested", statements: []string{
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at timestamptz NULL`,
+	}},
 }

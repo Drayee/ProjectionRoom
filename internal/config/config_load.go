@@ -127,18 +127,20 @@ const (
 	//
 	// 这一组是账号能力的出口：PR_SMTP_HOST 与账号密码任缺其一 = 邮件能力关闭
 	//（发码接口与验证邮箱一律 503，账号本身照常可用）。
-	envSMTPHost       = "PR_SMTP_HOST"
-	envSMTPPort       = "PR_SMTP_PORT"
-	envSMTPUser       = "PR_SMTP_USER"
-	envSMTPPass       = "PR_SMTP_PASS"
-	envSMTPFrom       = "PR_SMTP_FROM"
-	envSMTPFromName   = "PR_SMTP_FROM_NAME"
-	envSMTPTLS        = "PR_SMTP_TLS"
-	envSMTPTimeout    = "PR_SMTP_TIMEOUT"
-	envPublicBaseURL  = "PR_PUBLIC_BASE_URL"
-	envEmailVerifyTTL = "PR_EMAIL_VERIFY_TTL"
-	envOTPTTL         = "PR_OTP_TTL"
-	envOTPDevEcho     = "PR_OTP_DEV_ECHO"
+	envSMTPHost            = "PR_SMTP_HOST"
+	envSMTPPort            = "PR_SMTP_PORT"
+	envSMTPUser            = "PR_SMTP_USER"
+	envSMTPPass            = "PR_SMTP_PASS"
+	envSMTPFrom            = "PR_SMTP_FROM"
+	envSMTPFromName        = "PR_SMTP_FROM_NAME"
+	envSMTPTLS             = "PR_SMTP_TLS"
+	envSMTPTimeout         = "PR_SMTP_TIMEOUT"
+	envPublicBaseURL       = "PR_PUBLIC_BASE_URL"
+	envEmailVerifyTTL      = "PR_EMAIL_VERIFY_TTL"
+	envOTPTTL              = "PR_OTP_TTL"
+	envOTPDevEcho          = "PR_OTP_DEV_ECHO"
+	envDeletionGrace       = "PR_DELETION_GRACE"
+	envDeletionSweepPeriod = "PR_DELETION_SWEEP_INTERVAL"
 	// envRequireComplete 是"必需配置必须齐全"这条启动闸的逃生开关（默认开启校验）。
 	//
 	// 只有显式写 `0` / `false` 才跳过：漏配与刻意跳过在日志里长得一样，
@@ -230,6 +232,24 @@ const (
 	// 6 位数字的凭据长期挂在邮箱里（而它不像链接那样有 256 bit 的熵兜底）。
 	MinOTPTTL = time.Minute
 	MaxOTPTTL = 30 * time.Minute
+
+	// DefaultDeletionGrace = 720h（30 天）：决议 #51 §5 定的冷静期长度。
+	//
+	// 上界放到 365 天：再长就等于"说了要删但永远不删"，而用户发起注销的
+	// 动机通常是"我要离开"，不是"帮我把数据冷藏起来"。
+	DefaultDeletionGrace = 720 * time.Hour
+	// MinDeletionGrace = 1m：测试要把冷静期压到很短才能判"到期真删"。
+	MinDeletionGrace = time.Minute
+	// MaxDeletionGrace = 8760h（365 天）。
+	MaxDeletionGrace = 8760 * time.Hour
+
+	// DefaultDeletionSweepInterval = 1h：清扫是批量的 DELETE，成本比内存遍历高，
+	// 但一小时一次对"到期后删得晚一点"完全够用。
+	DefaultDeletionSweepInterval = time.Hour
+	// MinDeletionSweepInterval = 100ms（测试需要把周期压到很短）。
+	MinDeletionSweepInterval = 100 * time.Millisecond
+	// MaxDeletionSweepInterval = 24h。
+	MaxDeletionSweepInterval = 24 * time.Hour
 
 	// 邮件入口的三条闸门（单位：每小时次数，见 IPCConfig 的说明）。
 	DefaultMailPerEmailPerHour   = 5
@@ -513,8 +533,10 @@ func Default() *Config {
 			SMTPTLS:      DefaultSMTPTLS,
 			SMTPTimeout:  DefaultSMTPTimeout,
 			// PublicBaseURL 故意留空（必填，见 DefaultPublicBaseURL 处的说明）。
-			EmailVerifyTTL: DefaultEmailVerifyTTL,
-			OTPTTL:         DefaultOTPTTL,
+			EmailVerifyTTL:        DefaultEmailVerifyTTL,
+			OTPTTL:                DefaultOTPTTL,
+			DeletionGrace:         DefaultDeletionGrace,
+			DeletionSweepInterval: DefaultDeletionSweepInterval,
 		},
 		MemoryLimitBytes: DefaultMemoryLimitBytes,
 		Signal: SignalConfig{
@@ -1435,6 +1457,28 @@ func applyAuthEnv(ac *AuthConfig) error {
 				envOTPTTL, MinOTPTTL, MaxOTPTTL, v)
 		}
 		ac.OTPTTL = d
+	}
+	if v := os.Getenv(envDeletionGrace); v != "" {
+		d, err := positiveDuration(envDeletionGrace, v)
+		if err != nil {
+			return err
+		}
+		if d < MinDeletionGrace || d > MaxDeletionGrace {
+			return fmt.Errorf("config: %s 必须落在 [%s, %s] 区间, got %q",
+				envDeletionGrace, MinDeletionGrace, MaxDeletionGrace, v)
+		}
+		ac.DeletionGrace = d
+	}
+	if v := os.Getenv(envDeletionSweepPeriod); v != "" {
+		d, err := positiveDuration(envDeletionSweepPeriod, v)
+		if err != nil {
+			return err
+		}
+		if d < MinDeletionSweepInterval || d > MaxDeletionSweepInterval {
+			return fmt.Errorf("config: %s 必须落在 [%s, %s] 区间, got %q",
+				envDeletionSweepPeriod, MinDeletionSweepInterval, MaxDeletionSweepInterval, v)
+		}
+		ac.DeletionSweepInterval = d
 	}
 	// 开发态验证码回显：只接受 1 / true（与 VITE_DEBUG_HOOKS 同一套口径）。
 	if v := strings.TrimSpace(os.Getenv(envOTPDevEcho)); v != "" {

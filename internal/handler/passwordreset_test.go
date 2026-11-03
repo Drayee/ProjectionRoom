@@ -125,7 +125,11 @@ func newResetEnv(t *testing.T, withMail bool, mutate func(*config.Config)) *rese
 		EmailVerifyTTL: 24 * time.Hour,
 		OTPTTL:         5 * time.Minute,
 		PublicBaseURL:  "https://pr.example.com",
-		Mail:           sink,
+		// 注销冷静期（票 #73）：这里没有 cfg 可用（它在函数末尾才由
+		// accountTestRouter 造出来），所以写字面量 30 天 —— 与
+		// config.DefaultDeletionGrace 同一个值。本文件不测注销。
+		DeletionGrace: 30 * 24 * time.Hour,
+		Mail:          sink,
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败：%v", err)
@@ -382,6 +386,10 @@ func TestPasswordOTPDoesNotWaitForDelivery(t *testing.T) {
 		BcryptCost: auth.MinBcryptCost, RefreshTTL: time.Hour,
 		EmailVerifyTTL: 24 * time.Hour, OTPTTL: 5 * time.Minute,
 		PublicBaseURL: "https://pr.example.com", Mail: mailer,
+		// 注销冷静期（票 #73）：这里没有 cfg 可用（它在函数末尾才由
+		// accountTestRouter 造出来），所以写字面量 30 天 —— 与
+		// config.DefaultDeletionGrace 同一个值。本文件不测注销。
+		DeletionGrace: 30 * 24 * time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败：%v", err)

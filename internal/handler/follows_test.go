@@ -88,6 +88,10 @@ func newFollowEnvWithPusher(t *testing.T, pusher FollowPusher) *followEnv {
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
 		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
+		// 注销冷静期（票 #73）：config.Default() 已给好生产默认值（30 天），
+		// 直接沿用。不填会让构造器拒绝，于是本文件的每条用例都因为
+		// "少填一个测试参数"变红 —— 那不是它们要测的东西。
+		DeletionGrace: cfg.Auth.DeletionGrace,
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败：%v", err)
@@ -408,5 +412,50 @@ func TestFollowMutualEnablesCanDM(t *testing.T) {
 	}
 	if !st.Mutual || !st.CanDM {
 		t.Fatalf("互关应当可私聊：%+v", st)
+	}
+}
+
+// 注销冷静期里的人：关注 / 查关系都回 404，且响应体与"用户不存在"**逐字相同**。
+//
+// 为什么这条必须在 handler 层再判一次（store 层已有 `TestDeletionHidesAccountEverywhere`）：
+// store 的可见性谓词管的是**列表**（三份名单、粉丝红点、作者帖流），
+// 而这两个端点走的是**单点查询**（`UserByID` + 一个状态判断），
+// 它们根本不过那条谓词。漏掉的症状是"档案 404 了，但拿着 id 还能关注 TA"——
+// 而关注会写出一条指向隐形账号的新边，等于注销之后还在长数据。
+func TestFollowRejectsDeletionPendingTarget(t *testing.T) {
+	env := newFollowEnv(t)
+	ctx := context.Background()
+
+	if _, err := env.st.RequestAccountDeletion(ctx, env.bob.ID, time.Now()); err != nil {
+		t.Fatalf("发起注销失败：%v", err)
+	}
+
+	bobID := strconv.FormatInt(env.bob.ID, 10)
+	// 关注 → 404。
+	wFollow := env.doFollow(t, http.MethodPost, "/api/follows", env.tokA, `{"userId":`+bobID+`}`, nil)
+	if wFollow.Code != http.StatusNotFound {
+		t.Fatalf("关注冷静期里的账号应 404：got %d body=%s", wFollow.Code, wFollow.Body.String())
+	}
+	// 查关系 → 404。
+	wState := env.doFollow(t, http.MethodGet, "/api/follows/"+bobID, env.tokA, "", nil)
+	if wState.Code != http.StatusNotFound {
+		t.Fatalf("查与冷静期账号的关系应 404：got %d body=%s", wState.Code, wState.Body.String())
+	}
+
+	// 与"用户不存在"同一个响应体（不泄露"这个 id 存在但注销了"）。
+	wMissing := env.doFollow(t, http.MethodPost, "/api/follows", env.tokA, `{"userId":999999}`, nil)
+	if wFollow.Body.String() != wMissing.Body.String() {
+		t.Fatalf("冷静期与不存在的响应体必须完全相同：\n  冷静期 = %s\n  不存在 = %s",
+			wFollow.Body.String(), wMissing.Body.String())
+	}
+
+	// 库里没有边（HTTP 层拒了，数据也不能长出来）。
+	var n int64
+	if err := env.st.DB().Model(&store.Follow{}).
+		Where("follower_id = ? AND followee_id = ?", env.alice.ID, env.bob.ID).Count(&n).Error; err != nil {
+		t.Fatalf("数关注边失败：%v", err)
+	}
+	if n != 0 {
+		t.Fatalf("被拒的关注不该建边：got %d 条", n)
 	}
 }

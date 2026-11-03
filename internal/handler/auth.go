@@ -85,6 +85,20 @@ type AccountService interface {
 	SendEmailChangeOTP(ctx context.Context, userID int64, newEmail, ip, ua string) (string, error)
 	ConfirmEmailChange(ctx context.Context, userID int64, newEmail, code string) error
 
+	// —— 注销冷静期（票 #73 / 决议 #51 §5）。
+	//
+	// 三件事：发起（要当前密码）、撤销（不要密码）、读状态（给 /me 的横幅）。
+	//
+	// 为什么发起要密码而撤销不要：发起是**不可逆方向**的第一步（30 天后数据
+	// 真删），必须证明操作者是账号主人；撤销是降低风险的方向，多一道门只会
+	// 让"我误点了想撤回"变得更难 —— 而那正是这道门存在的理由。
+	//
+	// 三条都**不**清会话、不动 token_version：冷静期内必须能登录，否则横幅上的
+	// 「撤销」按钮永远点不到。
+	RequestAccountDeletion(ctx context.Context, userID int64, currentPassword string) (time.Time, error)
+	CancelAccountDeletion(ctx context.Context, userID int64) error
+	DeletionState(ctx context.Context, userID int64) (store.DeletionState, error)
+
 	// —— 幂等键（写操作的重放保护）。
 	ReserveIdempotency(ctx context.Context, scope, key, requestHash string, ttl time.Duration) (*store.IdempotencyRecord, error)
 	CompleteIdempotency(ctx context.Context, scope, key string, status int, response []byte) error
@@ -157,6 +171,16 @@ type AuthDeps struct {
 	//
 	// nil 是合法的：注册一组 503（与其它域同一套降级语义）。
 	UserProfile UserProfileService
+
+	// DeletionSweeper 是注销冷静期的后台清扫器（票 #73）。
+	//
+	// 为什么挂在 AuthDeps：它跟账号能力同生共死（没有账号就没有注销），
+	// 而 NewRouter 的参数个数与语义是硬约束（见上面几处同款说明）。
+	//
+	// **由 NewRouter 调 Start()**，与 `rooms.Start()` 同一套约定：
+	// wire provider 不产生看不见的后台生命周期，启动点集中在路由装配这一处。
+	// nil 是合法的（测试装配通常不传；窄实例也没有账号能力）。
+	DeletionSweeper *service.DeletionSweeper
 }
 
 // SessionConfig 是会话在 HTTP 层的参数。

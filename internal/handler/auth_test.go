@@ -346,6 +346,23 @@ func (f *fakeAccountService) ResetPasswordWithOTP(_ context.Context, _, _, _ str
 // （它们跑的是 `/api/auth/*`，改密端点在 `/api/me/password`，由
 // account_settings_test.go 用**真** AccountService 覆盖）。回一个明确的错误能让
 // "某条用例意外打到了改密端点"立刻暴露，而不是静默通过。
+// —— 注销冷静期（票 #73）：本文件不测它，桩一律回"会话无效" ——
+//
+// 与 ChangeMyPassword 同一条理由：这些用例跑的是 /api/auth/*，注销端点在
+// /api/me/deletion，由 account_settings_test.go 用**真** service 覆盖。
+// 回一个明确的错误能让"某条用例意外打到了注销端点"立刻暴露。
+func (f *fakeAccountService) RequestAccountDeletion(_ context.Context, _ int64, _ string) (time.Time, error) {
+	return time.Time{}, service.ErrSessionInvalid
+}
+
+func (f *fakeAccountService) CancelAccountDeletion(_ context.Context, _ int64) error {
+	return service.ErrSessionInvalid
+}
+
+func (f *fakeAccountService) DeletionState(_ context.Context, _ int64) (store.DeletionState, error) {
+	return store.DeletionState{}, service.ErrSessionInvalid
+}
+
 func (f *fakeAccountService) ChangeMyPassword(_ context.Context, _ int64, _, _, _, _ string) (*service.Session, error) {
 	return nil, service.ErrSessionInvalid
 }

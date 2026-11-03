@@ -430,6 +430,81 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /**
+   * 读注销状态（票 #73）。
+   *
+   * 只在 `pending=true` 时落地 `profile.deletionRequestedAt`：这个方法的用途是
+   * "进 /me 时确认横幅该不该挂"，而服务端回的 pending 是唯一权威。
+   * 顺手同步到 profile 让其它读 `deletionRequestedAt` 的地方（比如设置区）
+   * 不必各自再发一次请求。
+   */
+  async function loadDeletionState(): Promise<api.DeletionState> {
+    const state = await api.getDeletionState(accessToken.value)
+    syncDeletionFlag(state.requestedAt)
+    return state
+  }
+
+  /**
+   * 发起注销（票 #73）。
+   *
+   * 要当前密码。成功后**不**清会话、不换 token —— 冷静期内必须能登录看横幅、
+   * 点撤销（服务端也没动 token_version）。这里只把标志位落到本地，
+   * 让横幅立刻出现。
+   */
+  async function requestAccountDeletion(input: {
+    currentPassword: string
+    idempotencyKey?: string
+  }): Promise<api.DeletionState> {
+    notice.value = ''
+    const state = await api.requestAccountDeletion({
+      currentPassword: input.currentPassword,
+      token: accessToken.value,
+      idempotencyKey: input.idempotencyKey,
+    })
+    syncDeletionFlag(state.requestedAt)
+    return state
+  }
+
+  /**
+   * 撤销注销（票 #73）。**不要密码**（撤销是降低风险的方向）。
+   *
+   * 服务端回 409 `DELETION_NOT_PENDING` 时也把本地标志位清掉：那意味着
+   * "其实没有待执行的注销"（可能刚在别的标签页撤过），本地挂着横幅才是错的。
+   */
+  async function cancelAccountDeletion(): Promise<api.DeletionState> {
+    notice.value = ''
+    try {
+      const state = await api.cancelAccountDeletion(accessToken.value)
+      syncDeletionFlag(state.requestedAt)
+      return state
+    } catch (err) {
+      if (err instanceof api.AuthApiError && err.code === 'DELETION_NOT_PENDING') {
+        syncDeletionFlag(null)
+      }
+      throw err
+    }
+  }
+
+  /**
+   * syncDeletionFlag 是 `deletionRequestedAt` 的**唯一写入点**。
+   *
+   * 与 `setUnread` 同一条理由：两个写入点互相覆盖的症状是"横幅时有时无"。
+   * `null` = 不在冷静期，此时把键**删掉**（而不是写 undefined）——
+   * 保持"服务端没返回这个键"与"确实不在冷静期"在类型上可分辨。
+   */
+  function syncDeletionFlag(requestedAt: string | null): void {
+    const current = profile.value
+    if (!current) return
+    if (requestedAt === null) {
+      if (current.deletionRequestedAt === undefined) return
+      const { deletionRequestedAt: _drop, ...rest } = current
+      profile.value = rest
+      return
+    }
+    if (current.deletionRequestedAt === requestedAt) return
+    profile.value = { ...current, deletionRequestedAt: requestedAt }
+  }
+
+  /**
    * 退出所有设备（票 #71）。
    *
    * 服务端 `logout-all` 会 `token_version+1` 并撤销全部会话 —— 包括当前这台。
@@ -614,6 +689,9 @@ export const useAuthStore = defineStore('auth', () => {
     changePassword,
     sendEmailChangeOTP,
     confirmEmailChange,
+    loadDeletionState,
+    requestAccountDeletion,
+    cancelAccountDeletion,
     clearSession,
     authedFetch,
     ensureLoggedIn,

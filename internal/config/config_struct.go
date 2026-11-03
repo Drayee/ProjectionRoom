@@ -343,6 +343,21 @@ type AuthConfig struct {
 	//     而且极可能是有人把开发配置带进了部署）；
 	//   · 开着时启动日志会打一条显眼的 WARN。
 	OTPDevEcho bool
+
+	// DeletionGrace 是**注销冷静期**的长度（PR_DELETION_GRACE，默认 720h = 30 天）。
+	//
+	// 这段时间里账号对外完全不可见（档案 404、搜不到、名单里没有、帖子署名
+	// 变成「已注销用户」），但本人仍能登录、仍能撤销。到期后由后台清扫真删。
+	//
+	// 为什么不是"立刻删"：误点一次就变成不可挽回的数据丢失，而 30 天足够
+	// 一个人反应过来。为什么不是"永久保留"：用户说了要删，就得真删。
+	DeletionGrace time.Duration
+
+	// DeletionSweepInterval 是后台清扫的扫描周期（PR_DELETION_SWEEP_INTERVAL，默认 1h）。
+	//
+	// 它只影响"到期之后多久真的被删"，不影响到期日本身（那个由 DeletionGrace 算）。
+	// 调大到一天也不会错，只是删得更晚；调小到分钟级只在测试里需要。
+	DeletionSweepInterval time.Duration
 }
 
 // MailEnabled 判断邮件能力是否已配置齐全。

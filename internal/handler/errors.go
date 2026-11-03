@@ -85,6 +85,12 @@ const (
 	// 因此它必须逐字相同。改这里的文案/码之前请先读 service.Register 的那一段。
 	CodeEmailTaken = "EMAIL_TAKEN"
 
+	// CodeDeletionNotPending 表示"撤销注销"时账号并不在冷静期里（票 #73）。
+	//
+	// 单独一个码而不是复用 BAD_REQUEST：请求体本身没有错（DELETE 甚至没有请求体），
+	// 错的是**状态**。前端据此决定"把横幅收起来"而不是"标红某个输入框"。
+	CodeDeletionNotPending = "DELETION_NOT_PENDING"
+
 	// CodePasswordMismatch 表示「当前密码」填错了（票 #71 的 PUT /api/me/password）。
 	//
 	// 与 CodeLoginFailed 分开是刻意的：登录页那句"用户名或密码错误"是安全要求的
@@ -136,6 +142,16 @@ func accountErrorResponse(err error) (status int, code string, message string) {
 	// 症状是"少填一栏"被显示成"服务端内部错误"。
 	case errors.Is(err, errEmailChangeFieldsRequired):
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+	// 注销请求少了当前密码（account_settings.go 的入参哨兵，票 #73）。
+	// 与 errPasswordFieldsRequired 分开：那条文案说"当前密码与新密码"，
+	// 这里只有一个栏位，复用会让用户去找一个不存在的输入框。
+	case errors.Is(err, errDeletionPasswordRequired):
+		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
+	// 撤销一个没申请过的注销（票 #73）。409 而不是 400：请求本身是合法的，
+	// 是**状态**不一致 —— 用户可能刚在另一个标签页撤过，或者从来没发起过。
+	// 用 400 会让前端把它当成"参数填错"去标红输入框，而这里根本没有输入框。
+	case errors.Is(err, service.ErrDeletionNotPending):
+		return http.StatusConflict, CodeDeletionNotPending, err.Error()
 	case errors.Is(err, service.ErrBadUsername), errors.Is(err, service.ErrBadDisplayName):
 		return http.StatusBadRequest, model.CodeBadRequest, err.Error()
 	// 邮箱格式不合法：与"邮箱已被占用"分开，因为用户要采取的动作完全不同

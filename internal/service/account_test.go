@@ -169,6 +169,42 @@ func (f *fakeStore) UserByID(_ context.Context, id int64) (*store.User, error) {
 	return &cp, nil
 }
 
+// —— 注销冷静期（票 #73）：只动 deletion_requested_at 一列 ——
+//
+// 幂等且不延期这一条必须在假实现里也成立：真实语义就是"第二次发起返回原起点"，
+// 假实现若每次都覆盖，用假实现的用例就测不出 service 层有没有把它搞错。
+
+// RequestAccountDeletion 与真 store 同语义：幂等、不延期、不存在的账号 ErrNotFound。
+func (f *fakeStore) RequestAccountDeletion(_ context.Context, userID int64, at time.Time) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[userID]
+	if !ok {
+		return time.Time{}, store.ErrNotFound
+	}
+	if u.DeletionRequestedAt != nil {
+		return *u.DeletionRequestedAt, nil
+	}
+	stamp := at
+	u.DeletionRequestedAt = &stamp
+	return stamp, nil
+}
+
+// CancelAccountDeletion 与真 store 同语义：没有待执行的注销时回 ErrDeletionNotRequested。
+func (f *fakeStore) CancelAccountDeletion(_ context.Context, userID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[userID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if u.DeletionRequestedAt == nil {
+		return store.ErrDeletionNotRequested
+	}
+	u.DeletionRequestedAt = nil
+	return nil
+}
+
 func (f *fakeStore) SetUserStatus(_ context.Context, id int64, status, reason string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -706,6 +742,11 @@ func newTestService(t *testing.T, f *fakeStore, opts AccountOptions) *AccountSer
 	// 于是每个既有用例都会因为"少填一个测试参数"而变红 —— 那不是它们要测的东西。
 	if opts.OTPTTL == 0 {
 		opts.OTPTTL = 5 * time.Minute
+	}
+	// 注销冷静期（票 #73）：生产默认 30 天（config.DefaultDeletionGrace）。
+	// 同上面的理由 —— 不填会让构造器拒绝，而那不是既有用例要测的东西。
+	if opts.DeletionGrace == 0 {
+		opts.DeletionGrace = 30 * 24 * time.Hour
 	}
 	signer, err := auth.NewSigner(accountTestJWTSecret, 15*time.Minute)
 	if err != nil {

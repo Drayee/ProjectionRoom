@@ -109,10 +109,18 @@ func (s *Store) SendDM(ctx context.Context, senderID, recipientID int64, body st
 		Body:        text,
 	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 收件人必须存在（FK 也会挡，但那条错误没有可操作信息；
-		// 而且"发给一个不存在的 id"与"发给一个已销号的 id"对用户是同一种失败）。
+		// 收件人必须**存在且对外可见**（FK 也会挡"不存在"，但那条错误没有可操作信息；
+		// 而且"发给一个不存在的 id"与"发给一个已注销的 id"对用户是同一种失败）。
+		//
+		// 注销冷静期里的账号（票 #73）也归到这里：决议 #51 §5 定的是
+		// **历史保留给对方读、但不能继续往里写**。只判存在不判可见的话，
+		// 对方还能往一个"界面上已经查无此人"的账号发消息 —— 那既是
+		// 对注销语义的破坏（人已经在消失过程中了），也会让历史里多出
+		// 一条"发给已注销用户"的新消息，看起来像注销没生效。
 		var exists int64
-		if err := tx.Table("users").Where("id = ?", recipientID).Count(&exists).Error; err != nil {
+		if err := tx.Table("users").
+			Where("id = ? AND status = ? AND deletion_requested_at IS NULL", recipientID, StatusActive).
+			Count(&exists).Error; err != nil {
 			return fmt.Errorf("store: 检查收件人失败: %w", err)
 		}
 		if exists == 0 {
@@ -288,7 +296,7 @@ WITH mine AS (
 	 ORDER BY peer_id, id DESC
 )
 SELECT l.peer_id,
-       u.display_name AS peer_name,
+       CASE WHEN u.deletion_requested_at IS NULL THEN u.display_name ELSE '已注销用户' END AS peer_name,
        l.id           AS last_id,
        l.sender_id    AS last_sender_id,
        l.body         AS last_body,

@@ -132,7 +132,9 @@ func (h *authorContentHandler) visibleAuthor(c *gin.Context, id int64) bool {
 		// 前者是 404 的正确答案，后者至少不会把内部错误暴露成一个"有这个人"的信号。
 		return false
 	}
-	return u != nil && u.Status == store.StatusActive
+	// 判据与 service.PublicProfile 逐字一致（含票 #73 的注销维度）：
+	// 注销账号的子资源与它的档案一起消失，不能出现"档案 404 但帖子还能列出来"。
+	return u != nil && u.Status == store.StatusActive && u.DeletionRequestedAt == nil
 }
 
 // posts 是 `GET /api/users/:id/posts`。

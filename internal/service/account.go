@@ -253,6 +253,14 @@ type AccountStore interface {
 	BumpTokenVersion(ctx context.Context, id int64) (int, error)
 	TouchLastSeen(ctx context.Context, id int64, at time.Time) error
 
+	// —— 注销冷静期（票 #73）
+	//
+	// 三个方法只动 `users.deletion_requested_at` 一列：会话、口令、内容都不碰。
+	// 真正的删除是后台清扫的 `PurgeExpiredDeletions`，**不在这条接口上** ——
+	// 账号用例不该有"删号"的能力（它跑在请求路径上，见铁律 I4）。
+	RequestAccountDeletion(ctx context.Context, userID int64, at time.Time) (time.Time, error)
+	CancelAccountDeletion(ctx context.Context, userID int64) error
+
 	// —— 会话（refresh token）
 	CreateSession(ctx context.Context, sess *store.Session) error
 	SessionByTokenHash(ctx context.Context, hash string) (*store.Session, error)
@@ -350,6 +358,13 @@ type AccountService struct {
 	// **绝不从请求头推导** —— 理由见 config.AuthConfig.PublicBaseURL 的说明。
 	publicBaseURL string
 
+	// deletionGrace 是注销冷静期的长度（PR_DELETION_GRACE，票 #73）。
+	//
+	// 它同时决定两件事：`/me` 横幅显示的到期日，与后台清扫真正动手的时刻。
+	// 两处必须用同一个值 —— 让 handler 自己加一遍会让"横幅说到期了但数据还在"
+	// 成为可能，而那正是这个功能最不能出的错。
+	deletionGrace time.Duration
+
 	// hashing 是并发口令哈希闸门（容量见 DefaultHashingConcurrency）。
 	hashing chan struct{}
 
@@ -392,6 +407,12 @@ type AccountOptions struct {
 	//
 	// ⚠ 它废掉"证明邮箱归属"这件事。装配层会拒绝"开着它且 SMTP 已配置"的组合。
 	OTPDevEcho bool
+
+	// DeletionGrace 是注销冷静期长度（票 #73）；<= 0 报错。
+	//
+	// 与上面几条 TTL 同一条理由：写错的表现是"注销之后数据要么立刻没了、
+	// 要么永远不删"，两者都不会报错，只是行为不对 —— 宁可启动就失败。
+	DeletionGrace time.Duration
 }
 
 // NewAccountService 组装账号用例。
@@ -423,6 +444,9 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 	if opts.OTPTTL <= 0 {
 		return nil, fmt.Errorf("account: 验证码 TTL 必须为正，当前 %s", opts.OTPTTL)
 	}
+	if opts.DeletionGrace <= 0 {
+		return nil, fmt.Errorf("account: 注销冷静期必须为正，当前 %s", opts.DeletionGrace)
+	}
 
 	cost := opts.BcryptCost
 	if cost == 0 {
@@ -453,6 +477,7 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 		emailVerifyTTL: opts.EmailVerifyTTL,
 		otpTTL:         opts.OTPTTL,
 		otpDevEcho:     opts.OTPDevEcho,
+		deletionGrace:  opts.DeletionGrace,
 		publicBaseURL:  strings.TrimRight(strings.TrimSpace(opts.PublicBaseURL), "/"),
 		hashing:        make(chan struct{}, conc),
 		now:            now,
@@ -482,6 +507,12 @@ type Profile struct {
 	Status        string     `json:"status"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	LastSeenAt    *time.Time `json:"lastSeenAt,omitempty"`
+	// DeletionRequestedAt 是注销冷静期的起点（票 #73）；nil = 不在冷静期。
+	//
+	// 它出现在**本人**的档案里（Profile），**不出现在**公开档案（PublicProfile）：
+	// 前者是"我自己的账号怎么了"，后者是"别人怎么看我"。把注销状态公开出去
+	// 等于给所有人一个"这个人要走了"的信号，而决议 #51 §5 要的是静默隐藏。
+	DeletionRequestedAt *time.Time `json:"deletionRequestedAt,omitempty"`
 }
 
 // ProfileOf 把库里的用户转成对外档案（唯一出口，保证 PasswordHash 不外泄）。
@@ -490,14 +521,15 @@ func ProfileOf(u *store.User) Profile {
 		return Profile{}
 	}
 	p := Profile{
-		ID:            u.ID,
-		Username:      u.Username,
-		DisplayName:   u.DisplayName,
-		Email:         u.Email,
-		EmailVerified: u.Email != nil && u.EmailVerifiedAt != nil,
-		Role:          u.Role,
-		Status:        u.Status,
-		CreatedAt:     u.CreatedAt,
+		ID:                  u.ID,
+		Username:            u.Username,
+		DisplayName:         u.DisplayName,
+		Email:               u.Email,
+		EmailVerified:       u.Email != nil && u.EmailVerifiedAt != nil,
+		Role:                u.Role,
+		Status:              u.Status,
+		DeletionRequestedAt: u.DeletionRequestedAt,
+		CreatedAt:           u.CreatedAt,
 	}
 	if !u.LastSeenAt.IsZero() {
 		t := u.LastSeenAt
@@ -972,7 +1004,9 @@ func (s *AccountService) PublicProfile(ctx context.Context, userID int64) (Publi
 		}
 		return PublicProfile{}, err
 	}
-	if u.Status != store.StatusActive {
+	// 可见账号 = 未封禁 ∧ 未申请注销（票 #73）。两者都归成 ErrUserNotFound，
+	// 与"不存在"同一个响应 —— 区分它们等于开一条存在性探测通道。
+	if u.Status != store.StatusActive || u.DeletionRequestedAt != nil {
 		return PublicProfile{}, ErrUserNotFound
 	}
 	return PublicProfileOf(u), nil

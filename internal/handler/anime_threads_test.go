@@ -133,6 +133,10 @@ func newAnimeThreadEnv(t *testing.T) *atEnv {
 		EmailVerifyTTL: cfg.Auth.EmailVerifyTTL,
 		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
+		// 注销冷静期（票 #73）：config.Default() 已给好生产默认值（30 天），
+		// 直接沿用。不填会让构造器拒绝，于是本文件的每条用例都因为
+		// "少填一个测试参数"变红 —— 那不是它们要测的东西。
+		DeletionGrace: cfg.Auth.DeletionGrace,
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败：%v", err)

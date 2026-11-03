@@ -68,6 +68,7 @@ users
   status        varchar(8)  NOT NULL DEFAULT 'active' -- active | banned
   token_version int         NOT NULL DEFAULT 1   -- +1 即让该用户全部 access token 立即失效
   banned_reason text NULL
+  deletion_requested_at timestamptz NULL         -- 票 #73：非空 = 在注销冷静期里（可空无默认值）
   created_at / updated_at / last_seen_at
 
 sessions                                  -- refresh token（不透明随机串，库里只存 sha256）
@@ -436,6 +437,71 @@ GET /api/users/:id/rooms?limit&offset   → { items: { roomId, title, createdAt,
 - 这是第三个开关域之外的第九个：`VITE_MOCK_ROOMS`（`/api/rooms/mine` 是房主资产清单，
   不能挂在 `official` 下面 —— 官方区是运营位）。
 
+### 7.8 账号注销（票 #73；决议 #51 §5）
+
+**语义是「打一列标记 + 后台清扫真删」，不是 `status = 'deleted'`。**
+冷静期内本人必须**能登录**才能撤销，而 `status` 同时是登录门与可见性门
+（`isValidStatus` 只认 `active`/`banned`，`users` 的 CHECK 也钉着这两个值）；
+把它改成第三态会连带改掉登录判据，症状是"注销之后再也登不进来，于是撤销不了"。
+
+**数据**：`users.deletion_requested_at timestamptz NULL`（迁移 `0018_deletion_requested`，
+`ADD COLUMN IF NOT EXISTS`）。这一列就是全部状态：发起时写、撤销时清空、到期据此删。
+刻意**不**加 `deleted_at`/`is_deleted` 第二列 —— 两列都非空会造出"到底以哪个为准"的无语义中间态。
+**可空且无默认值**是语义的一部分：`DEFAULT now()` 会让每个新账号一出生就在冷静期里。
+
+**三个端点**（都需登录，各有独立幂等 scope）：
+
+| 端点 | 作用 | 要点 |
+| :--- | :--- | :--- |
+| `GET /api/me/deletion` | 读状态给横幅 | `{ pending, requestedAt, deadline }`；`deadline` 由服务端算 |
+| `POST /api/me/deletion` | 发起 | 收 `{currentPassword}`；scope `me.deletion.request` |
+| `DELETE /api/me/deletion` | 撤销 | **不要密码**；scope `me.deletion.cancel` |
+
+- **发起要当前密码 + 前端勾选确认**：密码与改密同一条理由（会话被劫持时，
+  攻击者不该能一键删号）；勾选是「我已知晓数据将在 30 天后永久删除」的明确同意。
+  确认走**页内确认条** `role="alertdialog"`，不是 `window.confirm`（#28 样板）。
+- **撤销不要密码**：撤销是降低风险的方向，加门只会让"想反悔的人反悔不了"。
+- **幂等且不延期**：已在冷静期里再发起，返回**原起点**。否则用户每刷一次页面就多 30 天，
+  永远到不了期 —— 这个缺陷是静默的（页面上一切正常，只是永远不删）。
+- 撤销时"没申请过"回 **409 `DELETION_NOT_PENDING`**：请求体没错，是状态不一致，
+  回 400 会让人去改请求。
+- **冷静期内不清会话、不动 `TokenVersion`**：蹬掉会话的直接后果是横幅上的「撤销」
+  永远点不到（401），30 天后数据真删。
+
+**可见性**（对外**立即**全隐藏，不必等到期）：
+
+- 唯一源是 `internal/store/visibility.go`：
+  `visibleAccountCondition = "status = 'active' AND deletion_requested_at IS NULL"` +
+  `applyVisibleAccount(db, alias)`；署名占位是 `maskedDisplayNameSQL(alias)`
+  （`CASE WHEN ... IS NULL THEN display_name ELSE '已注销用户' END`）
+  与常量 `DeletedUserDisplayName = "已注销用户"`。
+- 这条谓词管**列表**：搜索、三份名单（互关/关注/粉丝）、粉丝红点、作者帖流。
+- **单点查询不走它**，必须各自补：`handler/follows.go` 的关注与查关系两处、
+  `store.SendDM` 的收件人判断。漏掉的症状分别是"档案 404 了但拿着 id 还能关注 TA"
+  和"还能往一个已注销的账号发新消息"——两者都会写出指向隐形账号的新行，
+  而且界面上没有任何报错。
+- 公开档案 404 与"用户不存在"**同一个响应**（防存在性探测，与封禁合流）。
+- **历史保留、只读不回**：私聊历史与帖子正文都还在（另一方的对话权利不该被删号剥夺），
+  只有署名脱敏。
+
+**到期真删**：`internal/service/deletion_sweeper.go` 的后台协程，
+`time.NewTicker(PR_DELETION_SWEEP_INTERVAL)` 驱动，每次按 `now - PR_DELETION_GRACE`
+作 cutoff 调 `store.PurgeExpiredDeletions`（批 200，循环到返回 0）。
+**只能被清扫协程调用**（I4）：它不出现在任何请求路径上，`AccountStore` 窄接口里也
+**刻意不含**它 —— 账号用例不该有"删号"能力。外键 CASCADE 带走帖子/私聊/关注边/收藏。
+
+**前端**：`/me` 顶部横幅（分区条之上、所有分区之外 —— 横幅说的是"整个账号要没了"，
+与当前分区无关）+ 设置区「注销账号」危险区。
+横幅与设置区都读接口回的 `deadline`，**不在前端算冷静期长度**（那是服务端配置，
+复制一份就是第二份真源）。`stores/auth.ts` 的 `syncDeletionFlag()` 是
+`profile.deletionRequestedAt` 的**唯一写入点**（与 `setUnread` 同一条纪律）；
+`MePage.vue` 靠 watch 这个标志位去拉 `GET /api/me/deletion`，
+而不是靠组件 emit —— 标志位变了就说明状态真变了，不管是谁改的、在哪个标签页改的。
+
+**验收**：`test/script/verify-account-deletion.mjs`（真后端；14 条判据 + 可选 `--purge`）。
+`--purge` 要求实例把 `PR_DELETION_GRACE` 压到分钟级、`PR_DELETION_SWEEP_INTERVAL=1s`，
+且"行真被删了"的证据是**同名账号能重新注册**，只看 404 分不清"标记着"与"删了"。
+
 ## 8. 管理端
 
 - 前端 `/admin` 独立视图；**所有** `/api/admin/*` 由服务端 `RequireAdmin` 保护（前端 `v-if` 只控显示）。
@@ -469,6 +535,11 @@ GET /api/users/:id/rooms?limit&offset   → { items: { roomId, title, createdAt,
 用户
   PATCH  /api/me                   GET  /api/users/:id
   PUT    /api/me/password          凭当前密码改密（票 #71；成功 200 + 新会话，其余会话全撤销）
+  POST   /api/me/email/otp         发换绑码到**新**地址（票 #72；恒定 200，dev echo 回 devCode）
+  PUT    /api/me/email             凭码换绑（票 #72；码按收件地址校验；旧址即刻失效）
+  GET    /api/me/deletion          读注销冷静期状态（票 #73；{pending,requestedAt,deadline}）
+  POST   /api/me/deletion          发起注销（票 #73；收 currentPassword，要密码+勾选）
+  DELETE /api/me/deletion          撤销注销（票 #73；**不要密码**；没申请过 → 409 DELETION_NOT_PENDING）
   GET    /api/users/:id/posts?limit&offset    GET /api/users/:id/rooms?limit&offset
   （票 #68：作者内容子资源，**免登录**；刻意没有 ?authorId= 变体，规格 #55 允许二选一不双开）
   GET    /api/rooms/mine?limit&offset        房主全部房，含未公开与已关闭（票 #70）

@@ -54,7 +54,8 @@ func (s *Store) CountNewFollowers(ctx context.Context, userID int64) (int64, err
 		Table("follows AS f").
 		Joins("JOIN users p ON p.id = f.follower_id").
 		Where("f.followee_id = ?", userID).
-		Where("p.status = ?", StatusActive).
+		// 注销的粉丝不点亮红点（票 #73）：与名单、搜索、档案同一条口径。
+		Where("p.status = ? AND p.deletion_requested_at IS NULL", StatusActive).
 		Where(`NOT EXISTS (SELECT 1 FROM follows r WHERE r.follower_id = ? AND r.followee_id = f.follower_id)`, userID).
 		Where(`NOT EXISTS (
 			SELECT 1 FROM friendships b

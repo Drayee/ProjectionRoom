@@ -92,6 +92,18 @@ func NewEngineDeps(
 	if names := service.NewProfileNameLookup(res.Store); names != nil {
 		deps.ProfileNames = names
 	}
+
+	// 注销冷静期的后台清扫（票 #73）。这里**构造但不启动** —— 启动点在
+	// `handler.NewRouter`（与 `rooms.Start()` 同一处），因为 wire provider
+	// 不该产生看不见的后台生命周期。
+	//
+	// 为什么不新开一个 wire provider：清扫器只有两个依赖（store、两个时长），
+	// 而 store 已经在本函数的参数里。多一个 provider 就多一个要在
+	// `cmd/wire_gen.go` 里核对的创建/清理顺序位，收益不抵成本。
+	if res.Store != nil {
+		deps.DeletionSweeper = service.NewDeletionSweeper(
+			res.Store, cfg.Auth.DeletionGrace, cfg.Auth.DeletionSweepInterval)
+	}
 	return deps, nil
 }
 

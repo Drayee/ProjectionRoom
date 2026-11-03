@@ -22,7 +22,10 @@ package handler
 // 改密只是让它更持久，且原主人还能走验证码门找回来。详见
 // `service.AccountService.ChangeMyPassword` 的注释。
 //
-// 不做：改用户名（#51 Out of scope）、头像上传（#74）、注销（#73）。
+// 票 #72 加了换绑邮箱两个端点；票 #73 加了注销冷静期的三个端点
+// （发起 / 撤销 / 读状态）。
+//
+// 不做：改用户名（#51 Out of scope）、头像上传（#74 / #75）。
 
 import (
 	"errors"
@@ -34,6 +37,7 @@ import (
 
 	"ProjectionRoom/internal/config"
 	"ProjectionRoom/internal/model"
+	"ProjectionRoom/internal/store"
 )
 
 // changePasswordRequest 是 PUT /api/me/password 的请求体。
@@ -100,6 +104,33 @@ type confirmEmailChangeRequest struct {
 // 策略/占用类错误是两件事 —— 前者是"你漏填了"，后者是"你填的不对"。
 var errEmailChangeFieldsRequired = errors.New("请填写新邮箱与验证码")
 
+// —— 注销冷静期（票 #73 / 决议 #51 §5）——
+
+// scopeDeletionRequest / scopeDeletionCancel 是注销的两个幂等 scope。
+//
+// 必须分开：发起收 `{currentPassword}`、撤销收空体，共用 scope 会让
+// "发起之后点撤销"撞 409 同键不同体（而这两件事本来就是连续动作）。
+const (
+	scopeDeletionRequest = "me.deletion.request"
+	scopeDeletionCancel  = "me.deletion.cancel"
+)
+
+// requestDeletionRequest 是 POST /api/me/deletion 的请求体。
+//
+// 只有当前密码。**确认勾选不进请求体**：它是一个纯前端的前置条件
+// （决议 #51 §5「勾选『我已知晓数据将在 30 天后永久删除』」），
+// 传到服务端只会变成第二个可以伪造的字段 —— 服务端该判的是"是不是你"，
+// 不是"你勾了没"。
+type requestDeletionRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+}
+
+// errDeletionPasswordRequired 是"没填当前密码"的入参哨兵。
+//
+// 与 errPasswordFieldsRequired 分开：那条文案说"请填写当前密码与新密码"，
+// 这里只有一个栏位，复用会让用户去找一个不存在的输入框。
+var errDeletionPasswordRequired = errors.New("请输入当前密码以确认注销")
+
 // registerAccountSettingsRoutes 注册账号设置区的端点。
 //
 // 与其它二期路由同一套约定：账号能力关闭（`PR_DB_DSN` 为空）时整个域不注册；
@@ -128,6 +159,9 @@ func registerAccountSettingsRoutes(api *gin.RouterGroup, cfg *config.Config, aut
 		api.PUT("/me/password", unavailable)
 		api.POST("/me/email/otp", unavailable)
 		api.PUT("/me/email", unavailable)
+		api.GET("/me/deletion", unavailable)
+		api.POST("/me/deletion", unavailable)
+		api.DELETE("/me/deletion", unavailable)
 		return
 	}
 
@@ -155,6 +189,18 @@ func registerAccountSettingsRoutes(api *gin.RouterGroup, cfg *config.Config, aut
 	emailLimiter := newKeyedLimiter(cfg.IPC.LoginPerMinute, cfg.IPC.LoginBurst, "换绑邮箱")
 	api.POST("/me/email/otp", RequireAuth(auth), emailLimiter, h.sendEmailChangeOTP)
 	api.PUT("/me/email", RequireAuth(auth), emailLimiter, h.confirmEmailChange)
+
+	// 注销（票 #73）：三个端点，两条桶。
+	//
+	// 发起挂**登录桶** —— 它要校验当前密码，是一个口令猜测面（与改密同一条理由）。
+	// 撤销与读状态挂**只读桶** —— 撤销不需要凭据、只是把一列清空（幂等、无滥用面），
+	// 读状态更是纯查询；拿登录桶去卡它们会让"我误点了想撤回"被限流挡住，
+	// 而那正是最不能挡的时刻。
+	deletionLimiter := newKeyedLimiter(cfg.IPC.LoginPerMinute, cfg.IPC.LoginBurst, "发起注销")
+	readLimiter := newKeyedLimiter(cfg.IPC.RoomMetaPerMinute, cfg.IPC.RoomMetaBurst, "注销状态")
+	api.GET("/me/deletion", RequireAuth(auth), readLimiter, h.getDeletion)
+	api.POST("/me/deletion", RequireAuth(auth), deletionLimiter, h.requestDeletion)
+	api.DELETE("/me/deletion", RequireAuth(auth), readLimiter, h.cancelDeletion)
 }
 
 // accountSettingsHandler 持有依赖。
@@ -309,6 +355,126 @@ func (h *accountSettingsHandler) confirmEmailChange(c *gin.Context) {
 		}
 		return http.StatusOK, prof, nil
 	})
+}
+
+// getDeletion 是 `GET /api/me/deletion`（票 #73）。
+//
+// 给 `/me` 顶部的撤销横幅用：冷静期里的横幅要显示"还有 N 天"，而 N 需要
+// 起点与冷静期两个值。返回 `{"pending":bool,"requestedAt":?,"deadline":?}`。
+//
+// 为什么不复用 `/api/auth/me` 里已有的 `deletionRequestedAt`：那个只有起点，
+// 到期日需要前端自己知道冷静期是几天 —— 而"冷静期多久"是服务端配置
+// （`PR_DELETION_GRACE`），把它复制到前端就是第二份真源。改配置时前端不改，
+// 横幅就会显示一个永远不会到来的日期。
+func (h *accountSettingsHandler) getDeletion(c *gin.Context) {
+	actor, ok := CurrentUser(c)
+	if !ok {
+		writeAccountError(c, errSettingsSessionInvalid)
+		return
+	}
+	st, err := h.auth.DeletionState(c.Request.Context(), actor.ID)
+	if err != nil {
+		writeAccountError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, newDeletionStateView(st))
+}
+
+// requestDeletion 是 `POST /api/me/deletion`（票 #73）。
+//
+// 状态码与判据：
+//
+//	401 SESSION_INVALID     没有/无效的 access token
+//	400 BAD_REQUEST         没填当前密码，或请求体不是 JSON
+//	400 PASSWORD_MISMATCH   当前密码不对
+//	403 FORBIDDEN           账号被封禁（封禁不该成为"删数据"的快捷方式）
+//	429 RATE_LIMITED        撞上登录桶
+//	200 + 状态              已进入冷静期（幂等：重复发起返回**原**起点，不延期）
+//
+// 为什么回 200 + 状态而不是 204：前端要立刻把横幅挂出来（含到期日）。
+// 回 204 的话它得再发一次 GET，中间那一帧用户看不到"我到底成功了没"。
+func (h *accountSettingsHandler) requestDeletion(c *gin.Context) {
+	runWithIdempotency(c, h.auth, scopeDeletionRequest, func() (int, any, error) {
+		actor, ok := CurrentUser(c)
+		if !ok {
+			return 0, nil, errSettingsSessionInvalid
+		}
+
+		var req requestDeletionRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			return 0, nil, errBadJSON
+		}
+		if strings.TrimSpace(req.CurrentPassword) == "" {
+			return 0, nil, errDeletionPasswordRequired
+		}
+
+		if _, err := h.auth.RequestAccountDeletion(c.Request.Context(), actor.ID, req.CurrentPassword); err != nil {
+			return 0, nil, err
+		}
+
+		// 回读状态：冷静期长度来自服务端配置，起点来自刚写的那一列。
+		st, err := h.auth.DeletionState(c.Request.Context(), actor.ID)
+		if err != nil {
+			return 0, nil, err
+		}
+		return http.StatusOK, newDeletionStateView(st), nil
+	})
+}
+
+// cancelDeletion 是 `DELETE /api/me/deletion`（票 #73）。
+//
+// 状态码与判据：
+//
+//	401 SESSION_INVALID        没有/无效的 access token
+//	409 DELETION_NOT_PENDING   没有待执行的注销（重复撤销）
+//	200 + 状态                 已撤销
+//
+// **不要密码**（决议 #51 §5）：撤销是降低风险的方向。多一道门只会让
+// "我误点了想撤回"更难，而那正是这道门存在的理由。
+//
+// 为什么走幂等壳：撤销本身是幂等的（清一列），但重发拿到同一个成功响应
+// 比拿到 409 更符合用户预期 —— 而 409 只该出现在"你其实没申请过"这种
+// 真正的前后不一致上，不该出现在"我刚才已经撤了"这种正常重试上。
+// 因此这里**不**走幂等壳，让 409 如实反映状态。
+func (h *accountSettingsHandler) cancelDeletion(c *gin.Context) {
+	actor, ok := CurrentUser(c)
+	if !ok {
+		writeAccountError(c, errSettingsSessionInvalid)
+		return
+	}
+	if err := h.auth.CancelAccountDeletion(c.Request.Context(), actor.ID); err != nil {
+		writeAccountError(c, err)
+		return
+	}
+	st, err := h.auth.DeletionState(c.Request.Context(), actor.ID)
+	if err != nil {
+		writeAccountError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, newDeletionStateView(st))
+}
+
+// deletionStateView 是注销状态对外的形状。
+//
+// 时间用 RFC3339 字符串（与其它端点的 `createdAt` 一致），`null` 表示
+// "不在冷静期" —— 与"零点值"区分开。前端据此决定挂不挂横幅。
+type deletionStateView struct {
+	Pending     bool    `json:"pending"`
+	RequestedAt *string `json:"requestedAt"`
+	Deadline    *string `json:"deadline"`
+}
+
+func newDeletionStateView(st store.DeletionState) deletionStateView {
+	v := deletionStateView{Pending: st.Pending()}
+	if st.RequestedAt != nil {
+		s := st.RequestedAt.UTC().Format(time.RFC3339)
+		v.RequestedAt = &s
+	}
+	if st.Deadline != nil {
+		s := st.Deadline.UTC().Format(time.RFC3339)
+		v.Deadline = &s
+	}
+	return v
 }
 
 // 保住 model 的引用：本文件的两个哨兵走 accountErrorResponse（它用 model.Code*），

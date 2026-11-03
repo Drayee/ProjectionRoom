@@ -134,7 +134,9 @@ func (s *Store) ListFollowList(ctx context.Context, userID int64, tab FollowList
 	}
 
 	// 共用可见性过滤（三支都在这里，不各写一遍）。
-	db = db.Where("p.status = ?", StatusActive).
+	// 可见账号 = 未封禁 ∧ 未申请注销（票 #73）。注销的人从三份名单里都消失，
+	// 与公开档案 404、搜索结果消失是同一条口径（见 visibility.go）。
+	db = db.Where("p.status = ? AND p.deletion_requested_at IS NULL", StatusActive).
 		Where(`NOT EXISTS (
 			SELECT 1 FROM friendships b
 			 WHERE b.status = 'blocked'

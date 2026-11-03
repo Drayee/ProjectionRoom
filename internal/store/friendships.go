@@ -270,7 +270,10 @@ func (s *Store) SearchUsers(ctx context.Context, keyword string, excludeID int64
 	}
 	if excludeID > 0 {
 		var rows []UserSearchHit
-		err := s.db.WithContext(ctx).
+		// 可见账号过滤（票 #73）：注销与封禁的账号都不该被搜到。
+		// 用 applyVisibleAccount 而不是手写条件 —— 这条口径在档案、名单、
+		// 红点、流谓词四处都要成立，见 visibility.go 的文件头。
+		err := applyVisibleAccount(s.db.WithContext(ctx), "").
 			Where(`(username ILIKE ? ESCAPE '\' OR display_name ILIKE ? ESCAPE '\') AND id <> ?`,
 				pattern, pattern, excludeID).
 			Order("id ASC").Limit(searchLimit).
@@ -281,7 +284,7 @@ func (s *Store) SearchUsers(ctx context.Context, keyword string, excludeID int64
 		return rows, nil
 	}
 	var rows []UserSearchHit
-	err := s.db.WithContext(ctx).
+	err := applyVisibleAccount(s.db.WithContext(ctx), "").
 		Where(`username ILIKE ? ESCAPE '\' OR display_name ILIKE ? ESCAPE '\'`, pattern, pattern).
 		Order("id ASC").Limit(searchLimit).
 		Find(&rows).Error

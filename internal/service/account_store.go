@@ -329,3 +329,15 @@ func (p *ProfileNameLookup) ProfileNameByID(ctx context.Context, id int64) (stri
 	}
 	return u.DisplayName, nil
 }
+
+// —— 注销冷静期（票 #73）：纯转发，语义在 store 侧。
+
+// RequestAccountDeletion 把账号置入冷静期（幂等、不延期）。
+func (a *AccountStoreAdapter) RequestAccountDeletion(ctx context.Context, userID int64, at time.Time) (time.Time, error) {
+	return a.store.RequestAccountDeletion(ctx, userID, at)
+}
+
+// CancelAccountDeletion 撤销注销申请。
+func (a *AccountStoreAdapter) CancelAccountDeletion(ctx context.Context, userID int64) error {
+	return a.store.CancelAccountDeletion(ctx, userID)
+}

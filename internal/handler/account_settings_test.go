@@ -152,6 +152,10 @@ func newSettingsEnvWith(t *testing.T, devEcho bool) *settingsEnv {
 		OTPTTL:         cfg.Auth.OTPTTL,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
 		OTPDevEcho:     devEcho,
+		// 注销冷静期（票 #73）：生产默认 30 天（config.DefaultDeletionGrace）。
+		// 不填会让构造器拒绝，于是本文件每条用例都因为"少填一个测试参数"变红
+		// —— 那不是它们要测的东西。
+		DeletionGrace: 30 * 24 * time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("构造 AccountService 失败：%v", err)

@@ -50,6 +50,7 @@ import MeRelationsBlock from '../components/features/profile/MeRelationsBlock.vu
 import MeFavoritesBlock from '../components/features/profile/MeFavoritesBlock.vue'
 import MeRoomsBlock from '../components/features/profile/MeRoomsBlock.vue'
 import MeSettingsBlock from '../components/features/profile/MeSettingsBlock.vue'
+import * as api from '../api/auth'
 import * as usersApi from '../api/users'
 import { NETWORK_MESSAGE, toHttpError } from '../api/http'
 import { isCapabilityUnavailable } from '../api/mode'
@@ -179,6 +180,125 @@ watch(
   { immediate: true },
 )
 
+/**
+ * 登录态翻转时读一次注销状态。
+ *
+ * 放在 watch 而不是 `onMounted`：`/me` 支持深链，而深链进页时 `bootstrap()`
+ * 可能还没跑完 —— 挂载那一刻 `isLoggedIn` 还是假，读一次会直接短路。
+ * 用 watch（immediate）让"恢复登录 → 登录"这条也覆盖到。
+ */
+watch(
+  () => auth.isLoggedIn,
+  (logged) => {
+    if (logged) void loadDeletion()
+    else deletion.value = null
+  },
+  { immediate: true },
+)
+
+// ---------- 注销冷静期横幅（票 #73） ----------
+
+/**
+ * 注销状态：`pending` 为真时页面顶部挂一条撤销横幅。
+ *
+ * 三条数据来源，优先级从高到低：
+ *
+ *  1. 本页刚发起/撤销后的服务端响应（最权威，含到期日）；
+ *  2. `GET /api/me/deletion`（进页面时确认一次）；
+ *  3. `auth.profile.deletionRequestedAt`（登录后 `/me` 已经带回来了，没有到期日）。
+ *
+ * 为什么需要第 2 条而不是只用第 3 条：横幅要显示"还有 N 天"，N 需要冷静期长度，
+ * 那是服务端配置。把它复制到前端就是第二份真源 —— 改配置时前端不改，
+ * 横幅会显示一个永远不会到来的日期。
+ */
+const deletion = ref<api.DeletionState | null>(null)
+const deletionLoading = ref(false)
+const deletionError = ref('')
+const cancelling = ref(false)
+
+/** 冷静期里还剩几天（向上取整；已到期显示 0）。 */
+const daysLeft = computed(() => {
+  const deadline = deletion.value?.deadline
+  if (!deadline) return null
+  const ms = new Date(deadline).getTime() - Date.now()
+  if (!Number.isFinite(ms)) return null
+  return Math.max(0, Math.ceil(ms / 86_400_000))
+})
+
+/** 到期日的可读形式（YYYY-MM-DD；解析不了就原样显示）。 */
+const deadlineText = computed(() => {
+  const deadline = deletion.value?.deadline
+  if (!deadline) return ''
+  const d = new Date(deadline)
+  if (Number.isNaN(d.getTime())) return deadline
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+})
+
+/** 横幅要不要挂：以服务端 pending 为准；本地没有状态时回落到 profile 的标志位。 */
+const showDeletionBanner = computed(
+  () => deletion.value?.pending === true || (auth.profile?.deletionRequestedAt ?? '') !== '',
+)
+
+/**
+ * 跟着 `profile.deletionRequestedAt` 刷新横幅。
+ *
+ * 为什么需要它：发起注销的入口在**设置区**（`MeSettingsBlock`），而横幅在页面顶部。
+ * 设置区写完之后只同步了 profile 上的标志位，`deletion`（本页的那份状态）还是旧的 ——
+ * 于是横幅会挂出来但**只有标题**：没有"还有 N 天"、也没有到期日，因为那两个值
+ * 来自 `GET /api/me/deletion`，而这一页还没查过。
+ *
+ * 走"标志位变了就补一次查询"而不是让设置区 emit 事件：标志位是**唯一写入点**
+ * （`syncDeletionFlag`），它变了就说明状态真的变了 —— 不管是谁改的、也不管
+ * 是在哪个标签页改的。emit 只在"本页那个组件"里成立，换个入口就漏。
+ */
+watch(
+  () => auth.profile?.deletionRequestedAt ?? '',
+  (flag) => {
+    if (flag === '') {
+      // 撤销之后横幅立刻撤掉（本页点的、别的标签页点的，都走这里）。
+      if (deletion.value?.pending !== true) deletion.value = null
+      return
+    }
+    // 刚发起注销：补一次状态查询，把到期日与剩余天数取回来。
+    if (deletion.value?.pending !== true) void loadDeletion()
+  },
+)
+
+/** 进 /me 时读一次注销状态（只在登录态下）。 */
+async function loadDeletion(): Promise<void> {
+  if (!auth.isLoggedIn) {
+    deletion.value = null
+    return
+  }
+  deletionLoading.value = true
+  deletionError.value = ''
+  try {
+    deletion.value = await auth.loadDeletionState()
+  } catch (err) {
+    // 读不到状态不该挡住整页：横幅不挂，但把原因留在设置区（用户去那里才知道）。
+    deletionError.value = toHttpError(err).message
+    deletion.value = null
+  } finally {
+    deletionLoading.value = false
+  }
+}
+
+/** 撤销注销：不要密码（撤销是降低风险的方向），成功后横幅立刻消失。 */
+async function cancelDeletion(): Promise<void> {
+  if (cancelling.value) return
+  cancelling.value = true
+  deletionError.value = ''
+  try {
+    deletion.value = await auth.cancelAccountDeletion()
+    // 服务端可能回 409（其实没申请过）—— store 已把标志位清掉，这里也清横幅。
+    if (deletion.value.pending !== true) deletion.value = null
+  } catch (err) {
+    deletionError.value = toHttpError(err).message
+  } finally {
+    cancelling.value = false
+  }
+}
+
 // ---------- 分区切换时的焦点管理 ----------
 
 const tabBar = ref<HTMLElement | null>(null)
@@ -215,6 +335,36 @@ watch(tab, async () => {
       </AsyncState>
 
       <template v-else>
+        <!--
+          注销冷静期横幅（票 #73）。
+
+          位置刻意在**分区条之上、所有分区之外**：它说的是"整个账号要没了"，
+          与用户当前在哪个分区无关。挂在某个分区里会让"切到收藏就看不见"
+          成为可能，而那条横幅的唯一作用是让人及时撤销。
+        -->
+        <section v-if="showDeletionBanner" class="banner" role="alert" aria-labelledby="me-deletion-head">
+          <div class="banner-body">
+            <h2 id="me-deletion-head" class="banner-title">
+              这个账号已申请注销<template v-if="daysLeft !== null">，还有 {{ daysLeft }} 天执行</template>
+            </h2>
+            <p class="banner-text">
+              <template v-if="deadlineText">
+                数据将在 <span class="mono">{{ deadlineText }}</span> 之后被永久删除（帖子、私聊、关注关系、放映室一并删除，无法恢复）。
+              </template>
+              <template v-else>
+                数据将在冷静期结束后被永久删除，无法恢复。
+              </template>
+              在那之前，你可以随时撤销。
+            </p>
+            <p v-if="deletionError" class="alert" data-testid="deletion-error">{{ deletionError }}</p>
+          </div>
+          <div class="banner-actions">
+            <Button variant="primary" data-testid="deletion-cancel" :disabled="cancelling" @click="cancelDeletion">
+              {{ cancelling ? '正在撤销…' : '撤销注销' }}
+            </Button>
+          </div>
+        </section>
+
         <!-- 分区条：`?tab=` 进 URL，刷新/分享/后退都成立。 -->
         <nav ref="tabBar" class="tabs" role="tablist" aria-label="管理台分区" tabindex="-1">
           <Button
@@ -500,5 +650,49 @@ watch(tab, async () => {
 }
 .small {
   font-size: 12px;
+}
+/*
+ * 注销横幅（票 #73）。
+ *
+ * 用 `--danger` 的边框与底色而不是普通卡片：它必须在一屏里被立刻认出来，
+ * 而用户来这一页通常是为了做别的事（改昵称、看收藏），不会主动去找它。
+ * 但它**不是** modal、不挡住任何东西 —— 撤销是可选的，不该强迫用户先处理它
+ * 才能用管理台（与 #71 的「退出所有设备」页内确认条同一取向）。
+ */
+.banner {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+.banner-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+.banner-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.banner-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.banner-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 </style>

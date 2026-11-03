@@ -52,6 +52,15 @@ export interface AuthUser {
    * 这条由 `stores/auth.ts` 的 `refreshProfile()` 负责。
    */
   unread?: number
+  /**
+   * 注销冷静期的起点（RFC3339，票 #73）；缺失 = 不在冷静期。
+   *
+   * **可选**的理由与 `emailVerified` 相同：服务端不返回这个键时，
+   * 界面不能把它谎报成"你正在注销中"。注意它只在**本人**的档案里出现
+   * （`/me` 与 `GET /api/me/deletion`），公开档案 `PublicProfile` 刻意不带它 ——
+   * 把"这个人要走了"公开出去等于给所有人一个信号，而决议要的是静默隐藏。
+   */
+  deletionRequestedAt?: string
 }
 
 /** register / login / refresh 三个端点的统一响应。 */
@@ -208,6 +217,10 @@ function normalizeUser(raw: unknown): AuthUser {
   // 所以判断条件是 `typeof === 'number'` 而不是"真值"。
   if (typeof user.unread === 'number') {
     normalized.unread = user.unread
+  }
+  // 注销起点同理：只有服务端真的给了字符串才带上。
+  if (typeof user.deletionRequestedAt === 'string' && user.deletionRequestedAt !== '') {
+    normalized.deletionRequestedAt = user.deletionRequestedAt
   }
   return normalized
 }
@@ -421,6 +434,81 @@ export async function confirmEmailChange(input: ConfirmEmailChangeInput): Promis
     idempotencyKey: input.idempotencyKey,
   })) as unknown
   return normalizeUser(body)
+}
+
+/**
+ * 注销冷静期的状态（票 #73）。`pending=false` 时两个时间都是 null。
+ *
+ * 为什么要有这个独立端点而不是只靠 `/me` 里的 `deletionRequestedAt`：
+ * 那个只有**起点**，而横幅要显示"还有 N 天" —— N 需要冷静期长度，
+ * 那是服务端配置（`PR_DELETION_GRACE`）。把它复制到前端就是第二份真源，
+ * 改配置时前端不改，横幅会显示一个永远不会到来的日期。
+ */
+export interface DeletionState {
+  pending: boolean
+  /** 冷静期起点（RFC3339）；不在冷静期时为 null。 */
+  requestedAt: string | null
+  /** 到期日（RFC3339）；不在冷静期时为 null。 */
+  deadline: string | null
+}
+
+/** GET /api/me/deletion —— 读注销状态（票 #73）。 */
+export async function getDeletionState(token: string): Promise<DeletionState> {
+  const body = (await requestURL('/api/me/deletion', { method: 'GET', token })) as
+    | { pending?: unknown; requestedAt?: unknown; deadline?: unknown }
+    | null
+  return {
+    pending: body?.pending === true,
+    // 空串也归一成 null：服务端用 null 表示"不在冷静期"，但多一道兜底
+    // 让界面永远不用处理"pending=true 但时间是空串"这种自相矛盾的组合。
+    requestedAt: typeof body?.requestedAt === 'string' && body.requestedAt !== '' ? body.requestedAt : null,
+    deadline: typeof body?.deadline === 'string' && body.deadline !== '' ? body.deadline : null,
+  }
+}
+
+/**
+ * POST /api/me/deletion —— 发起注销（票 #73）。
+ *
+ * 要**当前密码**：注销是不可逆方向的第一步（30 天后数据真删），必须证明操作者
+ * 是账号主人 —— 只劫持到会话不足以注销别人的账号。
+ *
+ * 成功后回 200 + 状态（含到期日）。幂等：重复发起返回**原**起点，不延期。
+ */
+export async function requestAccountDeletion(input: {
+  currentPassword: string
+  token: string
+  idempotencyKey?: string
+}): Promise<DeletionState> {
+  const body = (await requestURL('/api/me/deletion', {
+    method: 'POST',
+    body: { currentPassword: input.currentPassword },
+    token: input.token,
+    idempotencyKey: input.idempotencyKey,
+  })) as { pending?: unknown; requestedAt?: unknown; deadline?: unknown } | null
+  return {
+    pending: body?.pending === true,
+    requestedAt: typeof body?.requestedAt === 'string' && body.requestedAt !== '' ? body.requestedAt : null,
+    deadline: typeof body?.deadline === 'string' && body.deadline !== '' ? body.deadline : null,
+  }
+}
+
+/**
+ * DELETE /api/me/deletion —— 撤销注销（票 #73）。
+ *
+ * **不要密码**（决议 #51 §5）：撤销是降低风险的方向，多一道门只会让
+ * "我误点了想撤回"更难 —— 而那正是这道门存在的理由。
+ *
+ * 没申请过时服务端回 409 `DELETION_NOT_PENDING`；调用方据此把横幅收起来。
+ */
+export async function cancelAccountDeletion(token: string): Promise<DeletionState> {
+  const body = (await requestURL('/api/me/deletion', { method: 'DELETE', token })) as
+    | { pending?: unknown; requestedAt?: unknown; deadline?: unknown }
+    | null
+  return {
+    pending: body?.pending === true,
+    requestedAt: typeof body?.requestedAt === 'string' && body.requestedAt !== '' ? body.requestedAt : null,
+    deadline: typeof body?.deadline === 'string' && body.deadline !== '' ? body.deadline : null,
+  }
 }
 
 /** GET /api/auth/me —— 校验 access token 并取回最新用户信息。 */

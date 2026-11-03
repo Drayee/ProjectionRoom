@@ -269,7 +269,7 @@ func (s *Store) ListPosts(ctx context.Context, sort ListPostsSort, limit, offset
 
 	db := s.db.WithContext(ctx).
 		Table("posts AS p").
-		Select("p.*, u.display_name AS author_name").
+		Select("p.*, " + maskedDisplayNameSQL("u") + " AS author_name").
 		Joins("JOIN users u ON u.id = p.author_id").
 		Order(order + ", p.id DESC")
 
@@ -352,7 +352,7 @@ func (s *Store) ListAnimeThreads(ctx context.Context, animeID int64, sort ListAn
 	var rows []Post
 	err := s.db.WithContext(ctx).
 		Table("posts AS p").
-		Select("p.*, u.display_name AS author_name").
+		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name").
 		Joins("JOIN users u ON u.id = p.author_id").
 		Where("p.anime_id = ?", animeID).
 		Order(order + ", p.id DESC").
@@ -428,7 +428,7 @@ func (s *Store) ListPostsByAuthor(ctx context.Context, authorID int64, limit, of
 
 	db := s.db.WithContext(ctx).
 		Table("posts AS p").
-		Select("p.*, u.display_name AS author_name").
+		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name").
 		Joins("JOIN users u ON u.id = p.author_id").
 		Where("p.author_id = ?", authorID).
 		Order("p.created_at DESC, p.id DESC")
@@ -534,7 +534,7 @@ func (s *Store) PostByID(ctx context.Context, id int64, viewerID int64) (*Post, 
 	var row Post
 	err := s.db.WithContext(ctx).
 		Table("posts AS p").
-		Select("p.*, u.display_name AS author_name").
+		Select("p.*, "+maskedDisplayNameSQL("u")+" AS author_name").
 		Joins("JOIN users u ON u.id = p.author_id").
 		Where("p.id = ?", id).
 		Take(&row).Error
@@ -635,7 +635,7 @@ func (s *Store) ListPostComments(ctx context.Context, postID int64, limit, offse
 	var rows []PostComment
 	err := s.db.WithContext(ctx).
 		Table("post_comments AS c").
-		Select("c.*, u.display_name AS author_name").
+		Select("c.*, "+maskedDisplayNameSQL("u")+" AS author_name").
 		Joins("JOIN users u ON u.id = c.author_id").
 		Where("c.post_id = ?", postID).
 		Order("c.created_at ASC, c.id ASC").

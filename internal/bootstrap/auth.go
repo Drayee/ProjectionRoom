@@ -98,6 +98,8 @@ func NewAccountService(
 		OTPTTL:         cfg.Auth.OTPTTL,
 		OTPDevEcho:     cfg.Auth.OTPDevEcho,
 		PublicBaseURL:  cfg.Auth.PublicBaseURL,
+		// 注销冷静期（票 #73）：同时决定 /me 横幅的到期日与后台清扫动手的时刻。
+		DeletionGrace: cfg.Auth.DeletionGrace,
 	}
 	if mailer != nil {
 		opts.Mail = mailer

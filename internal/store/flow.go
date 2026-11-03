@@ -52,7 +52,10 @@ var ErrFlowNeedsViewer = errors.New("store: 关注流需要登录")
 // 而 `requester_id = 0` 匹配不到任何行，写了也只是白白多一个子查询。
 // 封禁那一条对匿名同样生效 —— 封禁是账号级的事实，与谁在看无关。
 func (s *Store) applyAuthorVisibility(db *gorm.DB, viewerID int64, authorCol string) *gorm.DB {
-	db = db.Where(`EXISTS (SELECT 1 FROM users va WHERE va.id = `+authorCol+` AND va.status = ?)`, StatusActive)
+	// 可见账号 = 未封禁 ∧ 未申请注销（票 #73）。两者都必须在这里，
+	// 因为本函数是"这个作者对这个人可不可见"的唯一实现（见文件头）。
+	db = db.Where(`EXISTS (SELECT 1 FROM users va WHERE va.id = `+authorCol+`
+		AND va.status = ? AND va.deletion_requested_at IS NULL)`, StatusActive)
 	if viewerID > 0 {
 		db = db.Where(`NOT EXISTS (
 			SELECT 1 FROM friendships b

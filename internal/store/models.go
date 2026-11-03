@@ -93,9 +93,18 @@ type User struct {
 	Status          string     `gorm:"column:status"`
 	TokenVersion    int        `gorm:"column:token_version"`
 	BannedReason    *string    `gorm:"column:banned_reason"`
-	CreatedAt       time.Time  `gorm:"column:created_at"`
-	UpdatedAt       time.Time  `gorm:"column:updated_at"`
-	LastSeenAt      time.Time  `gorm:"column:last_seen_at"`
+	// DeletionRequestedAt 是注销冷静期的起点（票 #73）；nil = 从未申请注销。
+	//
+	// 非 nil 时这个账号**对外完全不可见**（档案 404、搜索/关注/粉丝/互关名单消失、
+	// 帖子流谓词过滤掉），但**本人仍能登录**（否则 30 天内撤销不了），
+	// 私聊历史对另一方保留。到期由后台清扫真删（CASCADE 带走全部内容）。
+	//
+	// 与 Status 分成两列的理由见 migrations.go 的 0018 注释：注销是用户自己的决定、
+	// 封禁是平台的处置，混进同一个列会让审计分不清两者，而冷静期内 status 必须是 active。
+	DeletionRequestedAt *time.Time `gorm:"column:deletion_requested_at"`
+	CreatedAt           time.Time  `gorm:"column:created_at"`
+	UpdatedAt           time.Time  `gorm:"column:updated_at"`
+	LastSeenAt          time.Time  `gorm:"column:last_seen_at"`
 }
 
 // TableName 固定表名：GORM 默认会把 RoomMeta 复数化成 room_metas，

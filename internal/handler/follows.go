@@ -265,7 +265,10 @@ func (h *followHandler) create(c *gin.Context) {
 			}
 			return 0, nil, err
 		}
-		if peer.Status != store.StatusActive {
+		// 注销冷静期里的人也归到"不存在"（票 #73）：判据与
+		// `service.PublicProfile` 逐字一致，否则会出现"档案 404 了，
+		// 但拿着 id 还能关注 TA"——而关注会写出一条指向隐形账号的新边。
+		if peer.Status != store.StatusActive || peer.DeletionRequestedAt != nil {
 			return 0, nil, store.ErrFollowTargetNotFound
 		}
 
@@ -359,7 +362,9 @@ func (h *followHandler) state(c *gin.Context) {
 		friendInternal(c, "查询用户失败", err)
 		return
 	}
-	if peer.Status != store.StatusActive {
+	// 注销冷静期里的人也回 404（票 #73）：这个端点回答"我与 TA 的关系"，
+	// 而 TA 已经对外不存在了 —— 回一份"关系还在"的数据等于确认了这个人存在。
+	if peer.Status != store.StatusActive || peer.DeletionRequestedAt != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在", "code": codeNotFound})
 		return
 	}
