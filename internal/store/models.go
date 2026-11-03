@@ -115,10 +115,24 @@ type User struct {
 	// 界面上不出现破图。显示层的这条纪律不在这里实现，但没有这一列就无从谈起。
 	//
 	// 指针而非空串：与 Email / BannedReason 同一口径，"没有"只有一种表示。
-	AvatarURL  *string   `gorm:"column:avatar_url"`
-	CreatedAt  time.Time `gorm:"column:created_at"`
-	UpdatedAt  time.Time `gorm:"column:updated_at"`
-	LastSeenAt time.Time `gorm:"column:last_seen_at"`
+	AvatarURL *string `gorm:"column:avatar_url"`
+	// AvatarChangesOn / AvatarChangeCount 是头像变更的**每日频控**（票 #75）。
+	//
+	// 两列一起表示"avatar_changes_on 那一天里已经改了 avatar_change_count 次"：
+	// AvatarChangesOn 与今天不等就代表新的一天，计数从 1 重新开始 ——
+	// 所以跨日不需要任何定时任务，也没有"零点任务没跑"这种失败模式。
+	//
+	// AvatarChangesOn 可空 = 从未改过（NULL 与任何日期都不相等，
+	// 第一次写入自然走"重置为新的一天"那支）。Count 非空默认 0：
+	// "今天已经用掉几次"没有"未知"状态，NOT NULL 让比较少一层分诊。
+	//
+	// 语义细节（为什么必须单条 UPDATE、为什么 dateOnly 用 UTC）见
+	// internal/store/avatar_quota.go 的文件头。
+	AvatarChangesOn   *time.Time `gorm:"column:avatar_changes_on"`
+	AvatarChangeCount int        `gorm:"column:avatar_change_count"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at"`
+	LastSeenAt        time.Time  `gorm:"column:last_seen_at"`
 }
 
 // TableName 固定表名：GORM 默认会把 RoomMeta 复数化成 room_metas，

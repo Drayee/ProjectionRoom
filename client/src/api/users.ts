@@ -4,6 +4,7 @@
  * 形状：
  *   getPublicProfile(userId)  → PublicProfile   （他人视角，免登录）
  *   updateDisplayName(name)   → MyProfile       （本人视角，必须登录）
+ *   updateAvatarUrl(url|null) → MyProfile       （票 #75；null = 清除）
  *
  * 两条刻意的取舍：
  *
@@ -27,6 +28,13 @@ import * as real from './real/users'
 type UsersApi = {
   getPublicProfile(userId: number): Promise<import('../types/users').PublicProfile>
   updateDisplayName(displayName: string): Promise<import('../types/users').MyProfile>
+  /**
+   * 票 #75：换/清像素头像。
+   *
+   * `url = null` 是**清除**（回落到字母头），与 `PATCH /api/me` 的三态同口径
+   * （键缺席 = 不动 / null = 清除 / 有值 = 设置）。返回值是权威档案。
+   */
+  updateAvatarUrl(avatarUrl: string | null): Promise<import('../types/users').MyProfile>
   /** 票 #68：他人档案的两块内容（免登录，分页语义与帖子列表一致）。 */
   listAuthorPosts(
     userId: number,
@@ -42,6 +50,7 @@ const impl: UsersApi = isMock('users') ? mock : real
 
 export const getPublicProfile = impl.getPublicProfile
 export const updateDisplayName = impl.updateDisplayName
+export const updateAvatarUrl = impl.updateAvatarUrl
 export const listAuthorPosts = impl.listAuthorPosts
 export const listAuthorRooms = impl.listAuthorRooms
 

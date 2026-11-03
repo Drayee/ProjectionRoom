@@ -47,6 +47,21 @@ type fakeStore struct {
 
 	// revokeAllCalls 用于断言"重放触发全会话撤销"。
 	revokeAllCalls int
+
+	// avatarQuota 是 #75 每日频控的内存版：userID → (当天日期, 已用次数)。
+	//
+	// 刻意用 map 而不是塞回 store.User：真实现把这两列放在 users 上，
+	// 但假实现只需要回答"扣得对不对"，不必复制列的位置。
+	avatarQuota map[int64]*fakeQuotaRow
+
+	// avatarQuotaErr 注入"扣额度时的意外错误"（用于断言它不会被误译成 429）。
+	avatarQuotaErr error
+}
+
+// fakeQuotaRow 是 fakeStore 里的一行频控状态。
+type fakeQuotaRow struct {
+	day   time.Time
+	count int
 }
 
 func newFakeStore() *fakeStore {
@@ -256,6 +271,55 @@ func (f *fakeStore) UpdateAvatarURL(_ context.Context, id int64, avatarURL *stri
 	}
 	u.AvatarURL = avatarURL
 	return nil
+}
+
+// ConsumeAvatarChange 是 #75 加的（每日频控）。
+//
+// 语义与真 store 逐条对齐，因为**跨日口径**是本票的验收判据之一：
+//   - 日期截到 UTC 日（同 store.dateOnly）；
+//   - 换了一天 → 计数从 1 重新开始（不需要任何清理）；
+//   - 同一天且已满 → store.ErrAvatarQuotaExceeded；
+//   - 用户不存在 → store.ErrNotFound（与"额度用满"必须分得开）。
+func (f *fakeStore) ConsumeAvatarChange(_ context.Context, userID int64, today time.Time, limit int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.avatarQuotaErr != nil {
+		return f.avatarQuotaErr
+	}
+	if _, ok := f.users[userID]; !ok {
+		return store.ErrNotFound
+	}
+	day := fakeDateOnly(today)
+	if f.avatarQuota == nil {
+		f.avatarQuota = map[int64]*fakeQuotaRow{}
+	}
+	row, ok := f.avatarQuota[userID]
+	if !ok || !row.day.Equal(day) {
+		f.avatarQuota[userID] = &fakeQuotaRow{day: day, count: 1}
+		return nil
+	}
+	if limit > 0 && row.count >= limit {
+		return store.ErrAvatarQuotaExceeded
+	}
+	row.count++
+	return nil
+}
+
+// fakeDateOnly 与 store.dateOnly 同口径（UTC 日截断）。
+func fakeDateOnly(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// avatarQuotaCount 读回假实现里记录的次数（测试断言用）。
+func (f *fakeStore) avatarQuotaCount(userID int64) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row, ok := f.avatarQuota[userID]
+	if !ok {
+		return 0
+	}
+	return row.count
 }
 
 func (f *fakeStore) BumpTokenVersion(_ context.Context, id int64) (int, error) {

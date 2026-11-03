@@ -201,7 +201,7 @@ Terms locked by [账号设置：并入档案还是保持独立流](https://githu
 ### Not doing
 
 - 改用户名（公开且被搜索引用）；注销立即硬删选项。
-- ~~头像上传（地图 Out of scope）~~ —— **已落地**（票 #74 覆盖层、票 #75 裁剪器），见上节「Real avatar」。
+- ~~头像上传（地图 Out of scope）~~ —— **已落地且全部验收**：票 #74 覆盖层（`verify-avatar-overlay.mjs` 15 条）、票 #75 裁剪与额度（`verify-avatar-crop.mjs` C 组 11 条 + S 组 14 条）。见上节「Real avatar」与 `docs/ACCOUNTS.md` §7.9 / §7.10。
 
 
 ## Following feed（关注流）
@@ -238,12 +238,12 @@ Terms locked by [真头像上传：存储、审核与字母头兜底](https://gi
 | Term | 中文 | Definition |
 | --- | --- | --- |
 | **Avatar overlay** | 覆盖层 | `avatarUrl` 是 UserAvatar 的可选覆盖：空 / onerror（该会话内不重试）/ 被管理端重置 —— 三态全回落 `avatarOf()` 字母头。字母头永存。 |
-| **Browser crop** | 浏览器裁剪 | canvas 裁方形 512px、≤1 MiB、JPEG/WebP（GIF 保留动图）。服务端零图像依赖、不重编码；非方图由 `object-fit` 兜（与 uploads 现安全论证同族）。 |
-| **Moderation four-pack** | 审核四件套 | 人机验证子窗体 + **每人日 5 次**变更频控（记在 PATCH /api/me）+ 管理端 `reset_avatar`（删对象+置空+审计）+ 人工处置。无内容识别、无第三方。 |
+| **Browser crop** | 浏览器裁剪 | 票 #75 落地：canvas 裁方形 **512×512**、≤1 MiB、JPEG/WebP（GIF 保留第一帧）。取景数学在 `utils/avatarCrop.ts`（纯函数，**画布与导出共用同一组输入**，否则"看到的和传上去的不一样"），压不下就报错而不是硬传。服务端零图像依赖、不重编码；非方图由 `object-fit` 兜（与 uploads 现安全论证同族）。 |
+| **Moderation four-pack** | 审核四件套 | 人机验证子窗体（裁剪确认之后、上传之前）+ **每人日 5 次**变更频控（记在 PATCH /api/me 这一层，幂等重复与清除**不扣**）+ 管理端 `reset_avatar`（**先置空→再异步删对象**，删失败只记日志：处置的目的是"没人看得见"，不是"桶里没有"）+ 人工处置。无内容识别、无第三方。 |
 | **URL-as-version** | URL 即版本 | 每次上传新随机 key，PATCH 替换 `users.avatar_url`；长缓存安全；旧对象异步延迟删除（不在请求路径，I4 同族）。 |
 | **Single entry** | 唯一入口 | 改头像只在 `/me?tab=settings`。头像位不加编辑态——#44 定「头像=导航」，避免进主页/改图二义。 |
-| **Zero new endpoint** | 零新端点 | 复用 `POST /api/uploads` 拿 URL + 扩 `PATCH /api/me {avatarUrl}`（校验属本桶 key 形态，**外链注入 400**；null=清除）。 |
+| **Zero new endpoint** | 零新端点 | 复用 `POST /api/uploads` 拿 URL + 扩 `PATCH /api/me {avatarUrl}`（校验属本桶 key 形态，**外链注入 400**；null=清除）。票 #75 也**没有**为频控新开端点：额度就挂在同一个 PATCH 上，超限 **429 `RATE_LIMITED`**（不是 403 —— "今天用完了"不是"没权限"）。 |
 
 ### Doc debt
 
-~~`docs/ACCOUNTS.md` 的非目标「头像/图片上传」一句随实现票改写（决策已翻转）。~~ 已在票 #74 改完（§7.9 / §7.10）。
+~~`docs/ACCOUNTS.md` 的非目标「头像/图片上传」一句随实现票改写（决策已翻转）。~~ 已在票 #74 / #75 改完（§7.9 覆盖层、§7.10 裁剪与额度）。

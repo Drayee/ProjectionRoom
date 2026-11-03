@@ -32,6 +32,14 @@ export interface AdminUser {
   status: string
   createdAt: string
   lastSeenAt: string
+  /**
+   * 像素头像地址（票 #74 起 `service.Profile` 就带着它）。
+   *
+   * **可选**：`*string` + omitempty，没设头像时这个键不存在。管理端用它回答
+   * 「这个人有没有头像」—— 没有的时候「重置头像」按下去只会写一条 `unchanged`
+   * 审计（服务端幂等），界面上该提前说明，而不是让人按一个明知无效的按钮。
+   */
+  avatarUrl?: string
 }
 
 export interface AdminUserPage {
@@ -42,17 +50,23 @@ export interface AdminUserPage {
 }
 
 /**
- * 管理端改用户：role / status 至少一个；reason 只进审计明细。
+ * 管理端改用户：role / status / email / resetAvatar 至少一个；reason 只进审计明细。
  *
  * 本轮新增 `email`：服务端在写库时会把该邮箱标记为**已验证**（管理员代改 = 已验证）。
  * 它单独走 `patchUserEmail`（不与 role/status 混在一次请求里），因为它的语义不同：
  * 改角色/封禁是**权限与状态**变更，改邮箱是**身份标识**变更，两者的确认文案与错误
  * 处理都不一样，混在一起只会让"这次到底改了什么"变得不清晰。
+ *
+ * 票 #75 新增 `resetAvatar`：**布尔**而不是 `avatarUrl: string|null`。
+ * 管理员不该有能力把任意 URL 塞进别人的头像列（服务端 `OwnsURL` 只认本桶，
+ * 但"能不能传"与"该不该有这条入口"是两件事）；reset 的语义是"下架这张图，
+ * 回落到字母头"，它是单向的，一个布尔就够。
  */
 export interface AdminUserPatch {
   role?: string
   status?: string
   email?: string
+  resetAvatar?: boolean
   reason?: string
 }
 
@@ -161,6 +175,9 @@ function normalizeUser(raw: unknown): AdminUser {
   if (typeof u.emailVerified === 'boolean') {
     normalized.emailVerified = u.emailVerified
   }
+  if (typeof u.avatarUrl === 'string' && u.avatarUrl !== '') {
+    normalized.avatarUrl = u.avatarUrl
+  }
   return normalized
 }
 
@@ -255,6 +272,28 @@ export async function patchUserEmail(
   await requestJSON<Record<string, unknown>>(authedFetch, `/api/admin/users/${userId}`, {
     method: 'PATCH',
     body: { email } satisfies AdminUserPatch,
+    redirectOnAuthFailure: false,
+  })
+}
+
+/**
+ * PATCH /api/admin/users/:id —— **重置头像**（危险操作，调用方必须二次确认）。
+ *
+ * 服务端的行为分两步：**先置空 `avatar_url`**（所有人立刻看到字母头）→ 再异步删掉
+ * 桶里那张对象。两步分开的理由是"删失败时也要保住用户看到字母头这个结果"，
+ * 所以这条请求成功就意味着"别人看不见那张图了"，与对象有没有删干净无关。
+ *
+ * 幂等：本来没头像时也会成功（写一条 `unchanged:true` 的审计），不会 404。
+ * 所以界面不必先判有没有头像才允许点 —— 但会把这件事说明白（见调用方）。
+ */
+export async function patchUserResetAvatar(
+  authedFetch: AuthedFetch,
+  userId: number,
+  reason: string,
+): Promise<void> {
+  await requestJSON<Record<string, unknown>>(authedFetch, `/api/admin/users/${userId}`, {
+    method: 'PATCH',
+    body: { resetAvatar: true, reason } satisfies AdminUserPatch,
     redirectOnAuthFailure: false,
   })
 }

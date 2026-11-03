@@ -98,6 +98,20 @@ func (s *fakeAdminStore) auditsOf(action string) []store.AdminAudit {
 	return out
 }
 
+// auditDetailContains 判"某个 action 的审计 Detail 里含这段子串"。
+//
+// 用于断言那些**不是**独立字段的信息：`unchanged:true`（区分"真处置了
+// 一张图"与"点了空"）、ban 的 reason 等。按 action 过滤而不是全表扫，
+// 因为同一次 patch 可能同时写了 ban 与 reset 两条。
+func (s *fakeAdminStore) auditDetailContains(action, want string) bool {
+	for _, a := range s.auditsOf(action) {
+		if strings.Contains(a.Detail, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // —— service.AccountStore ——
 
 // —— 注销冷静期（票 #73）：只动 deletion_requested_at 一列 ——
@@ -334,6 +348,37 @@ func (s *fakeAdminStore) UpdateAvatarURL(_ context.Context, id int64, avatarURL 
 	}
 	u.AvatarURL = avatarURL
 	return nil
+}
+
+// ConsumeAvatarChange 是 #75 加的（每日频控）。
+//
+// 与真 store 逐条对齐（UTC 日截断、跨日归零、满额报 ErrAvatarQuotaExceeded、
+// 用户不存在报 ErrNotFound），因为 handler 层要断言的正是"这几种错误
+// 各自被翻成哪个状态码"。口径不一致会让那条用例在假实现上绿、在真库上红。
+func (s *fakeAdminStore) ConsumeAvatarChange(_ context.Context, userID int64, today time.Time, limit int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.users[userID]; !ok {
+		return store.ErrNotFound
+	}
+	u := s.users[userID]
+	day := handlerDateOnly(today)
+	if u.AvatarChangesOn == nil || !handlerDateOnly(*u.AvatarChangesOn).Equal(day) {
+		u.AvatarChangesOn = &day
+		u.AvatarChangeCount = 1
+		return nil
+	}
+	if limit > 0 && u.AvatarChangeCount >= limit {
+		return store.ErrAvatarQuotaExceeded
+	}
+	u.AvatarChangeCount++
+	return nil
+}
+
+// handlerDateOnly 与 store.dateOnly 同口径（UTC 日截断）。
+func handlerDateOnly(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 func (s *fakeAdminStore) BumpTokenVersion(ctx context.Context, id int64) (int, error) {

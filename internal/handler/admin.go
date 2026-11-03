@@ -71,6 +71,14 @@ type AdminAccountWriter interface {
 	//（管理员本来就是可信主体，见 service.BindUserEmail 的说明）。
 	// email 传空串 = 解绑。
 	BindUserEmail(ctx context.Context, actorID, targetID int64, email, ip string) error
+	// ResetUserAvatar 把用户的头像清空、对象异步删、并写一条审计（票 #75）。
+	//
+	// 它是**违规处置**那条路：管理员看到一张不该出现的头像，一键让它回落到字母头。
+	// 刻意没有"改成管理员指定的某个 URL"的能力 —— 那不是处置，那是替用户换图，
+	// 而且会让管理员手里多出一条"往任意用户档案里塞任意图片"的权限。
+	//
+	// 幂等：本来就没有像素头像时仍然写一条 `unchanged=true` 的审计并返回 nil。
+	ResetUserAvatar(ctx context.Context, actorID, targetID int64, ip string) error
 }
 
 // AdminHub 是连接池里管理端要用的能力（*service.Hub 满足它）。
@@ -287,6 +295,16 @@ type adminUserPatch struct {
 	// JSON 的 `null` 与字段缺失都解析成 nil = 这次不改邮箱，与 Role/Status 同一套语义。
 	Email  *string `json:"email"`
 	Reason string  `json:"reason"`
+	// ResetAvatar 是**违规头像的一键处置**（票 #75）。
+	//
+	// 为什么是布尔而不是 `avatarUrl *string`：管理端不该有"把任意 URL 塞进
+	// 某个用户的档案"的能力 —— 那不是处置而是替用户换图，而且它是一条
+	// 往页面里注入任意图片来源的路径。重置只有"清空"这一个方向。
+	//
+	// 用 `*bool` 而不是 `bool`：与 Role/Status/Email 同一套三态语义
+	//（缺席 = 这次不处置）。虽然 `false` 与缺席在行为上等价，
+	// 但用指针能让"这次请求的目的是什么"在解码之后仍然可读。
+	ResetAvatar *bool `json:"resetAvatar"`
 }
 
 // listUsers 返回分页的用户列表（成功 200）。
@@ -329,13 +347,18 @@ func (h *adminHandler) listUsers(c *gin.Context) {
 	})
 }
 
-// patchUser 改角色 / 封禁解禁（成功 200，返回改动后的档案）。
+// patchUser 改角色 / 封禁解禁 / 绑邮箱 / 重置头像（成功 200，返回改动后的档案）。
 //
 // 顺序是有意的：
 //
-//	先改角色（若指定）→ 再改状态（若指定）→ 最后回读返回。
+//	先重置头像（若指定）→ 再绑邮箱（若指定）→ 再改角色 → 再改状态 → 最后回读返回。
 //
-// 每一步都是**独立的写操作**，各自写自己的审计行（user.role / user.ban / user.unban），
+// 头像最前：它是"违规处置"（票 #75），越早生效越好，且没有可填错的参数；
+// 邮箱第二：它的失败原因（格式、被占用）是唯一需要管理员改参数的，
+// 先失败能省掉"改了角色、然后邮箱报错"这种半成功。
+//
+// 每一步都是**独立的写操作**，各自写自己的审计行
+// （user.avatar.reset / user.email_bind / user.role / user.ban / user.unban），
 // 因此一次性传 role+status 会得到两行审计 —— 那正是"改了两件事"的如实记录。
 //
 // 封禁的**两件事**都在这里发生：service.BanUser（status=banned + token_version+1，
@@ -357,8 +380,8 @@ func (h *adminHandler) patchUser(c *gin.Context) {
 		adminBadRequest(c, "请求体不是合法 JSON")
 		return
 	}
-	if req.Role == nil && req.Status == nil && req.Email == nil {
-		adminBadRequest(c, "至少要指定 role、status 或 email 之一")
+	if req.Role == nil && req.Status == nil && req.Email == nil && req.ResetAvatar == nil {
+		adminBadRequest(c, "至少要指定 role、status、email 或 resetAvatar 之一")
 		return
 	}
 
@@ -380,6 +403,18 @@ func (h *adminHandler) patchUser(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	ip := c.ClientIP()
+
+	// 头像重置**排最前**（票 #75）：它是这四件事里唯一"越早生效越好"的 ——
+	// 管理员正在看一张不该出现在页面上的图，处置应当先落地；而且它不需要
+	// 任何参数校验（没有可填错的字段），不存在"先跑它反而多失败几次"的问题。
+	//
+	// `false` 与缺席同义（这次不处置），所以只有 true 才动手。
+	if req.ResetAvatar != nil && *req.ResetAvatar {
+		if err := h.deps.Accounts.ResetUserAvatar(ctx, actor.ID, targetID, ip); err != nil {
+			h.writeWriteError(c, err)
+			return
+		}
+	}
 
 	// 邮箱绑定**排在角色/状态之前**：它的失败原因（格式不对、邮箱被别的账号占了）
 	// 是唯一需要用户去改参数的，先失败能省掉"改了角色、然后邮箱报错"这种半成功。

@@ -229,7 +229,13 @@ func accountErrorResponse(err error) (status int, code string, message string) {
 	// 为什么不让 handler 直接 import store —— handler 只认识 service 与 service/auth
 	// 两个下层（见 router.go 的 import 面），为了一个哨兵错误把持久化包拉进 HTTP 层，
 	// 会让"handler 依赖了什么"变得难以一眼看完。别名保持了判断能力，没有扩大依赖面。
-	case errors.Is(err, service.StoreNotFound):
+	//
+	// 为什么还要接上 service.ErrUserNotFound（票 #75 补）：服务层的管理端用例
+	// （ResetUserAvatar / SetRole / BanUser 一族）在目标不存在时统一报
+	// ErrUserNotFound —— 那是 service 自己的哨兵，不是 store 的。两者文案相同、
+	// 状态码相同，但少了这一支就会落到 default 变成 500：管理员删了个已被删的
+	// 账号，界面上显示"服务端内部错误"，把"对象没了"误报成"服务挂了"。
+	case errors.Is(err, service.StoreNotFound), errors.Is(err, service.ErrUserNotFound):
 		return http.StatusNotFound, model.CodeBadRequest, "账号不存在"
 
 	default:

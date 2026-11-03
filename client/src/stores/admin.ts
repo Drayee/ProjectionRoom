@@ -309,6 +309,26 @@ export const useAdminStore = defineStore('admin', () => {
     })
   }
 
+  /**
+   * 重置某人的头像（票 #75，**危险操作**）。
+   *
+   * 语义是单向的"下架这张图，回落到字母头"：服务端先置空（所有人立刻看到字母头）
+   * 再异步删桶里那张对象。所以成功提示说的是"别人看不到那张图了"，
+   * 而不是"对象已删除"——后者我们无从确认（失败只进日志）。
+   *
+   * 幂等：本来没头像时也成功（写一条 `unchanged:true` 的审计）。提示里把这件事
+   * 说出来，否则管理员会以为自己点错了。
+   */
+  async function resetUserAvatar(user: AdminUser, reason: string): Promise<boolean> {
+    return mutate(`user:${user.id}:avatar`, async () => {
+      await api.patchUserResetAvatar(auth.authedFetch, user.id, reason)
+      await loadUsers(users.value.offset)
+      // 点之前就没有头像：如实说"本来就没有"，让审计仍有一条可查。
+      if (!user.avatarUrl) return `${user.username} 本来就没有头像，已记录一次重置操作`
+      return `已重置 ${user.username} 的头像，现在显示字母头像`
+    })
+  }
+
   /** 强制关闭房间（房内连接会被服务端断开）。 */
   async function closeRoom(room: AdminRoom): Promise<boolean> {
     return mutate(`room:${room.roomId}:close`, async () => {
@@ -377,6 +397,7 @@ export const useAdminStore = defineStore('admin', () => {
     setUserStatus,
     setUserRole,
     setUserEmail,
+    resetUserAvatar,
     closeRoom,
     unpublishRoom,
     hasNext,

@@ -153,6 +153,15 @@ export async function updateDisplayName(displayName: string): Promise<MyProfile>
 }
 
 /**
+ * 换/清像素头像（票 #75）。`null` = 清除。
+ *
+ * 实现刻意放在 `api/avatar.ts` 里：那条链还有上传（multipart）与能力探针，
+ * 三者是同一件事的三个步骤，分到两个文件只会让"上传完该打哪个 PATCH"变成
+ * 一次跨文件搜索。这里只做门面转发。
+ */
+export { applyAvatarUrl as updateAvatarUrl } from '../avatar'
+
+/**
  * 服务端 `GET /api/users/:id/posts` 的响应（票 #68 的 `authorPostList`）。
  *
  * `items` 里的每一条与 `GET /api/posts` 的单条**逐字同形**（服务端复用了

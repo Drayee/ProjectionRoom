@@ -141,6 +141,47 @@ export async function updateDisplayName(displayName: string): Promise<MyProfile>
 }
 
 /**
+ * `PATCH /api/me {avatarUrl}` 的 mock（票 #75）：设置或清除像素头像。
+ *
+ * 与真实实现对齐的三件事：
+ *
+ *  1. `null` = 清除；不做"传空串也当清除"的宽容 —— 服务端把空串归一成 nil 是
+ *     **那一层**的防御，前端门面只表达两种意图（设 / 清）。
+ *  2. 被封禁的账号回 403（与改昵称同口径）。
+ *  3. 返回权威档案，不猜。
+ *
+ * 刻意**不校验 URL 形态**：真实侧由 `storage.OwnsURL` 判"是不是本桶的合法对象地址"，
+ * mock 侧没有桶，编一份规则只会让 mock 通过、翻真被拒。mock 只模拟"写成功"。
+ */
+export async function updateAvatarUrl(avatarUrl: string | null): Promise<MyProfile> {
+  const store = useAuthStore()
+  const me = store.profile
+  if (!me) throw http(401, 'AUTH_EXPIRED', '登录状态已失效，请重新登录后再试')
+  if (me.status !== 'active') throw http(403, 'FORBIDDEN', '当前账号不允许执行该操作')
+
+  const row = PEOPLE.find((p) => p.id === me.id)
+  const trimmed = avatarUrl === null ? '' : avatarUrl.trim()
+  const next = trimmed === '' ? undefined : trimmed
+  if (row) {
+    if (next === undefined) delete row.avatarUrl
+    else row.avatarUrl = next
+  }
+
+  const updated: MyProfile = {
+    id: me.id,
+    username: me.username,
+    displayName: me.displayName,
+    email: me.email,
+    emailVerified: me.emailVerified === true,
+    role: me.role,
+    status: me.status,
+    createdAt: me.createdAt,
+  }
+  if (next !== undefined) updated.avatarUrl = next
+  return updated
+}
+
+/**
  * 档案内容块的每页条数：与帖子列表、服务端默认值三处一致（20）。
  */
 const AUTHOR_PAGE_SIZE = 20

@@ -29,9 +29,9 @@ const searchDraft = ref('')
 
 /** 正在确认的危险动作（null = 没有确认条）。 */
 const pending = ref<null | {
-  kind: 'ban' | 'unban' | 'role' | 'email'
+  kind: 'ban' | 'unban' | 'role' | 'email' | 'avatar'
   user: AdminUser
-  /** 目标值：role 用 'admin'/'user'；email 用新邮箱；封禁/解封不用。 */
+  /** 目标值：role 用 'admin'/'user'；email 用新邮箱；封禁/解封/重置头像不用。 */
   value: string
   /** 封禁原因（只对 ban 有意义；服务端只把它写进审计明细）。 */
   reason: string
@@ -97,6 +97,18 @@ function askEmail(user: AdminUser) {
   pending.value = { kind: 'email', user, value: '', reason: '' }
 }
 
+/**
+ * 重置某人的头像（票 #75）。
+ *
+ * 只开确认条、不先判有没有头像：服务端是幂等的（本来没有也会成功并写一条
+ * `unchanged:true` 的审计），而"管理端能不能按"与"这个人有没有头像"是两件事。
+ * 确认条里会说明这一点。
+ */
+function askResetAvatar(user: AdminUser) {
+  confirmError.value = ''
+  pending.value = { kind: 'avatar', user, value: '', reason: '' }
+}
+
 function cancelPending() {
   pending.value = null
   confirmError.value = ''
@@ -125,6 +137,12 @@ async function confirmPending() {
   }
   if (p.kind === 'role') {
     const ok = await store.setUserRole(p.user, p.value, '')
+    if (ok) pending.value = null
+    return
+  }
+  if (p.kind === 'avatar') {
+    // 重置头像没有可填错的参数：失败只可能是权限/网络，`mutate` 已把文案落地。
+    const ok = await store.resetUserAvatar(p.user, '')
     if (ok) pending.value = null
     return
   }
@@ -220,6 +238,7 @@ function statusText(status: string): string {
             <template v-if="pending.kind === 'ban'">确认封禁</template>
             <template v-else-if="pending.kind === 'unban'">确认解封</template>
             <template v-else-if="pending.kind === 'role'">确认调整角色</template>
+            <template v-else-if="pending.kind === 'avatar'">确认重置头像</template>
             <template v-else>确认修改邮箱</template>
           </h2>
           <p class="confirm-text">
@@ -231,6 +250,10 @@ function statusText(status: string): string {
             </template>
             <template v-else-if="pending.kind === 'role'">
               将 <strong>{{ pending.user.username }}</strong> 的角色从「{{ roleText(pending.user.role) }}」改为「{{ roleText(pending.value) }}」。
+            </template>
+            <template v-else-if="pending.kind === 'avatar'">
+              将清除 <strong>{{ pending.user.username }}</strong> 的头像，所有人立刻看到字母头像；桶里那张图随后会被删除。
+              <template v-if="!pending.user.avatarUrl">（这个人目前没有头像，这次操作只会留一条审计记录。）</template>
             </template>
             <template v-else>
               将 <strong>{{ pending.user.username }}</strong> 的邮箱改为下面的值，并同时标记为已验证（管理员代改视为已验证）。
@@ -318,6 +341,17 @@ function statusText(status: string): string {
                       封禁
                     </button>
                     <button type="button" :disabled="store.busyKey !== ''" @click="askEmail(u)">改邮箱</button>
+                    <!-- 重置头像：没有头像时按钮仍可用（服务端幂等，只写一条审计），
+                         但用 dim 标出来，让人先看清"这次只是留痕"。 -->
+                    <button
+                      type="button"
+                      :class="{ dim: !u.avatarUrl }"
+                      :disabled="store.busyKey !== ''"
+                      data-testid="admin-reset-avatar"
+                      @click="askResetAvatar(u)"
+                    >
+                      重置头像
+                    </button>
                   </td>
                 </tr>
               </tbody>
@@ -349,6 +383,15 @@ function statusText(status: string): string {
                 <button v-if="u.status === 'banned'" type="button" :disabled="store.busyKey !== ''" @click="askUnban(u)">解封</button>
                 <button v-else type="button" class="danger" :disabled="store.busyKey !== ''" @click="askBan(u)">封禁</button>
                 <button type="button" :disabled="store.busyKey !== ''" @click="askEmail(u)">改邮箱</button>
+                <button
+                  type="button"
+                  :class="{ dim: !u.avatarUrl }"
+                  :disabled="store.busyKey !== ''"
+                  data-testid="admin-reset-avatar"
+                  @click="askResetAvatar(u)"
+                >
+                  重置头像
+                </button>
               </div>
             </li>
           </ul>

@@ -252,6 +252,14 @@ type AccountStore interface {
 	// 与 UpdateDisplayName 并列：同样是"改我自己的一列"，同样不做内容清洗
 	//（URL 形态校验需要桶名，那是 storage 的事实，见 AvatarBackend）。
 	UpdateAvatarURL(ctx context.Context, id int64, avatarURL *string) error
+	// ConsumeAvatarChange 扣一次今天的头像变更额度（票 #75）。
+	//
+	// 它是一条**原子** UPDATE（判断在上限在 WHERE 里，见 store.ConsumeAvatarChange）：
+	// 拆成"读计数 + 写回"两次往返会让并发穿过窗口超额。返回
+	// store.ErrAvatarQuotaExceeded = 今天已满，store.ErrNotFound = 没有这个用户。
+	//
+	// `today` 由调用方给（不用 SQL 的 CURRENT_DATE）：跨日口径要能测。
+	ConsumeAvatarChange(ctx context.Context, userID int64, today time.Time, limit int) error
 	// SetPasswordHash 直接换口令哈希（OTP 改密路径用；链接令牌那条走
 	// ConsumePasswordReset，它在同一个事务里连撤销会话一起做）。
 	SetPasswordHash(ctx context.Context, id int64, hash string) error
@@ -378,6 +386,13 @@ type AccountService struct {
 	// 而不是把任意外链写进库（决议 #54 §8 明确否决了外链直填）。
 	avatar AvatarBackend
 
+	// avatarDailyLimit 是每人每日的头像变更上限（票 #75）；<= 0 = 不限额。
+	//
+	// 上限而不是"开关"：0 的语义是"这个实例先不限"，它与"忘了配"在日志里
+	// 长得不一样（后者会让默认值 5 永远不生效 —— 所以装配层显式传值，
+	// 见 bootstrap/auth.go）。计数的落点与口径见 store.ConsumeAvatarChange。
+	avatarDailyLimit int
+
 	// hashing 是并发口令哈希闸门（容量见 DefaultHashingConcurrency）。
 	hashing chan struct{}
 
@@ -428,6 +443,13 @@ type AccountOptions struct {
 	// 新 URL 必须属于本桶）在 service 里，把这些规则的一半留在 handler 会让
 	// "管理端重置"（票 #75）与"本人换头像"两条路各写一份。
 	Avatar AvatarBackend
+
+	// AvatarDailyLimit 是每人每日的头像变更上限（票 #75）；**0 = 用默认 5**。
+	//
+	// 与其它"<= 0 报错"的选项不同，0 在这里是"没配，用默认"而不是错误：
+	// 限额是一个可以放心取默认值的策略数字（TTL 写错会静默改变行为，
+	// 而 5 次/天写错最多是"这个实例宽松了一点"）。要真的不限，传负数。
+	AvatarDailyLimit int
 
 	// DeletionGrace 是注销冷静期长度（票 #73）；<= 0 报错。
 	//
@@ -488,6 +510,12 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 		now = time.Now
 	}
 
+	// 头像每日限额：0 = 用默认；负数 = 明确不限。
+	dailyLimit := opts.AvatarDailyLimit
+	if dailyLimit == 0 {
+		dailyLimit = DefaultAvatarChangesPerDay
+	}
+
 	return &AccountService{
 		store:  st,
 		signer: signer,
@@ -495,16 +523,17 @@ func NewAccountService(st AccountStore, signer *auth.Signer, tickets *auth.Ticke
 		mail:   opts.Mail,
 		// avatar 是对象存储的窄出口（票 #74）。nil = 未配置，此时改头像
 		// 返回 ErrAvatarUnavailable（→ 503），而不是静默写一个死链进库。
-		avatar:         opts.Avatar,
-		bcryptCost:     cost,
-		refreshTTL:     opts.RefreshTTL,
-		emailVerifyTTL: opts.EmailVerifyTTL,
-		otpTTL:         opts.OTPTTL,
-		otpDevEcho:     opts.OTPDevEcho,
-		deletionGrace:  opts.DeletionGrace,
-		publicBaseURL:  strings.TrimRight(strings.TrimSpace(opts.PublicBaseURL), "/"),
-		hashing:        make(chan struct{}, conc),
-		now:            now,
+		avatar:           opts.Avatar,
+		avatarDailyLimit: dailyLimit,
+		bcryptCost:       cost,
+		refreshTTL:       opts.RefreshTTL,
+		emailVerifyTTL:   opts.EmailVerifyTTL,
+		otpTTL:           opts.OTPTTL,
+		otpDevEcho:       opts.OTPDevEcho,
+		deletionGrace:    opts.DeletionGrace,
+		publicBaseURL:    strings.TrimRight(strings.TrimSpace(opts.PublicBaseURL), "/"),
+		hashing:          make(chan struct{}, conc),
+		now:              now,
 	}, nil
 }
 

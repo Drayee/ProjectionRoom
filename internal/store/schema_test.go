@@ -50,6 +50,13 @@ func TestSchemaMatchesAccountsSpec(t *testing.T) {
 			// 可空是语义的一部分 —— NULL = 从未设置 / 被管理员重置 / 注销后置空，
 			// 三种情况显示层都回落字母头（决议 #54 §4）。
 			"avatar_url": {"character varying", 512, true},
+			// 0020（决议 #54 §3 / 票 #75）：头像变更的每日频控。两列一起表示
+			// "avatar_changes_on 那天里已经改了 avatar_change_count 次"。
+			// 日期可空 = 从未改过（NULL 与任何日期都不相等，第一次写入自然
+			// 走"重置为新的一天"那支）；计数 NOT NULL DEFAULT 0，因为
+			// "今天已经用掉几次"没有"未知"这种状态。
+			"avatar_changes_on":   {"date", 0, true},
+			"avatar_change_count": {"integer", 0, false},
 		},
 		"sessions": {
 			"id":         {"bigint", 0, false},

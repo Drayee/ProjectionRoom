@@ -820,4 +820,41 @@ CHECK (target_type IN ('post', 'room', 'anime'))
 	{version: "0019_avatar_url", statements: []string{
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url varchar(512) NULL`,
 	}},
+
+	// 0020 是头像变更的**每日频控**（票 #75 / 决议 #54 §3 的审核四件套之一）。
+	//
+	// # 为什么记在 users 上而不是单开一张计数表
+	//
+	// 它天然是"每个用户一个值"：一天之内改了几次，下一次改动之前不需要任何历史。
+	// 单开一张 `avatar_change_log(user_id, at)` 要回答的"今天几次"是一个
+	// `WHERE user_id = ? AND at >= 今日零点` 的计数查询，而写路径又要先查后写，
+	// 两次往返之间还有一个可以被并发穿过的窗口。把"今天几次"和"今天是哪天"
+	// 压成一个可以直接条件更新的原子动作（见 store.ConsumeAvatarChange），
+	// 是这件事里最省的一块地方。
+	//
+	// 也不放内存令牌桶：重启即清零（用户只要等一次部署就能再改五次），
+	// 多实例部署时各算各的，与"每人每日"这个口径直接冲突。
+	//
+	// # 为什么是"日"这一列 + "次数"这一列，而不是一行日志
+	//
+	// 两个列一起构成一个"当前这一天的计数"：跨日不需要定时任务清理，
+	// 下次写入时发现 `avatar_changes_on` 不是今天，计数就从 1 重新开始。
+	// 代价是历史次数不保留 —— 但那是审计表 `admin_audit` 的职责，
+	// 频控只需要回答"今天还能不能改"。
+	//
+	// # 可空与默认值
+	//
+	// `avatar_changes_on` 可空 = 从未改过头像（NULL 与"今天"永远不相等，
+	// 所以第一次写入自然走"重置为新的一天"那一支）。
+	// `avatar_change_count` 非空默认 0：计数是"今天已经用掉几次"，
+	// 没有"未知"这种状态，NOT NULL 让 SUM/比较少一层分诊。
+	//
+	// # 为什么计数列带 DEFAULT 0 而不是可空
+	//
+	// 老行（迁移之前就存在的账号）在这一列上是 NULL 的话，每次读都要写
+	// `COALESCE(count, 0)`；而 0 就是它们的正确语义（今天还没改过）。
+	{version: "0020_avatar_change_quota", statements: []string{
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_changes_on date NULL`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_change_count integer NOT NULL DEFAULT 0`,
+	}},
 }

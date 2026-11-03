@@ -97,6 +97,14 @@ func (a *AccountStoreAdapter) UpdateAvatarURL(ctx context.Context, id int64, ava
 	return a.store.UpdateAvatarURL(ctx, id, avatarURL)
 }
 
+// ConsumeAvatarChange 转发每日频控的原子扣减（票 #75）。
+//
+// 不在这里做任何判断：限额是策略（由 service 决定），日期口径在 store 里
+// （dateOnly 用 UTC，理由见 store/avatar_quota.go）。
+func (a *AccountStoreAdapter) ConsumeAvatarChange(ctx context.Context, userID int64, today time.Time, limit int) error {
+	return a.store.ConsumeAvatarChange(ctx, userID, today, limit)
+}
+
 func (a *AccountStoreAdapter) SetPasswordHash(ctx context.Context, id int64, hash string) error {
 	return a.store.SetPasswordHash(ctx, id, hash)
 }

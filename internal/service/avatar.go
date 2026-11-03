@@ -73,6 +73,13 @@ type AvatarBackend interface {
 // 管理端重置（票 #75）需要先置空（让所有人立刻看到字母头）再删对象，
 // 两步分开才能在"删失败"时仍然保住"用户看到字母头"这个结果。
 // 所以清除路径不动桶 —— 对象由调用方（或票 #75 的重置）负责删。
+//
+// # 每日频控挂在这里（票 #75）
+//
+// 决议 #54 §8 定的「零新端点」把额度判据落在 `PATCH /api/me`：上传接口保持通用
+// （它也服务帖子配图），"把这张图设成我的头像"才是要限的动作。所以扣额度发生在
+// 本函数的写库之前，而不是 uploads 那条路上 —— 详见 avatar_reset.go 文件头的
+// 「为什么频控记在 PATCH 面」与「为什么额度在写库之前扣」两节。
 func (s *AccountService) UpdateMyAvatarURL(ctx context.Context, userID int64, avatarURL *string) (Profile, error) {
 	if userID <= 0 {
 		return Profile{}, ErrUserNotFound
@@ -110,6 +117,19 @@ func (s *AccountService) UpdateMyAvatarURL(ctx context.Context, userID int64, av
 	//（删了就把刚设的那张图删了）。
 	if sameOptionalString(u.AvatarURL, next) {
 		return ProfileOf(u), nil
+	}
+
+	// 频控（票 #75）：**只在"真的要变"的时候扣**，且必须在写库之前。
+	//
+	// 两个细节都是刻意的：
+	//   - 幂等短路在上面 —— 原样再设一次不算改头像，不该吃掉额度
+	//     （前端重挂、网络重试都会产生这种请求）；
+	//   - 清除（next == nil）不扣 —— 回落到字母头是降低风险的方向，
+	//     给它设计数等于让违规图的紧急下架也要等到明天（见 avatar_reset.go 文件头）。
+	if next != nil {
+		if err := s.consumeAvatarChange(ctx, userID); err != nil {
+			return Profile{}, err
+		}
 	}
 
 	if err := s.store.UpdateAvatarURL(ctx, userID, next); err != nil {

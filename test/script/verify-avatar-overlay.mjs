@@ -363,9 +363,14 @@ async function main() {
     // 它同时出现在模板与样式里，是"这一层由谁渲染"最直接的指纹。
     // 不能用 `avatarUrl` 当判据 —— 覆盖层组件的 prop 叫 `url`，`avatarUrl`
     // 是调用方传进来的字段名，两者本来就不在同一个文件里。
+    //
+    // ⚠️ 必须用 `avatar-pic(?!k)`，不能裸找 `avatar-pic`：
+    // 裁剪器的按钮 testid 是 `avatar-pick`（选图），它是 `avatar-pic` + `k`。
+    // 裸子串匹配会把 `AvatarCropDialog.vue` 也算成"第二份覆盖层"—— 一条假红。
+    const OVERLAY_CLASS = /avatar-pic(?!k)/
     const sources = walkSources()
     const overlayOwners = sources
-      .filter(({ full }) => stripComments(readFileSync(full, 'utf8')).includes('avatar-pic'))
+      .filter(({ full }) => OVERLAY_CLASS.test(stripComments(readFileSync(full, 'utf8'))))
       .map(({ rel }) => rel)
     evidence.overlayOwners = overlayOwners
     record(

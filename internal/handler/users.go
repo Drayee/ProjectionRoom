@@ -269,9 +269,9 @@ func (h *userProfileHandler) patchMe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": p})
 }
 
-// writeProfileError 把本域的两个领域错误翻成 HTTP 状态。
+// writeProfileError 把本域的领域错误翻成 HTTP 状态。
 //
-// 三条映射各自的理由：
+// 六条映射各自的理由：
 //
 //   - ErrUserNotFound → 404 + NOT_FOUND：**不存在与被封禁共用它**（见
 //     service.ErrUserNotFound 的说明）。文案只说"用户不存在"，不暗示"也可能被封了"。
@@ -280,6 +280,9 @@ func (h *userProfileHandler) patchMe(c *gin.Context) {
 //     前端要给的下一步完全不同（一个是"回到列表"，一个是"去问管理员"）。
 //   - ErrBadDisplayName → 400 + DISPLAY_NAME_INVALID：昵称清洗后为空或超长。
 //     文案用 service 的那一句（它带着"不超过 N 个字符"的具体数字）。
+//   - ErrAvatarURLInvalid → 400 + AVATAR_URL_INVALID（票 #74）。
+//   - ErrAvatarUnavailable → 503 + AUTH_UNAVAILABLE（票 #74，部署侧缺能力）。
+//   - ErrAvatarQuotaExceeded → 429 + RATE_LIMITED（票 #75，每日五次用满）。
 //
 // 其余错误落到 writeAccountError：它已经处理了 ErrSessionInvalid / ErrUserBanned /
 // 口令策略 / 默认 500 这一整套，重复一遍只会让两边漂移。
@@ -298,6 +301,15 @@ func (h *userProfileHandler) writeProfileError(c *gin.Context, err error) {
 		//（PR_STORAGE_ENDPOINT 为空 → /api/uploads 也不注册）。前端据此显示
 		// CapabilityNotice，而不是让用户反复重试一个永远失败的动作。
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error(), "code": CodeAuthUnavailable})
+	case errors.Is(err, service.ErrAvatarQuotaExceeded):
+		// 429 而不是 403（票 #75）：它不是"你没权限"，而是"今天用完了"。
+		// 状态码的区别对前端是有意义的 —— 403 不该重试，429 明天可以再来，
+		// 而且 429 是唯一一个能自然承载"稍后重试"语义的码。
+		//
+		// 用 model.CodeRateLimited（而不是新造一个 AVATAR_QUOTA_EXCEEDED）：
+		// 前端已经有一处 429 的分诊（发码冷却），让它多认一个码没有收益，
+		// 而文案里带了具体次数与"明天"，用户看到的信息是完整的。
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error(), "code": model.CodeRateLimited})
 	default:
 		writeAccountError(c, err)
 	}

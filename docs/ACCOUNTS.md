@@ -70,6 +70,8 @@ users
   banned_reason text NULL
   deletion_requested_at timestamptz NULL         -- 票 #73：非空 = 在注销冷静期里（可空无默认值）
   avatar_url    varchar(512) NULL                 -- 票 #74：像素头像的**覆盖层**地址，NULL = 只用字母头
+  avatar_changes_on    date NULL                  -- 票 #75：上一次改头像的**日期**（UTC 截日），NULL = 从没改过
+  avatar_change_count  int NOT NULL DEFAULT 0     -- 票 #75：那一天改了几次（每日上限 5，见 §7.10）
   created_at / updated_at / last_seen_at
 
 sessions                                  -- refresh token（不透明随机串，库里只存 sha256）
@@ -574,6 +576,100 @@ multipart 之前返回 400（不碰存储、不写任何东西）。
 **验收**：`test/script/verify-avatar-overlay.mjs`（15 条，**不需要后端**，
 mock 域 + 自起静态服务器即可：空态 / 有值态 / onerror 回落 / 会话内不重试 /
 切分区再回来 / 本人视角 / 四处源码级）。裁剪器与频控、人机验证、管理端重置见 §7.10。
+
+### 7.10 头像裁剪、每日额度与管理端重置（票 #75；决议 #54 §2/§3）
+
+§7.9 说的是"地址怎么落地"，这一节说的是"那张图是谁裁的、能改几次、违规了怎么下架"。
+
+**裁剪在浏览器里做，服务端不碰像素。** `client/src/utils/avatarCrop.ts` 是纯函数
+（无 DOM，Node 原生类型擦除就能测）：`coverScale` 算"短边铺满"的比例（**cover 不是
+contain** —— contain 会留白边），`drawnSize` 是画布上图片的实际尺寸，`clampOffset`
+把取景位移夹回"图片必须盖满裁剪框"，`cropRect` 算出要画哪一块**源像素**，
+`pickAcceptableBlob` 在若干档压缩结果里挑第一个 ≤1 MiB 的。`AvatarCropDialog.vue`
+的画布预览与导出**共用同一组输入** —— 两处各算一遍取景，迟早会漂成"看到的和传上去的
+不一样"。导出固定 **512×512**、JPEG 或 WebP（`toDataURL('image/webp')` 探一次
+WebP 支持，不支持退回 JPEG）；JPEG 无 alpha，导出前先铺白底，否则透明区会变黑。
+按 `QUALITY_STEPS` 逐档压，压到最低质量仍超标就报「压到最低质量仍有 X MiB」——
+**不硬传超限文件**，那只会让用户等到一个 413。
+
+单测 `client/test/avatar-crop.test.mjs`（14 条）里最值钱的是那 **81 组
+zoom×offset**：断言裁剪框永远落在源图内。这个性质靠读代码看不出来，但越界一像素
+就是"导出的图右侧有一条透明带"。
+
+**频控落在 `users` 上**（迁移 `0020_avatar_change_quota`），每人每日 **5 次**：
+
+| 列 | 语义 |
+| :--- | :--- |
+| `avatar_changes_on date NULL` | 上一次变更的**日期**，NULL = 从没改过 |
+| `avatar_change_count integer NOT NULL DEFAULT 0` | 那一天已经改了几次 |
+
+为什么不单开计数表：单开就要"先查后写"两次往返，中间有并发窗口。为什么不放内存
+令牌桶：重启清零、多实例各算各的。日期 + 计数两列还顺手省掉了定时任务 ——
+下次写入发现日期不是今天就归零。**代价是按 UTC 截日**，也就是北京时间 08:00 才重置；
+这是刻意选的（部署时区不该改变产品口径），改它要先改 `store.dateOnly`。
+
+判并扣是**一条 UPDATE**：
+
+```sql
+UPDATE users
+   SET avatar_changes_on = ?,
+       avatar_change_count = CASE WHEN avatar_changes_on IS DISTINCT FROM ? THEN 1
+                                  ELSE avatar_change_count + 1 END
+ WHERE id = ?
+   AND (avatar_changes_on IS DISTINCT FROM ? OR avatar_change_count < ?)
+```
+
+`IS DISTINCT FROM` 不能换成 `<>`：NULL 上 `<>` 求值为 NULL，条件恒假 ⇒ **新账号
+第一次改头像就 429**。这条有个专门的哨兵（`...FirstEverIsNotBlocked`）。
+
+**口径四条**：
+
+| 情形 | 扣不扣 | 为什么 |
+| :--- | :--- | :--- |
+| 同一个 URL 再设一次 | **不扣** | 幂等短路在扣额度之前，用户刷新/双击不该吃额度 |
+| `{"avatarUrl": null}` 清除 | **不扣** | 回落到字母头是**降风险**方向，与"撤销注销不要密码"同一条判断 |
+| 跨日 | 计数自动归零 | 见上（UTC 截日） |
+| 写库失败 | 已经扣了 | 反过来会"两边都成功、两边都去扣"；白吃一次额度的代价小于超额 |
+
+超限回 **429 `RATE_LIMITED`**（不是 403）："今天用完了"不是"没权限"，而且 429
+天然承载"稍后重试"。文案里带次数与「明天再试」，前端不需要再解释一遍。
+
+**人机验证是链路上的第二道门**：裁剪确认之后、上传之前弹 `CaptchaDialog`
+（与注册/找回密码同一个组件，**题面与校验都在前端**，定位是摩擦不是安全边界）。
+这一步的存在理由不是防机器刷 —— 每日 5 次已经压住了量 —— 而是让"换头像"这件事
+不至于像改个昵称那样一键完成。
+
+**管理端重置**：`PATCH /api/admin/users/:id {resetAvatar: true}`。收**布尔**不收
+`avatarUrl` —— 管理员不该能把任意地址塞进别人的头像列。实现是**先置空、再异步删对象**：
+
+```
+UpdateAvatarURL(target, nil)      ← 置空。这一步让"所有人立刻看到字母头"成立
+  ↓ AsyncJobSink.SubmitJob
+Storage.Remove(旧 URL)            ← 删失败只记日志，不回滚
+```
+
+两步分开的意义就在"删失败"那一支：桶里那张图还在，但没人看得见它了。
+**刻意不前置判"有没有配对象存储"** —— 部署没开存储时，管理员恰恰更需要能下架
+违规头像（那时图在别处，置空仍然是唯一的处置手段）。本来没头像也回 200，
+审计里记 `unchanged: true`（幂等，重复点不会写两条不同的审计）。
+
+**前端入口**只在 `/me?tab=settings` 的 `MeAvatarBlock.vue`，链路是
+「更换头像 → 裁剪 → 人机验证 → 上传 → PATCH」。两次往返之间**不留半状态**：
+上传成功而 PATCH 失败时提示「图片已经传上去了，但没能保存到账号」并给「重试保存」，
+**重试不会再传一遍**（`pendingUrl` 记着那个地址）。取消人机验证不报错，只说
+「已取消，头像没有改动」。
+
+**验收**：`test/script/verify-avatar-crop.mjs`。C 组 11 条判裁剪器本身（mock 域即可，
+**不需要后端**），S 组 14 条打真后端（`--server`）：外链 400、只改昵称不动头像、
+同地址重复不扣额度、累计 5 次后第 6 次 429、额度满后清除仍 200、旁人可见、
+管理端重置后立刻回落、重置幂等；`--server-no-storage` 再判未配存储的 404/503。
+
+⚠ 三个踩过的坑：① **C 组那台静态服务器不能开反代** —— 假 token 一打真
+`/api/auth/me` 就 401，前端按约定清会话，设置区根本不渲染头像块，C 组会以
+"与裁剪器无关的原因"红掉；② **mock 态 `/api/uploads` 要回 400 不是 404** ——
+`probeAvatarUpload()` 的判据是状态码，404 会被读成"没开存储"、按钮不渲染；
+③ S4b 的计数**起点是 1**（前面 S1b 已经成功改过一次、真花掉一个额度），
+按"本段成功几次"算会漏掉前置消耗。
 
 ## 8. 管理端
 
