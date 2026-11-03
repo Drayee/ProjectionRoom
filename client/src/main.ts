@@ -9,9 +9,20 @@ import { useRoutePageMeta } from './composables/useRoutePageMeta'
 import { installRouteTransitionGuard } from './composables/useRouteTransition'
 import { installSharedElementMorph } from './composables/useSharedElement'
 import { installRouteLoadWatch } from './utils/routeLoadState'
+import { installChunkReloadGuard } from './utils/chunkReload'
 import './styles/tokens.css'
 import './styles/base.css'
 import './styles/transition.css'
+
+/**
+ * chunk 加载失败的**单次**自动刷新（见 `utils/chunkReload.ts`）。
+ *
+ * 必须在**任何懒加载路由被触发之前**装上 —— 首屏那次导航在 `app.use(router)`
+ * 里就发生了，所以这里放在最前面。它解决的是"部署了新版、用户还开着旧标签页"：
+ * 旧 index.html 引用的 chunk 名已被新构建删掉，点任何分区都是 404，
+ * 而用户只需要一次刷新就能好。
+ */
+installChunkReloadGuard()
 
 const app = createApp(App)
 app.use(createPinia())

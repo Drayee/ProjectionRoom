@@ -171,7 +171,7 @@ curl -o out.zip http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>/result
 | :--- | :--- |
 | `PR_DB_DSN` | PostgreSQL 连接串（启动期触发幂等迁移）。缺 → 拒绝启动 |
 | `PR_JWT_SECRET` | access token 的 HS256 密钥，**≥32 字节**（`openssl rand -hex 32`）。缺或过短 → 拒绝启动 |
-| `PR_PUBLIC_BASE_URL` | 邮件链接的对外基地址。**没有默认值** —— 给默认值会让「漏配」静默指向另一个环境 |
+| `PR_PUBLIC_BASE_URL` | 邮件链接的对外基地址。**没有默认值** —— 给默认值会让「漏配」静默指向另一个环境。**它的 host 必须在 `PR_ALLOWED_ORIGINS` 里**（见下），否则拒绝启动 |
 | `PR_SMTP_HOST` / `_USER` / `_PASS` | 注册与改密码都靠邮箱验证码。本机没有 SMTP 时用 `PR_OTP_DEV_ECHO=1` 代替 |
 | `PR_OTP_DEV_ECHO` | **仅本机开发**：`1` 时验证码明文回显在响应里。与已配 SMTP 同时开启会**拒绝启动** |
 
@@ -180,7 +180,7 @@ curl -o out.zip http://127.0.0.1:8888/api/v1/segment/jobs/<jobId>/result
 | 变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
 | `PR_ADDR` | `127.0.0.1:8888` | 监听地址 |
-| `PR_ALLOWED_ORIGINS` | 含 `127.0.0.1:5173`、`localhost:5173`、`127.0.0.1:8888`、`localhost:8888` | 允许连 `/ws` 的来源，**唯一判据**（同源不再隐式放行 —— DNS rebinding 曾据此绕过）。**换端口 / 上域名必须跟着改**，否则「页面能开、`/ws` 一律 403」 |
+| `PR_ALLOWED_ORIGINS` | 含 `127.0.0.1:5173`、`localhost:5173`、`127.0.0.1:8888`、`localhost:8888` | 允许连 `/ws` 的来源，**唯一判据**（同源不再隐式放行 —— DNS rebinding 曾据此绕过）。**换端口 / 上域名必须跟着改**，否则「页面能开、`/ws` 一律 403」。**必须包含 `PR_PUBLIC_BASE_URL` 的 host**，否则启动期就被拒（这条闸是 2026-11-02 换域名漏配事故的沉淀） |
 | `PR_SERVE_STATIC` / `PR_STATIC_DIR` | `true` / `client/dist` | 是否托管前端产物（单端口部署的总开关） |
 | `PR_MAX_MEMBERS` | `16` | 房间成员硬上限（真实上限由实测上行算出的 `1+K0` 决定） |
 | `PR_DEFAULT_STREAM_BPS` | `2000000` | 尚未拿到 mediaIndex 时的码率估计 |

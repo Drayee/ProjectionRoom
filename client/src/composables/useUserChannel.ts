@@ -86,8 +86,10 @@ export function useUserChannel(): void {
         notices.push(text, friendsPath({ tab: 'followers' }))
       },
       onState(state) {
-        // 只有封禁需要停止重连（通道自己已经处理），这里不需要额外动作。
-        // 保留这个回调是为了让"通道状态"在将来能显示成界面上的实时徽标。
+        // 通道自己已经处理了三种"停止重连"（封禁 / 凭据失效挂起 / 正常关闭），
+        // 这里不需要额外动作。保留这个回调是为了让"通道状态"将来能显示成
+        // 界面上的实时徽标（那时 `suspended` 与 `banned` 要用不同的文案：
+        // 前者是"重新登录后会自动恢复"，后者是"账号已被封禁"）。
         void state
       },
     })

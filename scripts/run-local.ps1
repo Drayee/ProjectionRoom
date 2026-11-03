@@ -1,4 +1,4 @@
-﻿# 用本机非 docker 的 PostgreSQL 18 启动月喵后端。
+# 用本机非 docker 的 PostgreSQL 18 启动月喵后端。
 #
 # 为什么不直接 `go run ./cmd`：服务端只认**进程环境变量**（仓库里没有 .env 加载器，
 # go.mod 里没有 godotenv），所以 .env.local 必须由谁来读并塞进环境。这个脚本就是那个入口。
@@ -68,6 +68,38 @@ if (-not $smtpReady -and -not $devEcho) { $missing += 'SMTP 三件套 或 PR_OTP
 # 预检只校验**指定的那一份**——切到 dist-real 做验收时不该被 dist 缺不缺失影响。
 $staticDir = if ($StaticDir) { $StaticDir } else { 'client/dist' }
 if (-not (Test-Path (Join-Path $root "$staticDir/index.html"))) { $missing += "$staticDir（先构建那一份产物）" }
+
+# 对外基地址的 host 必须在 Origin 白名单里：页面能开、/ws 与 /ws/user 全 403 的根因
+# 就是这一项漏配（2026-11-02 线上事故）。服务端 requireComplete 也会拦，
+# 这里提前说一遍，免得"编译完才报错"。
+#
+# 两种形态都认（与 internal/handler 的 checkOrigin 同一套判据）：
+#   - 白名单写 `http://host[:port]` → 与 GetLeftPart(Authority) 比；
+#   - 白名单写裸 `host[:port]`      → 与 Uri.Authority 比（默认端口会被省略）。
+if ($env:PR_PUBLIC_BASE_URL) {
+    $baseUri = $null
+    try { $baseUri = [Uri]$env:PR_PUBLIC_BASE_URL } catch { }
+    if ($baseUri) {
+        $schemeOrigin = $baseUri.GetLeftPart([UriPartial]::Authority)   # http://127.0.0.1:8888
+        $bareOrigin = $baseUri.Authority                                # 127.0.0.1:8888
+        $allowed = @()
+        if ($env:PR_ALLOWED_ORIGINS) {
+            $allowed = $env:PR_ALLOWED_ORIGINS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        }
+        if ($allowed.Count -eq 0) {
+            # 未设置时用服务端默认值（只覆盖本机 5173 / 8888 两个入口）。
+            $allowed = @('127.0.0.1:5173', 'localhost:5173', '127.0.0.1:8888', 'localhost:8888')
+        }
+        $hit = $false
+        foreach ($pattern in $allowed) {
+            $candidate = if ($pattern -match '://') { $schemeOrigin } else { $bareOrigin }
+            if ($pattern -ieq $candidate) { $hit = $true; break }
+        }
+        if (-not $hit) {
+            $missing += "PR_ALLOWED_ORIGINS（把 $schemeOrigin 加进去，否则页面能开但 /ws 与 /ws/user 全 403）"
+        }
+    }
+}
 
 if ($missing.Count -gt 0) {
     Write-Host ''

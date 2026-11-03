@@ -25,6 +25,9 @@ func completeEnv(t *testing.T) {
 	t.Setenv(envDBDSN, "host=127.0.0.1 port=5432 user=u dbname=d sslmode=disable")
 	t.Setenv(envJWTSecret, testJWTSecret)
 	t.Setenv(envPublicBaseURL, "https://pr.example.com")
+	// 白名单必须覆盖基地址的 host：requireComplete 现在会校验这一条
+	//（漏了它就是"页面能开、/ws 与 /ws/user 一律 403"的那个线上故障）。
+	t.Setenv(envAllowedOrigins, "https://pr.example.com")
 	t.Setenv(envSMTPHost, "smtp.example.com")
 	t.Setenv(envSMTPUser, "bot@example.com")
 	t.Setenv(envSMTPPass, "secret")

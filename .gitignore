@@ -74,3 +74,5 @@ _migrate/dump/mapped.sql
 /_runs.json
 /_logs.zip
 /.tmp-test-dsn.txt
+# Go 构建缓存：沙箱里 GOCACHE 默认位置不可写时会被显式指到仓库内
+/.gocache/

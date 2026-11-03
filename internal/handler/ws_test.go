@@ -153,11 +153,14 @@ func newTestServerWithGrace(t *testing.T, grace time.Duration) (*httptest.Server
 //
 // 这里给的是"能过闸的最小组合"：假 DSN（不连库）、固定密钥、占位基地址、
 // dev echo 顶替 SMTP（本机没有发信通道）、关闭静态托管（测试不托管页面）。
+// 白名单也要点出基地址的 host —— requireComplete 会校验这一条
+// （漏配的后果就是线上那次"页面能开、/ws 一律 403"）。
 func loadCompleteConfig(t *testing.T) *config.Config {
 	t.Helper()
 	t.Setenv("PR_DB_DSN", "host=127.0.0.1 dbname=fixture sslmode=disable")
 	t.Setenv("PR_JWT_SECRET", handlerTestSecret)
 	t.Setenv("PR_PUBLIC_BASE_URL", "https://pr.test")
+	t.Setenv("PR_ALLOWED_ORIGINS", "https://pr.test")
 	t.Setenv("PR_OTP_DEV_ECHO", "1")
 	t.Setenv("PR_SERVE_STATIC", "false")
 
@@ -181,6 +184,7 @@ func newTestServerFromEnv(t *testing.T) (*httptest.Server, *config.Config) {
 	t.Setenv("PR_DB_DSN", "host=127.0.0.1 dbname=fixture sslmode=disable")
 	t.Setenv("PR_JWT_SECRET", handlerTestSecret)
 	t.Setenv("PR_PUBLIC_BASE_URL", "https://pr.test")
+	t.Setenv("PR_ALLOWED_ORIGINS", "https://pr.test")
 	t.Setenv("PR_OTP_DEV_ECHO", "1")
 	t.Setenv("PR_SERVE_STATIC", "false")
 

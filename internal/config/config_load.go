@@ -778,6 +778,19 @@ func requireComplete(cfg *Config) error {
 	if strings.TrimSpace(ac.PublicBaseURL) == "" {
 		missing = append(missing,
 			"PR_PUBLIC_BASE_URL 为空（拼不出邮件里的验证链接）")
+	} else if origin, ok := publicBaseURLAllowed(ac.PublicBaseURL, cfg.Signal.AllowedOrigins); !ok {
+		// 对外基地址的 host 也是浏览器发 Origin 时的 host（页面就从那儿打开），
+		// 所以它不在白名单里等价于"这个实例的页面连不上自己的 /ws"。
+		//
+		// 2026-11-02 线上实证（加这道闸的直接原因）：新域名上线后忘了同步
+		// PR_ALLOWED_ORIGINS，页面一切正常，但 `/ws` 与 `/ws/user` 全部 403 ——
+		// 观众进不了房、实时通道无限重连，控制台里只有一行 handshake 403，
+		// 与真实原因（一个环境变量少写一项）之间隔着整条 nginx + 白名单链路。
+		missing = append(missing, fmt.Sprintf(
+			"PR_ALLOWED_ORIGINS 里没有 PR_PUBLIC_BASE_URL 的 host（%s）："+
+				"页面能打开，但 /ws 与 /ws/user 会一律 403（观众进不了房、实时通道无限重连）。"+
+				"把 %q 补进 PR_ALLOWED_ORIGINS（换域名后必须同步这一项）",
+			origin, origin))
 	}
 	// 邮件通道：除非显式声明"本机开发、验证码回显"。
 	if !ac.MailEnabled() && !ac.OTPDevEcho {
